@@ -187,3 +187,14 @@ harness now keeps a supervisor session alive until terminal attributes, cursor
 and screen restoration are checked. The Linux suite passes, and a deliberately
 broken raw-mode program is still rejected. macOS confirmation is required by the
 subsequent release CI run; these checks have not been waived.
+
+
+A minimal Python `tty.setraw`/`tcsetattr` round trip on the macOS runner reproduced
+the remaining exact-attribute failure without running the player: only PENDIN
+changed (0x20000000). Apple XNU sets this pending-input state when restoring ICANON
+([kernel source](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/tty.c)).
+The harness normalizes only Darwin PENDIN and still compares all other flags,
+speeds and control characters. Mutation checks for ICANON/ECHO/ISIG/IEXTEN and a
+real program deliberately leaving raw mode enabled are rejected. The temporary
+diagnostic workflow was removed after confirming the cause; the full macOS suite
+remains mandatory for publication.

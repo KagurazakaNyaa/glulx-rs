@@ -198,3 +198,6 @@ python3 tools/check-song-ui.py --candidate target/debug/glulx-rs --output /tmp/s
 
 
 首次原生发布 CI 中，各平台 Rust 测试、Clippy、release 构建及 `--help` 启动检查通过。macOS 暴露了 PTY 验收脚本问题：会话首进程退出会撤销 slave，退出后 `tcgetattr` 返回 ENOTTY。脚本现用监督进程保留会话，直到完成终端属性、光标和屏幕恢复检查；Linux 套件通过，故意不恢复 raw mode 的程序仍被正确拒绝。macOS 修复确认继续由后续发布 CI 强制执行，没有跳过这些检查。
+
+
+macOS runner 上的最小 Python `tty.setraw`/`tcsetattr` 往返在不运行播放器时也复现了剩余的属性精确比较失败：仅 PENDIN（0x20000000）改变。Apple XNU 在恢复 ICANON 时会设置该待处理输入状态位（[内核源码](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/tty.c)）。脚本仅归一化 Darwin 的 PENDIN，其他标志、速率和控制字符仍严格比较；ICANON/ECHO/ISIG/IEXTEN 变异及故意未恢复 raw mode 的真实程序均被拒绝。确认原因后删除临时诊断 workflow，完整 macOS 终端套件继续作为发布必需门槛。

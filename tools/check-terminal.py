@@ -34,6 +34,16 @@ reference = module("reference", "check-reference.py")
 keys_fixture = module("keys_fixture", "make-input-fixture.py")
 
 
+def terminal_configuration(attributes, platform=sys.platform):
+    configuration = list(attributes)
+    if platform == "darwin":
+        # XNU sets PENDIN when ICANON is restored; this is pending-input state,
+        # not a configuration error. Preserve strict checks of every other bit,
+        # control character and speed. See apple-oss-distributions/xnu bsd/kern/tty.c.
+        configuration[3] &= ~termios.PENDIN
+    return configuration
+
+
 class Screen:
     """Read the cursor/clear commands emitted by this TUI; keep the visible screen."""
     def __init__(self, rows=30, columns=90):
@@ -153,7 +163,7 @@ sys.exit(code)
         assert self.poll_returncode() == expected, (self.poll_returncode(), self.screen.text())
         self.pump(.05)
         restored = termios.tcgetattr(self.slave)
-        assert restored == self.original, (
+        assert terminal_configuration(restored) == terminal_configuration(self.original), (
             f"TTY attributes were not restored: original={self.original!r}, restored={restored!r}, "
             f"lflag_delta={self.original[3] ^ restored[3]:#x}, PENDIN={getattr(termios, 'PENDIN', 0):#x}"
         )
