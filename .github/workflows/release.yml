@@ -135,6 +135,9 @@ jobs:
         run: cargo clippy --locked --all-targets --target "$BUILD_TARGET" -- -D warnings
       - name: Build release binary
         run: cargo build --locked --release --target "$BUILD_TARGET"
+      - name: Verify embedded Windows application icons
+        if: runner.os == 'Windows'
+        run: python tools/check-windows-icon.py "target/$BUILD_TARGET/release/glulx-rs.exe"
       - name: Smoke test the native release executable
         # Run the same binary that is packaged, exercising main and platform console setup.
         run: |

@@ -39,3 +39,6 @@ windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
 lto = "thin"
 codegen-units = 1
 strip = true
+
+[build-dependencies]
+winresource = "0.1"

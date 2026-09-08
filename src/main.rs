@@ -83,6 +83,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Glulx Player")
+            .with_icon(eframe::icon_data::from_png_bytes(include_bytes!(
+                "../assets/icon.png"
+            ))?)
             .with_inner_size([1100.0, 760.0])
             .with_min_inner_size([720.0, 480.0])
             .with_drag_and_drop(true),
