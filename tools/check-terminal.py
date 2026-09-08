@@ -152,7 +152,11 @@ sys.exit(code)
             self.pump()
         assert self.poll_returncode() == expected, (self.poll_returncode(), self.screen.text())
         self.pump(.05)
-        assert termios.tcgetattr(self.slave) == self.original, "TTY attributes were not restored"
+        restored = termios.tcgetattr(self.slave)
+        assert restored == self.original, (
+            f"TTY attributes were not restored: original={self.original!r}, restored={restored!r}, "
+            f"lflag_delta={self.original[3] ^ restored[3]:#x}, PENDIN={getattr(termios, 'PENDIN', 0):#x}"
+        )
         assert b"\x1b[?1049l" in self.raw, "Alternate screen was not restored"
         assert b"\x1b[?25h" in self.raw, "Cursor was not restored"
         os.write(self.ack_writer, b"1")
