@@ -1,48 +1,42 @@
 # Compatibility
 
-For the dated source audit, public specification links, and actionable tasks,
-see the [Glulx specification checklist](glulx-spec-checklist.md). It distinguishes
-implementation coverage from full conformance testing and includes the implementation progress at its recorded commit and audit time.
+The implemented target is Glulx 3.1.3 with Glk 0.7.6. See the
+[specification checklist](glulx-spec-checklist.md) and [validation record](glulx-validation.md)
+for coverage and reproducible evidence. This is not a claim of exhaustive conformance.
 
 ## Implemented
 
-- Raw Glulx executables and Blorb containers containing a `GLUL` chunk.
-- Glulx 2.x and 3.0/3.1 header validation, checksum validation, and memory map.
-- ROM write protection, RAM reset, resize, byte/short/word access, and overlap-safe copy.
-- Variable-length opcodes and all standard load/store address modes.
-- C0/C1 function frames, calls, tail calls, returns, locals, and value stack operations.
-- Integer arithmetic, bit operations, branches, array loads/stores, all three search opcodes, random values, and basic floating-point operations.
-- Null, filter, and Glk output systems; byte, Unicode, and Huffman-compressed strings, including embedded function calls.
-- Minimal Glk window, stream, line input, character input, select, and Unicode output calls; style calls currently include no-op placeholders.
-- Single-level `saveundo`/`restoreundo`, plus `hasundo`/`discardundo`.
-- Heap allocation/deallocation and heap state handling across undo/restart (commit `31bb75c`).
-- Memory-stream output, separate text-grid output, Blorb picture resources, and basic graphics-window rendering.
-- GUI open/restart/stop, drag-and-drop, scrollback, appearance settings, status display, and asynchronous translation.
+- Validated raw Glulx and indexed Blorb executables, images, sound/data resources, iFiction metadata and cover art.
+- Standard integer, addressing, call, search, string, single/double precision and heap instructions.
+- IFZS persistent saves interoperating with Glulxe, restart/protect and multiple undo states.
+- Acceleration setup instructions; unsupported optimization functions are ignored as specified.
+- Pair window trees, text buffers/grids, graphics windows, file/memory/resource streams and Unicode operations.
+- Multiple input requests, event queues, timers, mouse, hyperlinks, line terminators and echo control.
+- Text styles, date/time APIs and audio channels with repeat, pause, fades and notifications.
+- Desktop file prompts, open/restart/stop, scrollback, settings, translation and automatic session restoration.
 
-## Missing Or Incomplete
+## Limits
 
-- Quetzal save/restore and autosave.
-- Acceleration setup opcodes and Inform acceleration functions.
-- Double-precision floating-point opcodes.
-- Full Glk object dispatch, multiple window layout, hyperlinks, timers, mouse events, file references, and streams.
-- Sound/music, cover art, and iFiction metadata.
-- Full text-grid and graphics-window layout/behavior conformance; basic rendering already exists.
+VM memory is limited to 256 MiB. Undo retains at most 16 snapshots within a
+64 MiB combined budget; older snapshots are evicted and an oversized save fails.
+Portable IFZS excludes Glk, RNG, I/O system and string-table state as required;
+the separate versioned desktop session includes host state and bundled story data.
+Desktop sessions are local player snapshots, not an interchange format.
 
-Stories that execute unsupported VM opcodes stop with an explicit compatibility
-error. Unsupported or partial Glk calls can instead return zero or omit behavior,
-so successful startup does not establish full playability. The next useful
-milestone is persistent save/restore with Glk file support and completion of the
-Glk object/event model; optional capabilities should follow target-story needs.
+Concrete Inform acceleration functions, MOD tracker music and inline images in
+text buffers are unsupported. Graphics-window image drawing includes the Glk
+0.7.6 scaled extension. Text-buffer style hints 3–9 are supported; paragraph
+hints 0–2 and grid style hints are ignored. Fonts and glyph availability depend
+on egui and installed/configured fonts. Sound decoding uses rodio/Symphonia;
+AIFF is exercised by Sensory Jam, while not every codec/encoding combination
+has a fixture. Exact simultaneous channel timing is not certified.
 
-The public `advent.ulx` from IF Archive is used as a smoke test. The current VM
-can start it, render the initial room, process several text commands, and quit
-cleanly. This is a narrow compatibility signal, not a claim that the whole game
-or modern Glulx stories are fully supported.
+The headless adapter exposes terminal text and file prompts and does not advertise
+GUI-only facilities. Without an audio output device the desktop disables sound
+capabilities. Gestalt queries account for their arguments and host availability.
+Unknown Glk selectors return zero and are recorded; unsupported VM instructions
+produce typed errors. A successfully started game is not necessarily fully playable.
 
-## Compatibility Policy
-
-The intended policy is to advertise only implemented gestalt capabilities;
-the checklist records remaining declaration and argument-handling audits. Unknown Glk
-selectors return zero and are recorded internally so probing code can continue.
-Unsupported VM opcodes and string types are fatal typed errors because silently
-continuing would corrupt execution state.
+Validation includes official Glulxercise, Unicode and resource-stream suites,
+Adventure save interoperability and Linux desktop smoke tests. Windows/macOS
+runtime behavior and complete game walkthroughs remain outside this validation.

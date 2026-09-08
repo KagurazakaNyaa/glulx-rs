@@ -1,6 +1,9 @@
 use crate::{Story, VmError};
 
-#[derive(Debug, Clone)]
+/// Per-VM allocation ceiling; failed growth is reported through setmemsize/malloc.
+pub const MAX_MEMORY_SIZE: u32 = 256 * 1024 * 1024;
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct Memory {
     bytes: Vec<u8>,
     initial: Vec<u8>,
@@ -10,6 +13,21 @@ pub struct Memory {
 }
 
 impl Memory {
+    pub(crate) fn validate_session(&self, story: &Story) -> Result<(), VmError> {
+        if self.ram_start != story.header.ram_start
+            || self.ext_start != story.header.ext_start
+            || self.original_end != story.header.end_mem
+            || self.initial != story.image
+            || self.bytes.len() < self.original_end as usize
+            || !self.bytes.len().is_multiple_of(256)
+            || self.bytes.get(..self.ram_start as usize)
+                != story.image.get(..self.ram_start as usize)
+        {
+            return Err(VmError::InvalidSave);
+        }
+        Ok(())
+    }
+
     pub fn new(story: &Story) -> Self {
         let mut bytes = story.image.clone();
         bytes.resize(story.header.end_mem as usize, 0);
@@ -86,7 +104,10 @@ impl Memory {
     }
 
     pub fn resize(&mut self, new_size: u32) -> Result<bool, VmError> {
-        if new_size < self.original_end || !new_size.is_multiple_of(0x100) {
+        if new_size < self.original_end
+            || new_size > MAX_MEMORY_SIZE
+            || !new_size.is_multiple_of(0x100)
+        {
             return Ok(false);
         }
         if new_size > self.len()
@@ -102,7 +123,7 @@ impl Memory {
     }
 
     pub fn restart(&mut self, protected: Option<(u32, u32)>) {
-        let protected_bytes = self.protected_bytes(protected);
+        let protected_bytes = self.protected_bytes(protected, self.original_end);
         self.bytes.resize(self.original_end as usize, 0);
         self.bytes[self.ram_start as usize..self.ext_start as usize]
             .copy_from_slice(&self.initial[self.ram_start as usize..self.ext_start as usize]);
@@ -111,7 +132,7 @@ impl Memory {
     }
 
     pub fn restore(&mut self, snapshot: &Self, protected: Option<(u32, u32)>) {
-        let protected_bytes = self.protected_bytes(protected);
+        let protected_bytes = self.protected_bytes(protected, snapshot.len());
         *self = snapshot.clone();
         self.restore_protected(protected_bytes);
     }
@@ -148,12 +169,21 @@ impl Memory {
             .ok_or(VmError::MemoryWrite(address))
     }
 
-    fn protected_bytes(&self, protected: Option<(u32, u32)>) -> Option<(u32, Vec<u8>)> {
+    fn protected_bytes(
+        &self,
+        protected: Option<(u32, u32)>,
+        target_end: u32,
+    ) -> Option<(u32, Vec<u8>)> {
         let (start, length) = protected?;
-        let requested_end = start.saturating_add(length);
-        let start = start.max(self.ram_start).min(self.len());
-        let end = requested_end.max(start).min(self.len());
-        Some((start, self.bytes[start as usize..end as usize].to_vec()))
+        let end = start.saturating_add(length).min(target_end);
+        let start = start.max(self.ram_start).min(end);
+        let mut bytes = vec![0; (end - start) as usize];
+        let source_end = end.min(self.len());
+        if start < source_end {
+            bytes[..(source_end - start) as usize]
+                .copy_from_slice(&self.bytes[start as usize..source_end as usize]);
+        }
+        Some((start, bytes))
     }
 
     fn restore_protected(&mut self, protected: Option<(u32, Vec<u8>)>) {
@@ -161,7 +191,9 @@ impl Memory {
             return;
         };
         let length = bytes.len().min(self.len().saturating_sub(start) as usize);
-        self.bytes[start as usize..start as usize + length].copy_from_slice(&bytes[..length]);
+        if length != 0 {
+            self.bytes[start as usize..start as usize + length].copy_from_slice(&bytes[..length]);
+        }
     }
 }
 

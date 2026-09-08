@@ -9,8 +9,8 @@ single main window, inspect scrollback, restart or stop the VM, and configure
 fonts and colors. [Gargoyle](https://github.com/garglk/garglk) is used as a
 reference for portable Glk behavior rather than for the visual design.
 
-This repository is an early executable milestone, not yet a drop-in replacement
-for Git or Glulxe. See [docs/compatibility.md](docs/compatibility.md) for the
+The player implements Glulx 3.1.3 and Glk 0.7.6 with explicitly bounded optional
+capabilities; it is not yet a drop-in replacement for every Git or Glulxe workflow. See [docs/compatibility.md](docs/compatibility.md) for the
 exact implemented surface.
 
 The specification-based [compatibility checklist](docs/glulx-spec-checklist.md)
@@ -37,6 +37,12 @@ adapter compiled into the same executable:
 cargo run --release -- --headless path/to/story.ulx
 ```
 
+Game-requested save/load prompts accept a path in the input bar. The desktop
+also saves its session every 30 seconds and on normal exit; launching without a
+story restores the previous session. `View -> Story information` shows available
+iFiction metadata and cover art. Portable game saves and desktop sessions are
+separate formats.
+
 ## Translation
 
 Turn translation is optional and disabled by default. Enable it from
@@ -54,10 +60,20 @@ settings and are never embedded in release artifacts.
 
 ## Build And Test
 
+Linux builds require ALSA development headers (`libasound2-dev` on Debian/Ubuntu),
+in addition to the usual graphical build dependencies.
+
 ```sh
 cargo test --all-targets
 cargo clippy --all-targets -- -D warnings
 cargo build --release
+```
+
+Optional reference validation (download fixtures separately; see
+[validation record](docs/glulx-validation.md)):
+
+```sh
+python3 tools/check-reference.py --reference /path/to/glulxe --candidate target/debug/glulx-rs --fixtures /path/to/fixtures
 ```
 
 The release profile uses LTO and strips symbols. Tagged GitHub releases build

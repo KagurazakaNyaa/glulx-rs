@@ -1,58 +1,46 @@
 # Architecture
 
-## Goals
+The interpreter is Rust, with no runtime dependency on a C interpreter. Eframe/egui
+provides the Windows, Linux and macOS GUI; the same binary also has a headless adapter.
 
-- Keep the VM implementation in Rust with no dependency on a C interpreter.
-- Match the familiar Windows Git player workflow.
-- Use one GUI implementation on Windows, Linux, and macOS.
-- Produce a single Windows executable.
-- Keep translation outside VM state and game semantics.
+## Modules
 
-## Module Shape
+`Story` validates the executable header and memory layout, parses Blorb resource
+indexes, and exposes metadata and cover resources. `Memory` enforces ROM protection,
+address checks and a bounded allocation policy.
 
-```text
-story file
-   |
-   v
-Story loader ---- Blorb extraction and Glulx header/checksum validation
-   |
-   v
-Vm -------------- memory, stack, decoder, instructions, minimal Glk dispatch
-   |  input request / text output
-   v
-PlayerApp -------- window, transcript, options, file browser, lifecycle
-   |
-   +-------------- asynchronous OpenAI-compatible translation adapter
-```
+`Vm` owns instruction decoding, execution, stacks and the Glk object model. Its
+bounded run interface keeps the GUI responsive. Unsupported instructions are typed
+errors carrying execution context. Host behavior is split into modules under
+`src/vm`: `windows`, `streams`, `events`, `presentation`, `unicode`, `datetime`,
+`sound`, `save` and `session`. The VM depends on neither egui nor HTTP; sound uses
+rodio, while presentation returns window rectangles, text runs and graphics commands.
 
-`Story` is a deep module around untrusted file parsing. Callers receive a
-validated executable image and typed header instead of handling offsets.
+`PlayerApp` executes short slices, renders each window, and supplies keyboard,
+mouse, hyperlink and file-selection results. Waiting states distinguish line,
+character, file and general events. The terminal adapter reads stdin on a worker
+so waiting for a line does not prevent timer delivery. Streams flush at stop/save.
 
-`Vm` is the principal module. Its interface is intentionally limited to
-construction, bounded execution, state inspection, text draining, input,
-restart, and stop. Execution budgets keep the single-threaded GUI responsive.
-Unsupported VM behavior is reported as a typed error with the program counter;
-it never falls through to undefined behavior or `unimplemented!()`.
+## Persistence
 
-`PlayerApp` is an adapter at the presentation seam. It advances the VM in short
-slices and converts `WaitingForLine`/`WaitingForChar` into controls. The VM has
-no dependency on egui or HTTP.
+`save` implements portable IFZS. It validates identity, memory, heap and stack
+continuations before replacing execution state. RNG, Glk, I/O system, the string
+table and protection definition remain independent of restore/undo/restart.
+Undo stores bounded execution snapshots, sharing the same state boundary.
 
-`Translator` is another adapter. Completed narrative text is copied at the
-input-wait boundary and sent to a worker thread. Translation cannot modify VM
-memory, input, transcript data, or save state. Request IDs preserve turn order,
-and the source string is the cache key.
+`session` validates a versioned desktop snapshot that also retains story resources,
+Glk objects, pending input and audio progress. The app adds graphics canvases and
+resumes timers/audio. Eframe storage saves every 30 seconds and on normal exit;
+startup without an explicit story attempts to resume it. This local snapshot is
+separate from game-requested, portable saves.
 
-## Reference Projects
+## Translation
 
-Windows Git establishes the player behavior: startup file selection, story
-extensions, restart/stop controls, scrollback, configurable text appearance,
-and a status bar. Git also provides a mature reference for instruction and
-Glk-dispatch behavior.
+`Translator` copies narrative text to an asynchronous worker at input waits.
+Translation cannot mutate execution, input or save state. Request IDs retain turn
+order; the source text is the cache key. Original output is always immediately
+available. Credentials are local settings, not release artifacts.
 
-Gargoyle establishes the portability expectations: Unicode text, separate
-platform adapters, asynchronous event handling, and broad Glk facilities. This
-project uses eframe/egui to put that platform variation behind one Rust GUI
-implementation.
-
-No source from either project is copied into this repository.
+Glulxe is used for output and save interoperability checks; Git and Gargoyle
+remain behavioral and portability references. No C interpreter source is compiled
+into the player.

@@ -9,7 +9,7 @@ const GLUL_MAGIC: u32 = 0x476c_756c;
 const FORM_MAGIC: &[u8; 4] = b"FORM";
 const IFRS_MAGIC: &[u8; 4] = b"IFRS";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StoryHeader {
     pub version: u32,
     pub ram_start: u32,
@@ -46,6 +46,9 @@ impl StoryHeader {
     fn validate(&self, bytes: &[u8]) -> Result<(), StoryError> {
         if !(0x0002_0000..=0x0003_01ff).contains(&self.version) {
             return Err(StoryError::UnsupportedVersion(self.version));
+        }
+        if self.end_mem > crate::memory::MAX_MEMORY_SIZE {
+            return Err(StoryError::MemoryLimit(self.end_mem));
         }
         if self.ram_start < 0x100
             || !self.ram_start.is_multiple_of(0x100)
@@ -95,13 +98,23 @@ impl StoryHeader {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
+pub struct Metadata {
+    pub title: String,
+    pub author: String,
+    pub headline: String,
+    pub description: String,
+    pub ifid: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct Story {
     pub path: Option<PathBuf>,
     pub title: String,
     pub header: StoryHeader,
     pub image: Vec<u8>,
     pub container: Option<Vec<u8>>,
+    #[serde(skip)]
     resources: HashMap<(u32, u32), (usize, usize)>,
 }
 
@@ -119,21 +132,89 @@ impl Story {
             (
                 extract_glul_chunk(bytes)?.to_vec(),
                 Some(bytes.to_vec()),
-                parse_resource_index(bytes),
+                parse_resource_index(bytes)?,
             )
         } else {
             (bytes.to_vec(), None, HashMap::new())
         };
         let header = StoryHeader::parse(&image)?;
         let image = image[..header.ext_start as usize].to_vec();
-        Ok(Self {
+        let mut story = Self {
             path: None,
             title: title.unwrap_or("Untitled Glulx story").to_owned(),
             header,
             image,
             container,
             resources,
-        })
+        };
+        let metadata = story.metadata();
+        if !metadata.title.is_empty() {
+            story.title = metadata.title;
+        }
+        Ok(story)
+    }
+
+    pub fn metadata(&self) -> Metadata {
+        let Some(data) = self.container_chunk(*b"IFmd") else {
+            return Metadata::default();
+        };
+        let Ok(xml) = std::str::from_utf8(data) else {
+            return Metadata::default();
+        };
+        let Ok(document) = roxmltree::Document::parse(xml) else {
+            return Metadata::default();
+        };
+        let text = |name| {
+            document
+                .descendants()
+                .find(|node| node.has_tag_name(name))
+                .map(|node| {
+                    node.descendants()
+                        .filter(|n| n.is_text())
+                        .filter_map(|n| n.text())
+                        .collect::<String>()
+                })
+                .unwrap_or_default()
+        };
+        Metadata {
+            title: text("title"),
+            author: text("author"),
+            headline: text("headline"),
+            description: text("description"),
+            ifid: text("ifid"),
+        }
+    }
+    pub fn cover(&self) -> Option<&[u8]> {
+        let number = read_u32(self.container_chunk(*b"Fspc")?, 0).ok()?;
+        self.resource(*b"Pict", number)
+    }
+    pub fn container_chunk(&self, tag: [u8; 4]) -> Option<&[u8]> {
+        let bytes = self.container.as_ref()?;
+        blorb_chunks(bytes)
+            .ok()?
+            .into_iter()
+            .find(|(start, _)| bytes[*start..*start + 4] == tag)
+            .map(|(start, end)| &bytes[start + 8..end])
+    }
+    pub fn sound_resource(&self, number: u32) -> Option<&[u8]> {
+        self.resource_file(*b"Snd ", number)
+    }
+    pub fn resource_file(&self, usage: [u8; 4], number: u32) -> Option<&[u8]> {
+        let &(start, end) = self.resources.get(&(u32::from_be_bytes(usage), number))?;
+        let bytes = self.container.as_ref()?;
+        if &bytes[start - 8..start - 4] == b"FORM" {
+            bytes.get(start - 8..end)
+        } else {
+            bytes.get(start..end)
+        }
+    }
+    pub fn resource_type(&self, usage: [u8; 4], number: u32) -> Option<[u8; 4]> {
+        let &(start, _) = self.resources.get(&(u32::from_be_bytes(usage), number))?;
+        self.container
+            .as_ref()?
+            .get(start - 8..start - 4)?
+            .try_into()
+            .ok()
     }
 
     pub fn resource(&self, usage: [u8; 4], number: u32) -> Option<&[u8]> {
@@ -142,76 +223,90 @@ impl Story {
     }
 }
 
-fn parse_resource_index(bytes: &[u8]) -> HashMap<(u32, u32), (usize, usize)> {
-    let mut resources = HashMap::new();
-    let declared = read_u32(bytes, 4)
-        .ok()
-        .and_then(|length| (length as usize).checked_add(8))
-        .map(|length| length.min(bytes.len()))
-        .unwrap_or(bytes.len());
-    let mut offset = 12usize;
-    while offset.checked_add(8).is_some_and(|end| end <= declared) {
-        let Some(length) = read_u32(bytes, offset + 4).ok().map(|value| value as usize) else {
-            break;
-        };
-        let start = offset + 8;
-        let Some(end) = start.checked_add(length).filter(|end| *end <= declared) else {
-            break;
-        };
-        if &bytes[offset..offset + 4] == b"RIdx" && length >= 4 {
-            let count = read_u32(bytes, start).unwrap_or(0) as usize;
-            for index in 0..count {
-                let entry = start + 4 + index * 12;
-                if entry + 12 > end {
-                    break;
-                }
-                let usage = read_u32(bytes, entry).unwrap_or(0);
-                let number = read_u32(bytes, entry + 4).unwrap_or(0);
-                let chunk = read_u32(bytes, entry + 8).unwrap_or(0) as usize;
-                let Some(chunk_length) =
-                    read_u32(bytes, chunk + 4).ok().map(|value| value as usize)
-                else {
-                    continue;
-                };
-                let data_start = chunk.saturating_add(8);
-                let Some(data_end) = data_start
-                    .checked_add(chunk_length)
-                    .filter(|data_end| *data_end <= declared)
-                else {
-                    continue;
-                };
-                resources.insert((usage, number), (data_start, data_end));
-            }
-            break;
-        }
-        offset = end + (length & 1);
+type ResourceIndex = HashMap<(u32, u32), (usize, usize)>;
+
+fn blorb_chunks(bytes: &[u8]) -> Result<Vec<(usize, usize)>, StoryError> {
+    if bytes.len() < 12 || &bytes[..4] != b"FORM" || &bytes[8..12] != IFRS_MAGIC {
+        return Err(StoryError::InvalidBlorb("missing IFRS form type"));
     }
-    resources
+    let end = (read_u32(bytes, 4)? as usize)
+        .checked_add(8)
+        .filter(|end| *end <= bytes.len() && *end >= 12)
+        .ok_or(StoryError::InvalidBlorb("FORM length exceeds file size"))?;
+    let mut chunks = Vec::new();
+    let mut cursor = 12usize;
+    while cursor < end {
+        if cursor + 8 > end {
+            return Err(StoryError::InvalidBlorb("truncated chunk header"));
+        }
+        let length = read_u32(bytes, cursor + 4)? as usize;
+        let next = cursor
+            .checked_add(8)
+            .and_then(|v| v.checked_add(length))
+            .filter(|v| *v <= end)
+            .ok_or(StoryError::InvalidBlorb("chunk length exceeds FORM"))?;
+        chunks.push((cursor, next));
+        cursor = next + length % 2;
+    }
+    if cursor != end {
+        return Err(StoryError::InvalidBlorb("missing chunk padding"));
+    }
+    Ok(chunks)
+}
+
+fn parse_resource_index(bytes: &[u8]) -> Result<ResourceIndex, StoryError> {
+    let chunks = blorb_chunks(bytes)?;
+    let mut resources = HashMap::new();
+    let mut index_seen = false;
+    for &(start, end) in &chunks {
+        if &bytes[start..start + 4] != b"RIdx" {
+            continue;
+        }
+        if index_seen {
+            return Err(StoryError::InvalidBlorb("duplicate RIdx"));
+        }
+        index_seen = true;
+        let count = read_u32(bytes, start + 8)? as usize;
+        if count
+            .checked_mul(12)
+            .and_then(|v| v.checked_add(start + 12))
+            != Some(end)
+        {
+            return Err(StoryError::InvalidBlorb("invalid resource count"));
+        }
+        for i in 0..count {
+            let entry = start + 12 + i * 12;
+            let usage = read_u32(bytes, entry)?;
+            let number = read_u32(bytes, entry + 4)?;
+            let offset = read_u32(bytes, entry + 8)? as usize;
+            let &(chunk, end) = chunks.iter().find(|(chunk, _)| *chunk == offset).ok_or(
+                StoryError::InvalidBlorb("resource offset is not a chunk boundary"),
+            )?;
+            if resources
+                .insert((usage, number), (chunk + 8, end))
+                .is_some()
+            {
+                return Err(StoryError::InvalidBlorb("duplicate resource number"));
+            }
+        }
+    }
+    Ok(resources)
 }
 
 fn extract_glul_chunk(bytes: &[u8]) -> Result<&[u8], StoryError> {
-    if bytes.len() < 12 || &bytes[8..12] != IFRS_MAGIC {
-        return Err(StoryError::InvalidBlorb("missing IFRS form type"));
-    }
-    let declared = read_u32(bytes, 4)? as usize + 8;
-    if declared > bytes.len() {
-        return Err(StoryError::InvalidBlorb("FORM length exceeds file size"));
-    }
-    let mut offset = 12usize;
-    while offset.checked_add(8).is_some_and(|end| end <= declared) {
-        let chunk_type = &bytes[offset..offset + 4];
-        let length = read_u32(bytes, offset + 4)? as usize;
-        let start = offset + 8;
-        let end = start
-            .checked_add(length)
-            .filter(|end| *end <= declared)
-            .ok_or(StoryError::InvalidBlorb("chunk length exceeds FORM"))?;
-        if chunk_type == b"GLUL" {
-            return Ok(&bytes[start..end]);
+    let chunks = blorb_chunks(bytes)?;
+    let resources = parse_resource_index(bytes)?;
+    if let Some(&(start, end)) = resources.get(&(u32::from_be_bytes(*b"Exec"), 0)) {
+        if &bytes[start - 8..start - 4] != b"GLUL" {
+            return Err(StoryError::MissingExecutable);
         }
-        offset = end + (length & 1);
+        return Ok(&bytes[start..end]);
     }
-    Err(StoryError::MissingExecutable)
+    chunks
+        .into_iter()
+        .find(|(start, _)| &bytes[*start..*start + 4] == b"GLUL")
+        .map(|(start, end)| &bytes[start + 8..end])
+        .ok_or(StoryError::MissingExecutable)
 }
 
 fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, StoryError> {
@@ -225,6 +320,8 @@ fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, StoryError> {
 
 #[derive(Debug, Error)]
 pub enum StoryError {
+    #[error("story requests {0} bytes, exceeding the 256 MiB VM memory limit")]
+    MemoryLimit(u32),
     #[error("cannot read story file: {0}")]
     Io(#[from] std::io::Error),
     #[error("file is too small to contain a Glulx header")]
@@ -333,5 +430,53 @@ mod tests {
             Story::from_bytes(&image, None),
             Err(StoryError::Checksum { .. })
         ));
+    }
+    #[test]
+    fn rejects_invalid_index_and_truncated_trailing_chunks() {
+        let image = minimal_image();
+        let mut blorb = b"FORM\0\0\0\0IFRS".to_vec();
+        blorb.extend_from_slice(b"GLUL");
+        blorb.extend_from_slice(&(image.len() as u32).to_be_bytes());
+        blorb.extend_from_slice(&image);
+        blorb.extend_from_slice(b"RIdx");
+        blorb.extend_from_slice(&16u32.to_be_bytes());
+        blorb.extend_from_slice(&1u32.to_be_bytes());
+        blorb.extend_from_slice(b"Data");
+        blorb.extend_from_slice(&1u32.to_be_bytes());
+        blorb.extend_from_slice(&13u32.to_be_bytes());
+        let length = (blorb.len() - 8) as u32;
+        blorb[4..8].copy_from_slice(&length.to_be_bytes());
+        assert!(matches!(
+            Story::from_bytes(&blorb, None),
+            Err(StoryError::InvalidBlorb(_))
+        ));
+        blorb.truncate(12 + 8 + image.len());
+        blorb.extend_from_slice(b"BAD");
+        let length = (blorb.len() - 8) as u32;
+        blorb[4..8].copy_from_slice(&length.to_be_bytes());
+        assert!(matches!(
+            Story::from_bytes(&blorb, None),
+            Err(StoryError::InvalidBlorb(_))
+        ));
+    }
+    #[test]
+    fn reads_ifiction_bibliography() {
+        let image = minimal_image();
+        let xml=b"<ifindex><story><bibliographic><title>A &amp; B</title><author>Writer</author></bibliographic><identification><ifid>TEST</ifid></identification></story></ifindex>";
+        let mut blorb = b"FORM\0\0\0\0IFRS".to_vec();
+        for (tag, data) in [(b"GLUL", image.as_slice()), (b"IFmd", xml.as_slice())] {
+            blorb.extend_from_slice(tag);
+            blorb.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            blorb.extend_from_slice(data);
+            if !data.len().is_multiple_of(2) {
+                blorb.push(0);
+            }
+        }
+        let length = (blorb.len() - 8) as u32;
+        blorb[4..8].copy_from_slice(&length.to_be_bytes());
+        let story = Story::from_bytes(&blorb, None).unwrap();
+        assert_eq!(story.title, "A & B");
+        assert_eq!(story.metadata().ifid, "TEST");
+        assert_eq!(story.metadata().author, "Writer");
     }
 }

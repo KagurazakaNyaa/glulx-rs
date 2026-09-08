@@ -1,3 +1,17 @@
+mod datetime;
+mod events;
+mod presentation;
+mod save;
+mod session;
+mod sound;
+mod streams;
+mod unicode;
+mod windows;
+use events::Request;
+pub use presentation::{TextRun, WindowView};
+#[cfg(test)]
+mod conformance;
+
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, HashSet},
@@ -7,21 +21,24 @@ use thiserror::Error;
 
 use crate::{Story, memory::Memory};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunState {
     Running,
     WaitingForLine,
     WaitingForChar,
+    WaitingForFile,
+    WaitingForEvent,
     Halted,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputRequest {
     Line { maximum_length: u32 },
     Character,
+    File { writing: bool },
 }
 
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct ImageRequest {
     pub window: u32,
     pub resource: u32,
@@ -31,7 +48,7 @@ pub struct ImageRequest {
     pub canvas_size: [u32; 2],
 }
 
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub enum GraphicsRequest {
     Draw(ImageRequest),
     Fill {
@@ -50,14 +67,14 @@ pub enum GraphicsRequest {
     },
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy)]
 enum Width {
     Byte,
     Short,
     Word,
 }
 
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 enum Operand {
     Zero,
     Constant(u32),
@@ -66,7 +83,7 @@ enum Operand {
     Local(u32),
 }
 
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 enum Destination {
     Discard,
     Memory(u32),
@@ -74,29 +91,26 @@ enum Destination {
     Local(u32),
 }
 
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 struct LineRequest {
     buffer: u32,
     max_len: u32,
     unicode: bool,
-    window: u32,
+    initial: String,
+    echo: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 struct PendingSelect {
     event_address: u32,
     destination: Destination,
 }
 
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 struct UndoState {
     memory: Memory,
     stack: Stack,
     pc: u32,
-    io_system: u32,
-    io_rock: u32,
-    random_state: u32,
-    decoding_table: u32,
     destination: Destination,
     heap_next: u32,
     heap_blocks: BTreeMap<u32, u32>,
@@ -106,7 +120,7 @@ const WINTYPE_TEXT_BUFFER: u32 = 3;
 const WINTYPE_TEXT_GRID: u32 = 4;
 const WINTYPE_GRAPHICS: u32 = 5;
 
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 struct GlkWindow {
     rock: u32,
     kind: u32,
@@ -117,22 +131,39 @@ struct GlkWindow {
     cursor_y: u32,
     grid: Vec<char>,
     background_color: u32,
+    parent: u32,
+    children: Option<[u32; 2]>,
+    method: u32,
+    split_size: u32,
+    key: u32,
+    echo_stream: u32,
+    write_count: u32,
+    rect: [u32; 4],
+    runs: Vec<TextRun>,
+    style: u32,
+    hyperlink: u32,
+    hints: BTreeMap<(u32, u32), u32>,
+    echo_line: bool,
+    terminators: Vec<u32>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 struct GlkStream {
     rock: u32,
     target: GlkStreamTarget,
 }
 
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 enum GlkStreamTarget {
     Window(u32),
+    File(streams::FileStream),
     Memory {
         address: u32,
         length: u32,
         position: u32,
         write_count: u32,
+        read_count: u32,
+        mode: u32,
         unicode: bool,
     },
 }
@@ -154,6 +185,20 @@ impl GlkWindow {
             cursor_y: 0,
             grid,
             background_color: 0x00ff_ffff,
+            parent: 0,
+            children: None,
+            method: 0,
+            split_size: 0,
+            key: 0,
+            echo_stream: 0,
+            write_count: 0,
+            rect: [0; 4],
+            runs: Vec::new(),
+            style: 0,
+            hyperlink: 0,
+            hints: BTreeMap::new(),
+            echo_line: true,
+            terminators: Vec::new(),
         }
     }
 
@@ -183,7 +228,7 @@ impl GlkWindow {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 struct Stack {
     bytes: Vec<u8>,
     frame_ptr: u32,
@@ -258,8 +303,24 @@ impl Stack {
         Ok(address)
     }
 
-    fn read_local(&self, offset: u32, width: Width) -> Result<u32, VmError> {
+    fn checked_local_address(&self, offset: u32, width: Width) -> Result<u32, VmError> {
         let address = self.local_address(offset)?;
+        let size = match width {
+            Width::Byte => 1,
+            Width::Short => 2,
+            Width::Word => 4,
+        };
+        if address
+            .checked_add(size)
+            .is_none_or(|end| end > self.frame_end().unwrap_or(0))
+        {
+            return Err(VmError::InvalidLocal(offset));
+        }
+        Ok(address)
+    }
+
+    fn read_local(&self, offset: u32, width: Width) -> Result<u32, VmError> {
+        let address = self.checked_local_address(offset, width)?;
         match width {
             Width::Byte => Ok(self.read_raw(address, 1)?[0] as u32),
             Width::Short => Ok(u16::from_be_bytes(
@@ -272,7 +333,7 @@ impl Stack {
     }
 
     fn write_local(&mut self, offset: u32, value: u32, width: Width) -> Result<(), VmError> {
-        let address = self.local_address(offset)? as usize;
+        let address = self.checked_local_address(offset, width)? as usize;
         match width {
             Width::Byte => self.bytes[address] = value as u8,
             Width::Short => {
@@ -310,14 +371,20 @@ impl Stack {
     fn peek(&self, depth: u32) -> Result<u32, VmError> {
         let address = self
             .len()
-            .checked_sub((depth + 1).saturating_mul(4))
+            .checked_sub(depth.saturating_add(1).saturating_mul(4))
             .filter(|address| *address >= self.frame_end().unwrap_or(u32::MAX))
             .ok_or(VmError::StackUnderflow)?;
         self.read_raw_u32(address)
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Vm {
+    graphical_host: bool,
+    #[serde(skip)]
+    audio: sound::AudioDevice,
+    channels: BTreeMap<u32, sound::Channel>,
+    next_channel: u32,
     story: Story,
     memory: Memory,
     stack: Stack,
@@ -326,15 +393,24 @@ pub struct Vm {
     io_system: u32,
     io_rock: u32,
     output: String,
-    line_request: Option<LineRequest>,
-    char_requested: bool,
+    requests: BTreeMap<u32, Request>,
+    events: std::collections::VecDeque<[u32; 4]>,
+    #[serde(skip)]
+    timer: Option<(std::time::Duration, std::time::Instant)>,
     pending_select: Option<PendingSelect>,
     random_state: u32,
     unsupported_glk: HashSet<u32>,
     protection: Option<(u32, u32)>,
-    undo: Option<UndoState>,
+    undo: std::collections::VecDeque<UndoState>,
     glk_windows: BTreeMap<u32, GlkWindow>,
     glk_streams: BTreeMap<u32, GlkStream>,
+    filerefs: BTreeMap<u32, streams::FileRef>,
+    next_fileref: u32,
+    file_request: Option<streams::FileRequest>,
+    style_hints: BTreeMap<(u32, u32, u32), u32>,
+    mouse_requests: HashSet<u32>,
+    hyperlink_requests: HashSet<u32>,
+    viewport_size: [u32; 2],
     glk_root: u32,
     glk_current_stream: u32,
     glk_next_window: u32,
@@ -352,6 +428,10 @@ impl Vm {
         let stack_size = story.header.stack_size;
         let start_func = story.header.start_func;
         let mut vm = Self {
+            graphical_host: true,
+            audio: sound::AudioDevice::default(),
+            channels: BTreeMap::new(),
+            next_channel: 1,
             story,
             memory,
             stack: Stack::new(stack_size),
@@ -360,15 +440,23 @@ impl Vm {
             io_system: 0,
             io_rock: 0,
             output: String::new(),
-            line_request: None,
-            char_requested: false,
+            requests: BTreeMap::new(),
+            events: std::collections::VecDeque::new(),
+            timer: None,
             pending_select: None,
-            random_state: 0x6d2b_79f5,
+            random_state: unpredictable_seed(),
             unsupported_glk: HashSet::new(),
             protection: None,
-            undo: None,
+            undo: std::collections::VecDeque::new(),
             glk_windows: BTreeMap::new(),
             glk_streams: BTreeMap::new(),
+            filerefs: BTreeMap::new(),
+            next_fileref: 1,
+            file_request: None,
+            style_hints: BTreeMap::new(),
+            mouse_requests: HashSet::new(),
+            hyperlink_requests: HashSet::new(),
+            viewport_size: [640, 480],
             glk_root: 0,
             glk_current_stream: 0,
             glk_next_window: 1,
@@ -392,14 +480,16 @@ impl Vm {
 
     pub fn input_request(&self) -> Option<InputRequest> {
         match self.state {
-            RunState::WaitingForLine => {
-                self.line_request
-                    .as_ref()
-                    .map(|request| InputRequest::Line {
-                        maximum_length: request.max_len,
-                    })
-            }
+            RunState::WaitingForLine => match self.requests.get(&self.input_window) {
+                Some(Request::Line(request)) => Some(InputRequest::Line {
+                    maximum_length: request.max_len,
+                }),
+                _ => None,
+            },
             RunState::WaitingForChar => Some(InputRequest::Character),
+            RunState::WaitingForFile => self.file_request.as_ref().map(|r| InputRequest::File {
+                writing: r.mode != 2,
+            }),
             _ => None,
         }
     }
@@ -423,6 +513,7 @@ impl Vm {
     }
 
     pub fn run_steps(&mut self, budget: usize) -> Result<RunState, VmError> {
+        self.poll_events()?;
         for _ in 0..budget {
             if self.state != RunState::Running {
                 break;
@@ -433,43 +524,10 @@ impl Vm {
     }
 
     pub fn provide_input(&mut self, text: &str) -> Result<(), VmError> {
-        let pending = self.pending_select.take().ok_or(VmError::UnexpectedInput)?;
-        let (event_type, value) = match self.state {
-            RunState::WaitingForLine => {
-                let request = self.line_request.take().ok_or(VmError::UnexpectedInput)?;
-                let length = if request.unicode {
-                    let characters = text.chars().take(request.max_len as usize);
-                    let mut length = 0;
-                    for (index, character) in characters.enumerate() {
-                        self.memory
-                            .write32(request.buffer + index as u32 * 4, character as u32)?;
-                        length += 1;
-                    }
-                    length
-                } else {
-                    let bytes = text.as_bytes();
-                    let length = (bytes.len() as u32).min(request.max_len);
-                    for (index, byte) in bytes.iter().take(length as usize).enumerate() {
-                        self.memory.write8(request.buffer + index as u32, *byte)?;
-                    }
-                    length
-                };
-                (3, length)
-            }
-            RunState::WaitingForChar => {
-                self.char_requested = false;
-                (2, text.chars().next().unwrap_or('\n') as u32)
-            }
-            _ => return Err(VmError::UnexpectedInput),
-        };
-        self.memory.write32(pending.event_address, event_type)?;
-        self.memory
-            .write32(pending.event_address + 4, self.input_window)?;
-        self.memory.write32(pending.event_address + 8, value)?;
-        self.memory.write32(pending.event_address + 12, 0)?;
-        self.store_destination(&pending.destination, 0, Width::Word)?;
-        self.state = RunState::Running;
-        Ok(())
+        if self.state == RunState::WaitingForFile {
+            return self.provide_file(text);
+        }
+        self.provide_window_input(self.input_window, text)
     }
 
     pub fn restart(&mut self) -> Result<(), VmError> {
@@ -477,21 +535,15 @@ impl Vm {
         self.stack.clear();
         self.pc = 0;
         self.state = RunState::Running;
-        self.io_system = 0;
-        self.io_rock = 0;
-        self.output.clear();
-        self.line_request = None;
-        self.char_requested = false;
         self.pending_select = None;
         self.input_window = 0;
-        self.undo = None;
-        self.graphics.clear();
         self.heap_next = self.memory.len();
         self.heap_blocks.clear();
         self.enter_function(self.story.header.start_func, &[])
     }
 
     pub fn stop(&mut self) {
+        let _ = self.flush_streams();
         self.state = RunState::Halted;
     }
 
@@ -659,11 +711,11 @@ impl Vm {
                 store!(1, value);
             }
             0x41 => {
-                let value = load!(0, Width::Short);
+                let value = load!(0, Width::Short) & 0xffff;
                 store!(1, value, Width::Short);
             }
             0x42 => {
-                let value = load!(0, Width::Byte);
+                let value = load!(0, Width::Byte) & 0xff;
                 store!(1, value, Width::Byte);
             }
             0x44 => {
@@ -798,21 +850,75 @@ impl Vm {
                 store!(1, value);
             }
             0x111 => {
-                self.random_state = load!(0).max(1);
+                let seed = load!(0);
+                self.random_state = if seed == 0 {
+                    unpredictable_seed()
+                } else {
+                    seed
+                };
             }
-            0x120 => self.state = RunState::Halted,
-            0x121 => store!(0, 0),
+            0x120 => self.stop(),
+            0x121 => {
+                let sum = self
+                    .story
+                    .image
+                    .chunks_exact(4)
+                    .enumerate()
+                    .filter(|(index, _)| *index != 8)
+                    .fold(0u32, |sum, (_, bytes)| {
+                        sum.wrapping_add(u32::from_be_bytes(bytes.try_into().unwrap()))
+                    });
+                store!(0, u32::from(sum != self.story.header.checksum));
+            }
             0x122 => self.restart()?,
+            0x123 | 0x124 => {
+                let stream = load!(0);
+                let destination = self.destination(&operands[1])?;
+                if self.io_system != 2 {
+                    return Err(VmError::InvalidSaveIo);
+                }
+                let success = if opcode == 0x123 {
+                    self.encode_save(&destination)
+                        .and_then(|data| self.write_save_stream(stream, &data))
+                        .is_ok()
+                } else {
+                    self.read_save_stream(stream)
+                        .and_then(|data| self.decode_save(&data))
+                        .is_ok()
+                };
+                if opcode == 0x123 || !success {
+                    self.store_destination(&destination, u32::from(!success), Width::Word)?;
+                }
+            }
             0x125 => {
                 let destination = self.destination(&operands[0])?;
-                self.undo = Some(UndoState {
+                let cost = self.memory.len() as usize
+                    + self.stack.bytes.len()
+                    + self.story.image.len() * 2;
+                const UNDO_BUDGET: usize = 64 * 1024 * 1024;
+                if cost > UNDO_BUDGET {
+                    self.store_destination(&destination, 1, Width::Word)?;
+                    return Ok(());
+                }
+                while self.undo.len() >= 16
+                    || self
+                        .undo
+                        .iter()
+                        .map(|state| {
+                            state.memory.len() as usize
+                                + state.stack.bytes.len()
+                                + self.story.image.len() * 2
+                        })
+                        .sum::<usize>()
+                        + cost
+                        > UNDO_BUDGET
+                {
+                    self.undo.pop_front();
+                }
+                self.undo.push_back(UndoState {
                     memory: self.memory.clone(),
                     stack: self.stack.clone(),
                     pc: self.pc,
-                    io_system: self.io_system,
-                    io_rock: self.io_rock,
-                    random_state: self.random_state,
-                    decoding_table: self.story.header.decoding_table,
                     destination: destination.clone(),
                     heap_next: self.heap_next,
                     heap_blocks: self.heap_blocks.clone(),
@@ -821,16 +927,10 @@ impl Vm {
             }
             0x126 => {
                 let failure_destination = self.destination(&operands[0])?;
-                if let Some(undo) = self.undo.take() {
+                if let Some(undo) = self.undo.pop_back() {
                     self.memory.restore(&undo.memory, self.protection);
                     self.stack = undo.stack;
                     self.pc = undo.pc;
-                    self.io_system = undo.io_system;
-                    self.io_rock = undo.io_rock;
-                    self.random_state = undo.random_state;
-                    self.story.header.decoding_table = undo.decoding_table;
-                    self.line_request = None;
-                    self.char_requested = false;
                     self.pending_select = None;
                     self.state = RunState::Running;
                     self.heap_next = undo.heap_next;
@@ -845,8 +945,10 @@ impl Vm {
                 let length = load!(1);
                 self.protection = (length != 0).then_some((start, length));
             }
-            0x128 => store!(0, u32::from(self.undo.is_some())),
-            0x129 => self.undo = None,
+            0x128 => store!(0, u32::from(self.undo.is_empty())),
+            0x129 => {
+                self.undo.pop_back();
+            }
             0x130 => {
                 let selector = load!(0);
                 let count = load!(1);
@@ -943,16 +1045,21 @@ impl Vm {
                 let address = load!(0);
                 self.mfree(address)?;
             }
+            0x180 | 0x181 => {
+                // Acceleration is optional; unknown functions and parameters are ignored.
+                let _index = load!(0);
+                let _value = load!(1);
+            }
             0x190 => {
                 let value = (load!(0) as i32 as f32).to_bits();
                 store!(1, value);
             }
             0x191 => {
-                let value = f32::from_bits(load!(0)).trunc() as i32 as u32;
+                let value = float_to_int(f32::from_bits(load!(0)) as f64, false);
                 store!(1, value);
             }
             0x192 => {
-                let value = f32::from_bits(load!(0)).round() as i32 as u32;
+                let value = float_to_int(f32::from_bits(load!(0)) as f64, true);
                 store!(1, value);
             }
             0x198 => {
@@ -976,7 +1083,7 @@ impl Vm {
             0x1a4 => {
                 let a = f32::from_bits(load!(0));
                 let b = f32::from_bits(load!(1));
-                let quotient = (a / b).trunc();
+                let quotient = modulo_quotient(a as f64, b as f64) as f32;
                 let remainder = a % b;
                 store!(2, remainder.to_bits());
                 store!(3, quotient.to_bits());
@@ -987,7 +1094,10 @@ impl Vm {
                     0x1a8 => a.sqrt(),
                     0x1a9 => a.exp(),
                     0x1aa => a.ln(),
-                    _ => a.powf(f32::from_bits(load!(1))),
+                    _ => {
+                        let b = f32::from_bits(load!(1));
+                        if a == 1.0 || b == 0.0 { 1.0 } else { a.powf(b) }
+                    }
                 };
                 let destination = if opcode == 0x1ab { 2 } else { 1 };
                 store!(destination, value.to_bits());
@@ -1011,8 +1121,8 @@ impl Vm {
                 let b = f32::from_bits(load!(1));
                 let tolerance = f32::from_bits(load!(2));
                 let equal = floats_equal(a, b, tolerance);
+                let offset = load!(3);
                 if (opcode == 0x1c0 && equal) || (opcode == 0x1c1 && !equal) {
-                    let offset = load!(3);
                     self.branch(offset)?;
                 }
             }
@@ -1025,8 +1135,8 @@ impl Vm {
                     0x1c4 => a > b,
                     _ => a >= b,
                 };
+                let offset = load!(2);
                 if condition {
-                    let offset = load!(2);
                     self.branch(offset)?;
                 }
             }
@@ -1037,9 +1147,85 @@ impl Vm {
                 } else {
                     value.is_infinite()
                 };
+                let offset = load!(1);
                 if condition {
-                    let offset = load!(1);
                     self.branch(offset)?;
+                }
+            }
+            0x200..=0x204
+            | 0x208..=0x209
+            | 0x210..=0x215
+            | 0x218..=0x21b
+            | 0x220..=0x226
+            | 0x230..=0x235
+            | 0x238..=0x239 => {
+                let loads = match opcode {
+                    0x200 | 0x203 => 1,
+                    0x201 | 0x202 | 0x204 | 0x208 | 0x209 | 0x218..=0x21a | 0x220..=0x225 => 2,
+                    0x238 | 0x239 => 3,
+                    0x232..=0x235 => 5,
+                    0x230 | 0x231 => 7,
+                    _ => 4,
+                };
+                let mut args = Vec::with_capacity(loads);
+                for (index, _) in operands.iter().take(loads).enumerate() {
+                    args.push(load!(index));
+                }
+                let double = |index: usize| {
+                    f64::from_bits(((args[index] as u64) << 32) | args[index + 1] as u64)
+                };
+                if matches!(opcode, 0x201 | 0x202 | 0x204) {
+                    let value = if opcode == 0x204 {
+                        (double(0) as f32).to_bits()
+                    } else {
+                        float_to_int(double(0), opcode == 0x202)
+                    };
+                    store!(2, value);
+                } else if opcode >= 0x230 {
+                    let a = double(0);
+                    let condition = match opcode {
+                        0x230 => doubles_equal(a, double(2), double(4)),
+                        0x231 => !doubles_equal(a, double(2), double(4)),
+                        0x232 => a < double(2),
+                        0x233 => a <= double(2),
+                        0x234 => a > double(2),
+                        0x235 => a >= double(2),
+                        0x238 => a.is_nan(),
+                        _ => a.is_infinite(),
+                    };
+                    if condition {
+                        self.branch(args[loads - 1])?;
+                    }
+                } else {
+                    let value = match opcode {
+                        0x200 => args[0] as i32 as f64,
+                        0x203 => f32::from_bits(args[0]) as f64,
+                        0x208 => double(0).ceil(),
+                        0x209 => double(0).floor(),
+                        0x210 => double(0) + double(2),
+                        0x211 => double(0) - double(2),
+                        0x212 => double(0) * double(2),
+                        0x213 => double(0) / double(2),
+                        0x214 => double(0) % double(2),
+                        0x215 => modulo_quotient(double(0), double(2)),
+                        0x218 => double(0).sqrt(),
+                        0x219 => double(0).exp(),
+                        0x21a => double(0).ln(),
+                        0x21b => {
+                            let (a, b) = (double(0), double(2));
+                            if a == 1.0 || b == 0.0 { 1.0 } else { a.powf(b) }
+                        }
+                        0x220 => double(0).sin(),
+                        0x221 => double(0).cos(),
+                        0x222 => double(0).tan(),
+                        0x223 => double(0).asin(),
+                        0x224 => double(0).acos(),
+                        0x225 => double(0).atan(),
+                        _ => double(0).atan2(double(2)),
+                    }
+                    .to_bits();
+                    store!(loads, value as u32);
+                    store!(loads + 1, (value >> 32) as u32);
                 }
             }
             _ => {
@@ -1289,7 +1475,7 @@ impl Vm {
         let frame_ptr = self.stack.frame_ptr;
         self.stack.truncate(frame_ptr)?;
         if self.stack.len() == 0 {
-            self.state = RunState::Halted;
+            self.stop();
             return Ok(());
         }
         let old_frame_ptr = self.stack.pop_raw_u32()?;
@@ -1604,16 +1790,22 @@ impl Vm {
         } else {
             stream
         };
-        let Some(target) = self
-            .glk_streams
-            .get(&stream)
-            .map(|stream| stream.target.clone())
-        else {
+        let Some(target) = self.glk_streams.get(&stream) else {
             self.output.push(character);
             return;
         };
+        let target = match target.target {
+            GlkStreamTarget::Window(id) => GlkStreamTarget::Window(id),
+            _ => {
+                let _ = self.write_stream_value(stream, character as u32);
+                return;
+            }
+        };
         match target {
             GlkStreamTarget::Window(window_id) => {
+                if let Some(window) = self.glk_windows.get_mut(&window_id) {
+                    window.write_count = window.write_count.wrapping_add(1);
+                }
                 let kind = self
                     .glk_windows
                     .get(&window_id)
@@ -1624,40 +1816,35 @@ impl Vm {
                         window.put_grid_char(character);
                     }
                 } else if kind == WINTYPE_TEXT_BUFFER {
+                    let window = self.glk_windows.get_mut(&window_id).unwrap();
+                    if let Some(run) = window
+                        .runs
+                        .last_mut()
+                        .filter(|r| r.style == window.style && r.hyperlink == window.hyperlink)
+                    {
+                        run.text.push(character);
+                    } else {
+                        window.runs.push(TextRun {
+                            text: character.to_string(),
+                            style: window.style,
+                            hyperlink: window.hyperlink,
+                        });
+                    }
                     self.output.push(character);
                 }
+                let echo = self
+                    .glk_windows
+                    .get(&window_id)
+                    .map_or(0, |w| w.echo_stream);
+                if echo != 0 {
+                    self.glk_windows.get_mut(&window_id).unwrap().echo_stream = 0;
+                    self.glk_write_char(echo, character);
+                    self.glk_windows.get_mut(&window_id).unwrap().echo_stream = echo;
+                }
             }
-            GlkStreamTarget::Memory { .. } => self.write_memory_stream(stream, character),
-        }
-    }
-
-    fn write_memory_stream(&mut self, stream_id: u32, character: char) {
-        let Some(stream) = self.glk_streams.get_mut(&stream_id) else {
-            return;
-        };
-        let GlkStreamTarget::Memory {
-            address,
-            length,
-            position,
-            write_count,
-            unicode,
-        } = &mut stream.target
-        else {
-            return;
-        };
-        if *position >= *length {
-            return;
-        }
-        let width = if *unicode { 4 } else { 1 };
-        let destination = address.saturating_add(position.saturating_mul(width));
-        let result = if *unicode {
-            self.memory.write32(destination, character as u32)
-        } else {
-            self.memory.write8(destination, character as u8)
-        };
-        if result.is_ok() {
-            *position = position.saturating_add(1);
-            *write_count = write_count.saturating_add(1);
+            GlkStreamTarget::Memory { .. } | GlkStreamTarget::File(_) => {
+                let _ = self.write_stream_value(stream, character as u32);
+            }
         }
     }
 
@@ -1683,8 +1870,9 @@ impl Vm {
                     self.heap_next
                 }
             }
-            9..=10 => 0,
-            11 => 1,
+            9 => 1,
+            10 => 0,
+            11..=13 => 1,
             _ => 0,
         }
     }
@@ -1701,7 +1889,7 @@ impl Vm {
         }
         let result = match selector {
             0x0001 => {
-                self.state = RunState::Halted;
+                self.stop();
                 0
             }
             0x0002 | 0x0003 => 0,
@@ -1709,30 +1897,24 @@ impl Vm {
                 arguments.first().copied().unwrap_or(0),
                 arguments.get(1).copied().unwrap_or(0),
             ),
-            0x0005 => self.glk_gestalt(
-                arguments.first().copied().unwrap_or(0),
-                arguments.get(1).copied().unwrap_or(0),
-            ),
+            0x0005 => {
+                let selector = arguments.first().copied().unwrap_or(0);
+                let argument = arguments.get(1).copied().unwrap_or(0);
+                if selector == 3 && arguments.get(3).copied().unwrap_or(0) > 0 {
+                    self.write_glk_reference(arguments.get(2).copied().unwrap_or(0), 1)?;
+                }
+                self.glk_gestalt(selector, argument)
+            }
             0x0020 => {
                 let previous = arguments.first().copied().unwrap_or(0);
-                if let Some(rock_address) = arguments
-                    .get(1)
-                    .copied()
-                    .filter(|address| !matches!(*address, 0 | u32::MAX))
-                {
-                    let rock = self
-                        .glk_windows
-                        .range((previous.saturating_add(1))..)
-                        .next()
-                        .map(|(_, window)| window.rock)
-                        .unwrap_or(0);
-                    self.memory.write32(rock_address, rock)?;
-                }
-                self.glk_windows
-                    .range((previous.saturating_add(1))..)
+                let next = self
+                    .glk_windows
+                    .range(previous.saturating_add(1)..)
                     .next()
-                    .map(|(id, _)| *id)
-                    .unwrap_or(0)
+                    .map(|(&id, w)| (id, w.rock))
+                    .unwrap_or((0, 0));
+                self.write_glk_reference(arguments.get(1).copied().unwrap_or(0), next.1)?;
+                next.0
             }
             0x0021 => self
                 .glk_windows
@@ -1740,100 +1922,69 @@ impl Vm {
                 .map(|window| window.rock)
                 .unwrap_or(0),
             0x0022 => self.glk_root,
-            0x0023 => {
-                let split = arguments.first().copied().unwrap_or(0);
-                let method = arguments.get(1).copied().unwrap_or(0);
-                let size = arguments.get(2).copied().unwrap_or(0);
-                let kind = arguments.get(3).copied().unwrap_or(0);
-                let rock = arguments.get(4).copied().unwrap_or(0);
-                if split != 0 && !self.glk_windows.contains_key(&split) {
-                    0
-                } else {
-                    let window_id = self.glk_next_window;
-                    self.glk_next_window = self.glk_next_window.wrapping_add(1).max(1);
-                    let stream_id = self.glk_next_stream;
-                    self.glk_next_stream = self.glk_next_stream.wrapping_add(1).max(1);
-                    let fixed = method & 0x30 == 0x10;
-                    let (width, height) = match kind {
-                        WINTYPE_TEXT_GRID if fixed => (80, size.max(1)),
-                        WINTYPE_TEXT_GRID => (80, 25),
-                        WINTYPE_GRAPHICS => (640, 480),
-                        _ => (80, 25),
-                    };
-                    self.glk_windows.insert(
-                        window_id,
-                        GlkWindow::new(rock, kind, stream_id, width, height),
-                    );
-                    self.glk_streams.insert(
-                        stream_id,
-                        GlkStream {
-                            rock,
-                            target: GlkStreamTarget::Window(window_id),
-                        },
-                    );
-                    if self.glk_root == 0 {
-                        self.glk_root = window_id;
-                    }
-                    window_id
-                }
-            }
+            0x0023 => self.open_window(&arguments),
             0x0024 => {
-                let window_id = arguments.first().copied().unwrap_or(0);
-                if let Some(result_address) = arguments
-                    .get(1)
-                    .copied()
-                    .filter(|address| *address != 0 && *address != u32::MAX)
-                {
-                    self.memory.write32(result_address, 0)?;
-                    self.memory.write32(result_address + 4, 0)?;
-                }
-                if let Some(window) = self.glk_windows.remove(&window_id) {
-                    if window.kind == WINTYPE_GRAPHICS {
-                        self.graphics
-                            .push(GraphicsRequest::Close { window: window_id });
-                    }
-                    self.glk_streams.remove(&window.stream);
-                    if self.glk_current_stream == window.stream {
-                        self.glk_current_stream = 0;
-                    }
-                    if self.glk_root == window_id {
-                        self.glk_root = self.glk_windows.keys().next().copied().unwrap_or(0);
-                    }
-                }
+                let (read, write) = self.close_window(arguments.first().copied().unwrap_or(0));
+                let address = arguments.get(1).copied().unwrap_or(0);
+                self.write_glk_reference(address, read)?;
+                self.write_glk_reference(
+                    if matches!(address, 0 | u32::MAX) {
+                        address
+                    } else {
+                        address.wrapping_add(4)
+                    },
+                    write,
+                )?;
                 0
             }
             0x0025 => {
-                let window = self
+                let (width, height) = self
                     .glk_windows
-                    .get(&arguments.first().copied().unwrap_or(0));
-                if let Some(address) = arguments
-                    .get(1)
-                    .copied()
-                    .filter(|address| !matches!(*address, 0 | u32::MAX))
-                {
-                    self.memory
-                        .write32(address, window.map(|window| window.width).unwrap_or(0))?;
-                }
-                if let Some(address) = arguments
-                    .get(2)
-                    .copied()
-                    .filter(|address| !matches!(*address, 0 | u32::MAX))
-                {
-                    self.memory
-                        .write32(address, window.map(|window| window.height).unwrap_or(0))?;
+                    .get(&arguments.first().copied().unwrap_or(0))
+                    .map_or((0, 0), |w| (w.width, w.height));
+                self.write_glk_reference(arguments.get(1).copied().unwrap_or(0), width)?;
+                self.write_glk_reference(arguments.get(2).copied().unwrap_or(0), height)?;
+                0
+            }
+            0x0026 => {
+                self.set_arrangement(&arguments);
+                0
+            }
+            0x0027 => {
+                let (method, size, key) = self
+                    .glk_windows
+                    .get(&arguments.first().copied().unwrap_or(0))
+                    .map_or((0, 0, 0), |w| (w.method, w.split_size, w.key));
+                for (index, value) in [method, size, key].into_iter().enumerate() {
+                    self.write_glk_reference(
+                        arguments.get(index + 1).copied().unwrap_or(0),
+                        value,
+                    )?;
                 }
                 0
             }
-            0x0026..=0x0027 => 0,
             0x0028 => self
                 .glk_windows
                 .get(&arguments.first().copied().unwrap_or(0))
                 .map(|window| window.kind)
                 .unwrap_or(0),
-            0x0029 | 0x0030 => 0,
+            0x0029 => self
+                .glk_windows
+                .get(&arguments.first().copied().unwrap_or(0))
+                .map_or(0, |w| w.parent),
+            0x0030 => {
+                let id = arguments.first().copied().unwrap_or(0);
+                self.glk_windows
+                    .get(&id)
+                    .and_then(|w| self.glk_windows.get(&w.parent))
+                    .and_then(|w| w.children)
+                    .and_then(|children| children.into_iter().find(|child| *child != id))
+                    .unwrap_or(0)
+            }
             0x002a => {
                 let window_id = arguments.first().copied().unwrap_or(0);
                 if let Some(window) = self.glk_windows.get_mut(&window_id) {
+                    window.runs.clear();
                     window.grid.fill(' ');
                     window.cursor_x = 0;
                     window.cursor_y = 0;
@@ -1862,8 +2013,20 @@ impl Vm {
                 .get(&arguments.first().copied().unwrap_or(0))
                 .map(|window| window.stream)
                 .unwrap_or(0),
-            0x002d => 0,
-            0x002e => 0,
+            0x002d => {
+                let id = arguments.first().copied().unwrap_or(0);
+                let echo = arguments.get(1).copied().unwrap_or(0);
+                if self.valid_echo(id, echo)
+                    && let Some(window) = self.glk_windows.get_mut(&id)
+                {
+                    window.echo_stream = echo;
+                }
+                0
+            }
+            0x002e => self
+                .glk_windows
+                .get(&arguments.first().copied().unwrap_or(0))
+                .map_or(0, |w| w.echo_stream),
             0x002f => {
                 self.glk_current_stream = self
                     .glk_windows
@@ -1876,29 +2039,50 @@ impl Vm {
                 let previous = arguments.first().copied().unwrap_or(0);
                 let next = self
                     .glk_streams
-                    .range((previous.saturating_add(1))..)
+                    .range(previous.saturating_add(1)..)
                     .next()
-                    .map(|(id, stream)| (*id, stream.rock));
-                if let Some(rock_address) = arguments
-                    .get(1)
-                    .copied()
-                    .filter(|address| !matches!(*address, 0 | u32::MAX))
-                {
-                    let rock = next.map(|(_, rock)| rock).unwrap_or(0);
-                    self.memory.write32(rock_address, rock)?;
-                }
-                next.map(|(stream, _)| stream).unwrap_or(0)
+                    .map(|(&id, w)| (id, w.rock))
+                    .unwrap_or((0, 0));
+                self.write_glk_reference(arguments.get(1).copied().unwrap_or(0), next.1)?;
+                next.0
             }
             0x0041 => self
                 .glk_streams
                 .get(&arguments.first().copied().unwrap_or(0))
                 .map(|stream| stream.rock)
                 .unwrap_or(0),
-            0x0042 | 0x0049 => 0,
+            0x0042 | 0x0138 => self.open_file_stream(&arguments, selector == 0x0138),
+            0x0049 | 0x013a => self.open_resource_stream(&arguments, selector == 0x013a),
+            0x0060..=0x0068 => {
+                if selector == 0x0062 {
+                    self.file_request = Some(streams::FileRequest {
+                        usage: arguments.first().copied().unwrap_or(0),
+                        mode: arguments.get(1).copied().unwrap_or(2),
+                        rock: arguments.get(2).copied().unwrap_or(0),
+                        destination,
+                    });
+                    self.state = RunState::WaitingForFile;
+                    return Ok(());
+                }
+                self.fileref_call(selector, &arguments)?
+            }
             0x0043 | 0x0139 => {
                 let address = arguments.first().copied().unwrap_or(0);
                 let length = arguments.get(1).copied().unwrap_or(0);
                 let rock = arguments.get(3).copied().unwrap_or(0);
+                let mode = arguments.get(2).copied().unwrap_or(3);
+                let width = if selector == 0x0139 { 4 } else { 1 };
+                if !matches!(mode, 1..=3)
+                    || (address != 0
+                        && length
+                            .checked_mul(width)
+                            .and_then(|n| address.checked_add(n))
+                            .is_none_or(|end| {
+                                end > self.memory.len() || address < self.memory.ram_start()
+                            }))
+                {
+                    return self.store_destination(&destination, 0, Width::Word);
+                }
                 let stream_id = self.glk_next_stream;
                 self.glk_next_stream = self.glk_next_stream.wrapping_add(1).max(1);
                 self.glk_streams.insert(
@@ -1910,6 +2094,8 @@ impl Vm {
                             length,
                             position: 0,
                             write_count: 0,
+                            read_count: 0,
+                            mode: arguments.get(2).copied().unwrap_or(3),
                             unicode: selector == 0x0139,
                         },
                     },
@@ -1918,20 +2104,13 @@ impl Vm {
             }
             0x0044 => {
                 let stream_id = arguments.first().copied().unwrap_or(0);
-                let write_count = self
-                    .glk_streams
-                    .remove(&stream_id)
-                    .and_then(|stream| match stream.target {
-                        GlkStreamTarget::Memory { write_count, .. } => Some(write_count),
-                        GlkStreamTarget::Window(_) => None,
-                    })
-                    .unwrap_or(0);
+                let (read_count, write_count) = self.close_stream(stream_id);
                 if self.glk_current_stream == stream_id {
                     self.glk_current_stream = 0;
                 }
                 if arguments.get(1) == Some(&u32::MAX) {
                     // Glulx's -1 reference writes each struct field to the stack.
-                    self.stack.push_u32(0)?;
+                    self.stack.push_u32(read_count)?;
                     self.stack.push_u32(write_count)?;
                 }
                 if let Some(result_address) = arguments
@@ -1939,38 +2118,16 @@ impl Vm {
                     .copied()
                     .filter(|address| !matches!(*address, 0 | u32::MAX))
                 {
-                    self.memory.write32(result_address, 0)?;
+                    self.memory.write32(result_address, read_count)?;
                     self.memory.write32(result_address + 4, write_count)?;
                 }
                 0
             }
             0x0045 => {
-                let stream_id = arguments.first().copied().unwrap_or(0);
-                let offset = arguments.get(1).copied().unwrap_or(0) as i32;
-                let seek_mode = arguments.get(2).copied().unwrap_or(0);
-                if let Some(stream) = self.glk_streams.get_mut(&stream_id)
-                    && let GlkStreamTarget::Memory {
-                        position, length, ..
-                    } = &mut stream.target
-                {
-                    let base = match seek_mode {
-                        0 => 0,
-                        1 => *position as i32,
-                        2 => *length as i32,
-                        _ => *position as i32,
-                    };
-                    *position = base.saturating_add(offset).max(0) as u32;
-                }
+                self.seek_stream(&arguments);
                 0
             }
-            0x0046 => self
-                .glk_streams
-                .get(&arguments.first().copied().unwrap_or(0))
-                .map(|stream| match stream.target {
-                    GlkStreamTarget::Memory { position, .. } => position,
-                    GlkStreamTarget::Window(_) => 0,
-                })
-                .unwrap_or(0),
+            0x0046 => self.stream_position(arguments.first().copied().unwrap_or(0)),
             0x0047 => {
                 self.glk_current_stream = arguments.first().copied().unwrap_or(0);
                 0
@@ -1989,16 +2146,12 @@ impl Vm {
                 0
             }
             0x0082 => {
-                let text = self
-                    .memory
-                    .c_string(arguments.first().copied().unwrap_or(0))?;
+                let text = self.glk_byte_string(arguments.first().copied().unwrap_or(0))?;
                 self.glk_write_text(0, &text);
                 0
             }
             0x0083 => {
-                let text = self
-                    .memory
-                    .c_string(arguments.get(1).copied().unwrap_or(0))?;
+                let text = self.glk_byte_string(arguments.get(1).copied().unwrap_or(0))?;
                 self.glk_write_text(arguments.first().copied().unwrap_or(0), &text);
                 0
             }
@@ -2018,120 +2171,175 @@ impl Vm {
                 )?;
                 0
             }
-            0x00a0 => (arguments.first().copied().unwrap_or(0) as u8).to_ascii_lowercase() as u32,
-            0x00a1 => (arguments.first().copied().unwrap_or(0) as u8).to_ascii_uppercase() as u32,
-            0x0086 | 0x0087 | 0x00b0 | 0x00b1 => 0,
-            0x00c0 => {
-                let event_address = arguments.first().copied().unwrap_or(0);
-                self.pending_select = Some(PendingSelect {
-                    event_address,
-                    destination,
-                });
-                if self.line_request.is_some() {
-                    self.input_window = self
-                        .line_request
-                        .as_ref()
-                        .map(|request| request.window)
-                        .unwrap_or(0);
-                    self.state = RunState::WaitingForLine;
+            0x0090..=0x0092 | 0x0130..=0x0132 => self.read_stream_call(selector, &arguments)?,
+            0x00a0 | 0x00a1 => {
+                let value = arguments.first().copied().unwrap_or(0) & 255;
+                if selector == 0x00a0 && matches!(value,0x41..=0x5a|0xc0..=0xd6|0xd8..=0xde) {
+                    value + 32
+                } else if selector == 0x00a1 && matches!(value,0x61..=0x7a|0xe0..=0xf6|0xf8..=0xfe)
+                {
+                    value - 32
                 } else {
-                    self.state = RunState::WaitingForChar;
+                    value
                 }
+            }
+            0x0086 | 0x0087 | 0x00b0..=0x00b3 | 0x0100..=0x0101 => {
+                self.style_call(selector, &arguments)?
+            }
+            0x00d4 | 0x0102 => {
+                let id = arguments.first().copied().unwrap_or(0);
+                if let Some(window) = self.glk_windows.get(&id) {
+                    if selector == 0xd4 && matches!(window.kind, 4 | 5) {
+                        self.mouse_requests.insert(id);
+                    }
+                    if selector == 0x102 && matches!(window.kind, 3 | 4) {
+                        self.hyperlink_requests.insert(id);
+                    }
+                }
+                0
+            }
+            0x00d5 => {
+                self.mouse_requests
+                    .remove(&arguments.first().copied().unwrap_or(0));
+                0
+            }
+            0x0103 => {
+                self.hyperlink_requests
+                    .remove(&arguments.first().copied().unwrap_or(0));
+                0
+            }
+            0x00c0 => {
+                self.select_event(arguments.first().copied().unwrap_or(0), destination)?;
                 return Ok(());
             }
             0x00c1 => {
-                let address = arguments.first().copied().unwrap_or(0);
-                if address != 0 {
-                    self.memory.write32(address, 0)?;
-                    self.memory.write32(address + 4, 0)?;
-                    self.memory.write32(address + 8, 0)?;
-                    self.memory.write32(address + 12, 0)?;
-                }
+                self.poll_events()?;
+                let event = self.events.pop_front().unwrap_or([0, 0, 0, 0]);
+                self.write_event(arguments.first().copied().unwrap_or(0), event)?;
                 0
             }
-            0x00d0 => {
-                self.line_request = Some(LineRequest {
-                    buffer: arguments.get(1).copied().unwrap_or(0),
-                    max_len: arguments.get(2).copied().unwrap_or(0),
-                    unicode: false,
-                    window: arguments.first().copied().unwrap_or(0),
-                });
+            0x00d0 | 0x0141 => {
+                self.request_line(&arguments, selector == 0x0141)?;
                 0
             }
             0x00d1 => {
-                self.line_request = None;
+                self.cancel_line(&arguments)?;
                 0
             }
-            0x00d2 => {
-                self.char_requested = true;
-                self.input_window = arguments.first().copied().unwrap_or(0);
+            0x00d2 | 0x0140 => {
+                self.requests
+                    .entry(arguments.first().copied().unwrap_or(0))
+                    .or_insert(Request::Character {
+                        unicode: selector == 0x0140,
+                    });
                 0
             }
             0x00d3 => {
-                self.char_requested = false;
+                let window = arguments.first().copied().unwrap_or(0);
+                if matches!(self.requests.get(&window), Some(Request::Character { .. })) {
+                    self.requests.remove(&window);
+                }
+                0
+            }
+            0x0150 => {
+                if let Some(w) = self
+                    .glk_windows
+                    .get_mut(&arguments.first().copied().unwrap_or(0))
+                {
+                    w.echo_line = arguments.get(1).copied().unwrap_or(0) != 0;
+                }
+                0
+            }
+            0x0151 => {
+                let address = arguments.get(1).copied().unwrap_or(0);
+                let count = arguments.get(2).copied().unwrap_or(0);
+                let mut keys = Vec::new();
+                for i in 0..count {
+                    keys.push(if address == u32::MAX {
+                        self.stack.pop_u32()?
+                    } else {
+                        self.memory.read32(address.wrapping_add(i * 4))?
+                    });
+                }
+                keys.retain(|key| matches!(*key, 0xffff_fff8 | 0xffff_ffe4..=0xffff_ffef));
+                if let Some(w) = self
+                    .glk_windows
+                    .get_mut(&arguments.first().copied().unwrap_or(0))
+                {
+                    w.terminators = keys;
+                }
+                0
+            }
+            0x00d6 => {
+                self.request_timer(arguments.first().copied().unwrap_or(0));
                 0
             }
             0x00e0 => {
-                let resource = arguments.first().copied().unwrap_or(0);
                 let dimensions = self
                     .story
-                    .resource(*b"Pict", resource)
+                    .resource(*b"Pict", arguments.first().copied().unwrap_or(0))
                     .and_then(image_dimensions);
                 if let Some([width, height]) = dimensions {
-                    if let Some(address) = arguments
-                        .get(1)
-                        .copied()
-                        .filter(|address| !matches!(*address, 0 | u32::MAX))
-                    {
-                        self.memory.write32(address, width)?;
-                    }
-                    if let Some(address) = arguments
-                        .get(2)
-                        .copied()
-                        .filter(|address| !matches!(*address, 0 | u32::MAX))
-                    {
-                        self.memory.write32(address, height)?;
-                    }
+                    self.write_glk_reference(arguments.get(1).copied().unwrap_or(0), width)?;
+                    self.write_glk_reference(arguments.get(2).copied().unwrap_or(0), height)?;
                     1
                 } else {
                     0
                 }
             }
-            0x00e1 | 0x00e2 => {
+            0x00e1 | 0x00e2 | 0x00ec => {
                 let window = arguments.first().copied().unwrap_or(0);
                 let resource = arguments.get(1).copied().unwrap_or(0);
-                let requested_size = (selector == 0x00e2).then(|| {
-                    [
-                        arguments.get(4).copied().unwrap_or(0),
-                        arguments.get(5).copied().unwrap_or(0),
-                    ]
-                });
-                if let Some(data) = self.story.resource(*b"Pict", resource) {
-                    let graphics_window = self
-                        .glk_windows
-                        .get(&window)
-                        .filter(|candidate| candidate.kind == WINTYPE_GRAPHICS);
-                    let position = graphics_window
-                        .map(|_| {
-                            [
+                if let Some(canvas) = self
+                    .glk_windows
+                    .get(&window)
+                    .filter(|w| w.kind == WINTYPE_GRAPHICS)
+                    && let Some(data) = self.story.resource(*b"Pict", resource)
+                    && let Some(original) = image_dimensions(data)
+                {
+                    let mut size = if selector == 0x00e1 {
+                        original
+                    } else {
+                        [
+                            arguments.get(4).copied().unwrap_or(0),
+                            arguments.get(5).copied().unwrap_or(0),
+                        ]
+                    };
+                    if selector == 0x00ec {
+                        let rule = arguments.get(6).copied().unwrap_or(0);
+                        if rule & !15 != 0 || rule & 3 == 0 || rule & 12 == 0 {
+                            return self.store_destination(&destination, 0, Width::Word);
+                        }
+                        let width = match rule & 3 {
+                            1 => original[0] as u64,
+                            2 => size[0] as u64,
+                            _ => canvas.width as u64 * size[0] as u64 / 65536,
+                        };
+                        let height = match rule & 12 {
+                            4 => original[1] as u64,
+                            8 => size[1] as u64,
+                            _ => ((width as u128 * original[1] as u128 * size[1] as u128)
+                                / (original[0].max(1) as u128 * 65536))
+                                .min(u32::MAX as u128) as u64,
+                        };
+                        size = [
+                            width.min(u32::MAX as u64) as u32,
+                            height.min(u32::MAX as u64) as u32,
+                        ];
+                    }
+                    if size[0] != 0 && size[1] != 0 {
+                        self.graphics.push(GraphicsRequest::Draw(ImageRequest {
+                            window,
+                            resource,
+                            data: data.to_vec(),
+                            position: [
                                 arguments.get(2).copied().unwrap_or(0) as i32,
                                 arguments.get(3).copied().unwrap_or(0) as i32,
-                            ]
-                        })
-                        .unwrap_or([0, 0]);
-                    let canvas_size = graphics_window
-                        .map(|candidate| [candidate.width, candidate.height])
-                        .or_else(|| requested_size.filter(|size| size[0] != 0 && size[1] != 0))
-                        .or_else(|| image_dimensions(data))
-                        .unwrap_or([640, 480]);
-                    self.graphics.push(GraphicsRequest::Draw(ImageRequest {
-                        window,
-                        resource,
-                        data: data.to_vec(),
-                        position,
-                        requested_size,
-                        canvas_size,
-                    }));
+                            ],
+                            requested_size: Some(size),
+                            canvas_size: [canvas.width, canvas.height],
+                        }));
+                    }
                     1
                 } else {
                     0
@@ -2172,7 +2380,9 @@ impl Vm {
                 }
                 0
             }
-            0x0120..=0x0124 => 0,
+            0x00f0..=0x00f4 | 0x00f7..=0x00ff => self.sound_call(selector, &arguments)?,
+            0x0160..=0x0161 | 0x0168..=0x016f => self.datetime_call(selector, &arguments)?,
+            0x0120..=0x0124 => self.unicode_transform(selector, &arguments)?,
             0x0128 | 0x012b => {
                 let value = arguments.last().copied().unwrap_or(0);
                 let stream = if selector == 0x012b {
@@ -2206,20 +2416,6 @@ impl Vm {
                 )?;
                 0
             }
-            0x0140 => {
-                self.char_requested = true;
-                self.input_window = arguments.first().copied().unwrap_or(0);
-                0
-            }
-            0x0141 => {
-                self.line_request = Some(LineRequest {
-                    buffer: arguments.get(1).copied().unwrap_or(0),
-                    max_len: arguments.get(2).copied().unwrap_or(0),
-                    unicode: true,
-                    window: arguments.first().copied().unwrap_or(0),
-                });
-                0
-            }
             _ => {
                 self.unsupported_glk.insert(selector);
                 0
@@ -2228,11 +2424,36 @@ impl Vm {
         self.store_destination(&destination, result, Width::Word)
     }
 
-    fn glk_gestalt(&self, selector: u32, _argument: u32) -> u32 {
+    fn glk_gestalt(&self, selector: u32, argument: u32) -> u32 {
+        let printable = char::from_u32(argument).is_some_and(|c| !c.is_control());
         match selector {
-            0 => 0x0000_0705,
-            1..=2 | 6..=7 | 15 => 1,
-            3 => 2,
+            0 => 0x0000_0706,
+            1 => u32::from(printable || argument == 0xffff_fffa),
+            2 => u32::from(printable),
+            3 => {
+                if printable || argument == 10 {
+                    2
+                } else {
+                    0
+                }
+            }
+            4 => u32::from(self.graphical_host && matches!(argument, 4 | 5)), // MouseInput
+            5 => 1,                                                           // Timer
+            6 => 1,                                                           // Graphics
+            7 => u32::from(self.graphical_host && argument == WINTYPE_GRAPHICS),
+            8..=10 | 21 => u32::from(self.sound_available()), // Sound capabilities
+            11 => 1,                                          // Hyperlinks
+            13 => 0,                                          // MOD tracker music is not supported
+            12 => u32::from(self.graphical_host && argument == 3), // HyperlinkInput (GUI supports text buffers)
+            17..=18 => u32::from(self.graphical_host),             // Line input echo / terminators
+            19 => u32::from(
+                self.graphical_host && matches!(argument, 0xffff_fff8 | 0xffff_ffe4..=0xffff_ffef),
+            ),
+            15..=16 => 1, // Unicode / UnicodeNorm
+            20 => 1,      // DateTime
+            22 => 1,
+            23 => u32::from(self.graphical_host), // ResourceStream / GraphicsCharInput
+            24 => u32::from(self.graphical_host && argument == WINTYPE_GRAPHICS),
             _ => 0,
         }
     }
@@ -2257,8 +2478,19 @@ impl Vm {
         Ok(())
     }
 
+    fn glk_byte_string(&self, address: u32) -> Result<String, VmError> {
+        let kind = self.memory.read8(address)?;
+        if kind != 0xe0 {
+            return Err(VmError::InvalidString { address, kind });
+        }
+        self.memory.c_string(address + 1)
+    }
     fn glk_put_unicode_string(&mut self, stream: u32, address: u32) -> Result<(), VmError> {
-        let mut cursor = address;
+        let kind = self.memory.read8(address)?;
+        if kind != 0xe2 {
+            return Err(VmError::InvalidString { address, kind });
+        }
+        let mut cursor = address + 4;
         loop {
             let value = self.memory.read32(cursor)?;
             if value == 0 {
@@ -2270,12 +2502,13 @@ impl Vm {
     }
 
     fn next_random(&mut self) -> u32 {
+        // A full-period Weyl sequence followed by a bijective integer mixer;
+        // unlike nonzero-state xorshift, this can return every 32-bit value.
+        self.random_state = self.random_state.wrapping_add(0x9e37_79b9);
         let mut value = self.random_state;
-        value ^= value << 13;
-        value ^= value >> 17;
-        value ^= value << 5;
-        self.random_state = value;
-        value
+        value = (value ^ (value >> 16)).wrapping_mul(0x21f0_aaad);
+        value = (value ^ (value >> 15)).wrapping_mul(0x735a_2d97);
+        value ^ (value >> 15)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2378,6 +2611,30 @@ impl Vm {
     }
 }
 
+fn unpredictable_seed() -> u32 {
+    use std::hash::{BuildHasher, Hasher};
+    // RandomState is seeded from the platform's entropy source by the standard library.
+    let seed = std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish();
+    (seed as u32 ^ (seed >> 32) as u32).max(1)
+}
+
+fn float_to_int(value: f64, nearest: bool) -> u32 {
+    if value.is_nan() {
+        return if value.is_sign_negative() {
+            0x8000_0000
+        } else {
+            0x7fff_ffff
+        };
+    }
+    (if nearest {
+        value.round()
+    } else {
+        value.trunc()
+    } as i32) as u32
+}
+
 fn align(value: u32, alignment: u32) -> u32 {
     (value + alignment - 1) & !(alignment - 1)
 }
@@ -2397,6 +2654,26 @@ fn search_result(address: u32, index: u32, options: u32) -> u32 {
 
 fn search_failure(options: u32) -> u32 {
     if options & 0x04 != 0 { u32::MAX } else { 0 }
+}
+
+fn modulo_quotient(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() || a.is_infinite() || b == 0.0 {
+        f64::NAN
+    } else if b.is_infinite() {
+        0.0f64.copysign(a / b)
+    } else {
+        ((a - a % b) / b).copysign(a / b)
+    }
+}
+
+fn doubles_equal(a: f64, b: f64, tolerance: f64) -> bool {
+    if a.is_nan() || b.is_nan() || tolerance.is_nan() {
+        return false;
+    }
+    if a.is_infinite() && b.is_infinite() {
+        return a == b;
+    }
+    (a - b).abs() <= tolerance.abs()
 }
 
 fn floats_equal(a: f32, b: f32, tolerance: f32) -> bool {
@@ -2465,6 +2742,11 @@ fn image_dimensions(data: &[u8]) -> Option<[u32; 2]> {
 
 fn operand_count(opcode: u32) -> Option<usize> {
     Some(match opcode {
+        0x200..=0x204 | 0x238..=0x239 => 3,
+        0x208..=0x209 | 0x218..=0x21a | 0x220..=0x225 => 4,
+        0x210..=0x215 | 0x21b | 0x226 => 6,
+        0x230..=0x231 => 7,
+        0x232..=0x235 => 5,
         0x00 | 0x52 | 0x120 | 0x122 | 0x129 => 0,
         0x20
         | 0x31
@@ -2489,11 +2771,13 @@ fn operand_count(opcode: u32) -> Option<usize> {
         | 0x53
         | 0x103
         | 0x110
+        | 0x123..=0x124
         | 0x127
         | 0x148..=0x149
         | 0x160
         | 0x170
         | 0x178
+        | 0x180..=0x181
         | 0x190..=0x192
         | 0x198..=0x199
         | 0x1a8..=0x1aa
@@ -2523,6 +2807,14 @@ fn operand_count(opcode: u32) -> Option<usize> {
 
 #[derive(Debug, Error)]
 pub enum VmError {
+    #[error("invalid or incompatible save file")]
+    InvalidSave,
+    #[error("invalid or unrepresentable date/time")]
+    InvalidTime,
+    #[error("save/restore requires Glk I/O")]
+    InvalidSaveIo,
+    #[error("stream I/O failed")]
+    StreamIo,
     #[error("invalid heap allocation address {0:#010x}")]
     InvalidHeapAddress(u32),
     #[error("memory read outside the VM address space at {0:#010x}")]
@@ -2573,13 +2865,13 @@ pub enum VmError {
 mod tests {
     use super::*;
 
-    fn push_glk_arguments(vm: &mut Vm, arguments: &[u32]) {
+    pub(super) fn push_glk_arguments(vm: &mut Vm, arguments: &[u32]) {
         for argument in arguments.iter().rev() {
             vm.stack.push_u32(*argument).unwrap();
         }
     }
 
-    fn image_with_program(program: &[u8]) -> Vec<u8> {
+    pub(super) fn image_with_program(program: &[u8]) -> Vec<u8> {
         let mut bytes = vec![0; 0x200];
         bytes[0..4].copy_from_slice(b"Glul");
         for (offset, value) in [
@@ -2850,11 +3142,12 @@ mod tests {
     #[test]
     fn dispatches_official_glk_put_string_selector() {
         let program = [
-            0x40, 0x82, 0x00, 0xc0, // push C string address
+            0x40, 0x82, 0x00, 0xbf, // push C string address
             0x81, 0x30, 0x12, 0x00, 0x00, 0x82, 0x01, // glk put_string
             0x81, 0x20, // quit
         ];
         let mut image = image_with_program(&program);
+        image[0xbf] = 0xe0;
         image[0xc0..0xc3].copy_from_slice(b"Hi\0");
         image[32..36].fill(0);
         let checksum = (0..image.len())
@@ -2872,6 +3165,7 @@ mod tests {
     #[test]
     fn glk_memory_stream_captures_output_without_leaking_to_transcript() {
         let mut image = image_with_program(&[0x81, 0x20]);
+        image[0xbf] = 0xe0;
         image[0xc0..0xc4].copy_from_slice(b"Hex\0");
         update_checksum(&mut image);
         let story = Story::from_bytes(&image, None).unwrap();
@@ -2882,7 +3176,7 @@ mod tests {
         let stream = vm.memory.read32(0x120).unwrap();
         push_glk_arguments(&mut vm, &[stream]);
         vm.glk(0x0047, 1, Destination::Discard).unwrap();
-        push_glk_arguments(&mut vm, &[0xc0]);
+        push_glk_arguments(&mut vm, &[0xbf]);
         vm.glk(0x0082, 1, Destination::Discard).unwrap();
         push_glk_arguments(&mut vm, &[stream]);
         vm.glk(0x0041, 1, Destination::Memory(0x124)).unwrap();
@@ -2901,6 +3195,7 @@ mod tests {
     #[test]
     fn text_grid_output_is_separate_from_the_story_transcript() {
         let mut image = image_with_program(&[0x81, 0x20]);
+        image[0xbf] = 0xe0;
         image[0xc0..0xc9].copy_from_slice(b"Score: 7\0");
         image[32..36].fill(0);
         let checksum = (0..image.len())
@@ -2919,7 +3214,7 @@ mod tests {
         let grid = vm.memory.read32(0x124).unwrap();
         push_glk_arguments(&mut vm, &[grid]);
         vm.glk(0x002f, 1, Destination::Discard).unwrap();
-        push_glk_arguments(&mut vm, &[0xc0]);
+        push_glk_arguments(&mut vm, &[0xbf]);
         vm.glk(0x0082, 1, Destination::Discard).unwrap();
 
         assert_eq!(vm.status_text(), "Score: 7");
@@ -2998,8 +3293,8 @@ mod tests {
 
         assert_eq!(vm.run_steps(8).unwrap(), RunState::Halted);
         assert_eq!(vm.memory.read32(0x120).unwrap(), 0);
-        assert_eq!(vm.memory.read32(0x124).unwrap(), 1);
-        assert_eq!(vm.memory.read32(0x128).unwrap(), 0);
+        assert_eq!(vm.memory.read32(0x124).unwrap(), 0);
+        assert_eq!(vm.memory.read32(0x128).unwrap(), 1);
     }
 
     #[test]

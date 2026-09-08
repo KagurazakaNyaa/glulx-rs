@@ -45,6 +45,32 @@ struct Turn {
     translation: Option<Result<String, String>>,
 }
 
+#[derive(Serialize, Deserialize)]
+struct SavedCanvas {
+    window: u32,
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+}
+#[derive(Serialize)]
+struct SessionRef<'a> {
+    version: u32,
+    vm: &'a Vm,
+    transcript: &'a str,
+    input: &'a str,
+    timer: Option<u32>,
+    canvases: Vec<SavedCanvas>,
+}
+#[derive(Deserialize)]
+struct Session {
+    version: u32,
+    vm: Vm,
+    transcript: String,
+    input: String,
+    timer: Option<u32>,
+    canvases: Vec<SavedCanvas>,
+}
+
 struct DisplayedGraphics {
     pixels: image::RgbaImage,
     texture: egui::TextureHandle,
@@ -174,6 +200,8 @@ pub struct PlayerApp {
     error: Option<String>,
     show_options: bool,
     show_about: bool,
+    show_story_info: bool,
+    cover: Option<egui::TextureHandle>,
     show_scrollback: bool,
     file_browser: FileBrowser,
     translator: Translator,
@@ -203,6 +231,8 @@ impl PlayerApp {
             error: None,
             show_options: false,
             show_about: false,
+            show_story_info: false,
+            cover: None,
             show_scrollback: false,
             file_browser: FileBrowser::new(),
             translator: Translator::new(),
@@ -211,6 +241,40 @@ impl PlayerApp {
         };
         if let Some(path) = initial_story {
             app.load_story(path);
+        } else if let Some(session) = creation
+            .storage
+            .and_then(|storage| eframe::get_value::<Session>(storage, "glulx-session-v1"))
+            && session.version == 1
+        {
+            match session.vm.validate_session() {
+                Ok(mut vm) => {
+                    vm.enable_audio();
+                    vm.resume_timer(session.timer);
+                    app.story_title = vm.story_title().to_owned();
+                    app.story_path = vm.story_path().map(Path::to_owned);
+                    app.last_state = vm.state();
+                    app.vm = Some(vm);
+                    app.transcript = session.transcript;
+                    app.input = session.input;
+                    for canvas in session.canvases {
+                        if let Some(pixels) =
+                            image::RgbaImage::from_raw(canvas.width, canvas.height, canvas.pixels)
+                        {
+                            let texture = creation.egui_ctx.load_texture(
+                                format!("glk-graphics-window-{}", canvas.window),
+                                color_image(&pixels),
+                                egui::TextureOptions::LINEAR,
+                            );
+                            app.graphics
+                                .insert(canvas.window, DisplayedGraphics { pixels, texture });
+                        }
+                    }
+                    app.status = "Previous session restored".to_owned();
+                }
+                Err(error) => {
+                    app.error = Some(format!("Could not restore previous session: {error}"))
+                }
+            }
         }
         app
     }
@@ -223,7 +287,8 @@ impl PlayerApp {
                 Vm::new(story).map_err(|error| error.to_string())
             });
         match loaded {
-            Ok(vm) => {
+            Ok(mut vm) => {
+                vm.enable_audio();
                 self.vm = Some(vm);
                 self.story_path = Some(path.clone());
                 self.transcript.clear();
@@ -234,6 +299,7 @@ impl PlayerApp {
                 self.game_status.clear();
                 self.graphics.clear();
                 self.image_cache.clear();
+                self.cover = None;
                 self.error = None;
                 self.status = format!("Running {}", path.display());
                 self.last_state = RunState::Running;
@@ -268,9 +334,7 @@ impl PlayerApp {
         let Some(vm) = &mut self.vm else {
             return;
         };
-        if vm.state() == RunState::Running
-            && let Err(error) = vm.run_steps(25_000)
-        {
+        if let Err(error) = vm.run_steps(25_000) {
             let pc = vm.pc();
             vm.stop();
             self.error = Some(format!("{error}\nProgram counter: {pc:#010x}"));
@@ -283,6 +347,9 @@ impl PlayerApp {
             self.turn_buffer.push_str(&output);
         }
         let state = vm.state();
+        if state == RunState::WaitingForLine && self.last_state != state {
+            self.input = vm.initial_input();
+        }
         if matches!(state, RunState::WaitingForLine | RunState::WaitingForChar)
             && !matches!(
                 self.last_state,
@@ -295,6 +362,8 @@ impl PlayerApp {
             RunState::Running => "Running".to_owned(),
             RunState::WaitingForLine => "Waiting for a command".to_owned(),
             RunState::WaitingForChar => "Waiting for a key".to_owned(),
+            RunState::WaitingForFile => "Enter a file path, or submit empty to cancel".to_owned(),
+            RunState::WaitingForEvent => "Waiting for an event".to_owned(),
             RunState::Halted => "Story finished".to_owned(),
         };
         self.last_state = state;
@@ -436,6 +505,10 @@ impl PlayerApp {
     }
 
     fn submit_input(&mut self) {
+        self.submit_terminated_input(0);
+    }
+
+    fn submit_terminated_input(&mut self, terminator: u32) {
         let Some(vm) = &mut self.vm else {
             return;
         };
@@ -443,8 +516,15 @@ impl PlayerApp {
             return;
         }
         let input = std::mem::take(&mut self.input);
-        self.transcript.push_str(&format!("> {input}\n"));
-        if let Err(error) = vm.provide_input(&input) {
+        if !matches!(vm.input_request(), Some(InputRequest::File { .. })) {
+            self.transcript.push_str(&format!("> {input}\n"));
+        }
+        let result = if terminator == 0 {
+            vm.provide_input(&input)
+        } else {
+            vm.provide_terminated_input(&input, terminator)
+        };
+        if let Err(error) = result {
             self.fail(error.to_string());
         } else {
             self.last_state = RunState::Running;
@@ -485,6 +565,10 @@ impl PlayerApp {
                     }
                 });
                 ui.menu_button("View", |ui| {
+                    if ui.button("Story information").clicked() {
+                        self.show_story_info = true;
+                        ui.close();
+                    }
                     if ui.button("Scrollback").clicked() {
                         self.show_scrollback = true;
                         ui.close();
@@ -602,47 +686,171 @@ impl PlayerApp {
                     });
                     return;
                 }
-                egui::ScrollArea::vertical()
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        for graphics in self.graphics.values() {
-                            let mut size = graphics.texture.size_vec2();
-                            let scale =
-                                (ui.available_width() / size.x).min(480.0 / size.y).min(1.0);
-                            size *= scale;
-                            ui.add(
-                                egui::Image::new(&graphics.texture)
-                                    .fit_to_exact_size(size)
-                                    .maintain_aspect_ratio(true),
-                            );
-                            ui.add_space(16.0);
-                        }
-                        ui.label(
-                            RichText::new(&self.transcript)
-                                .size(self.settings.font_size)
-                                .color(text),
-                        );
-                        ui.add_space(16.0);
-                    });
-            });
-    }
-
-    fn game_status_bar(&self, context: &egui::Context) {
-        if self.game_status.is_empty() {
-            return;
-        }
-        egui::TopBottomPanel::top("game_status")
-            .frame(
-                egui::Frame::new()
-                    .fill(rgb(self.settings.background_color))
-                    .inner_margin(egui::Margin::symmetric(28, 6)),
-            )
-            .show(context, |ui| {
-                ui.label(
-                    RichText::new(&self.game_status)
-                        .size(self.settings.font_size)
-                        .color(rgb(self.settings.text_color)),
-                );
+                let bounds = ui.available_rect_before_wrap();
+                let views = if let Some(vm) = &mut self.vm {
+                    vm.resize_windows(
+                        bounds.width().max(0.0) as u32,
+                        bounds.height().max(0.0) as u32,
+                    );
+                    vm.window_views()
+                } else {
+                    Vec::new()
+                };
+                let mut click = None;
+                let mut hyperlink = None;
+                for view in views {
+                    let rect = egui::Rect::from_min_size(
+                        bounds.min + egui::vec2(view.rect[0] as f32, view.rect[1] as f32),
+                        egui::vec2(view.rect[2] as f32, view.rect[3] as f32),
+                    );
+                    if rect.width() < 1.0 || rect.height() < 1.0 {
+                        continue;
+                    }
+                    ui.scope_builder(
+                        egui::UiBuilder::new()
+                            .max_rect(rect)
+                            .id_salt(("glk-window", view.id)),
+                        |ui| {
+                            ui.set_clip_rect(rect.intersect(bounds));
+                            if self.settings.window_borders {
+                                ui.painter().rect_stroke(
+                                    rect,
+                                    0.0,
+                                    egui::Stroke::new(1.0_f32, Color32::from_gray(190)),
+                                    egui::StrokeKind::Inside,
+                                );
+                            }
+                            match view.kind {
+                                3 => {
+                                    egui::ScrollArea::vertical().stick_to_bottom(true).show(
+                                        ui,
+                                        |ui| {
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.spacing_mut().item_spacing.x = 0.0;
+                                                for run in &view.runs {
+                                                    let hint = |index| {
+                                                        view.hints.get(&(run.style, index)).copied()
+                                                    };
+                                                    let mut foreground =
+                                                        hint(7).map(color_word).unwrap_or(text);
+                                                    let mut background = hint(8).map(color_word);
+                                                    if hint(9) == Some(1) {
+                                                        let old = foreground;
+                                                        foreground =
+                                                            background.unwrap_or(rgb(self
+                                                                .settings
+                                                                .background_color));
+                                                        background = Some(old);
+                                                    }
+                                                    let size = (self.settings.font_size
+                                                        + hint(3).unwrap_or(0) as i32 as f32 * 2.0)
+                                                        .clamp(8.0, 64.0);
+                                                    let mut rich = RichText::new(&run.text)
+                                                        .size(size)
+                                                        .color(foreground);
+                                                    if hint(4).map_or(
+                                                        matches!(run.style, 3 | 4 | 5 | 8),
+                                                        |v| v as i32 > 0,
+                                                    ) {
+                                                        rich = rich.strong();
+                                                    }
+                                                    if hint(5)
+                                                        .map_or(matches!(run.style, 1 | 5), |v| {
+                                                            v != 0
+                                                        })
+                                                    {
+                                                        rich = rich.italics();
+                                                    }
+                                                    if hint(6) == Some(0) || run.style == 2 {
+                                                        rich = rich.monospace();
+                                                    }
+                                                    if let Some(color) = background {
+                                                        rich = rich.background_color(color);
+                                                    }
+                                                    if run.hyperlink != 0 {
+                                                        if ui
+                                                            .add(
+                                                                egui::Label::new(
+                                                                    rich.color(rgb(self
+                                                                        .settings
+                                                                        .hyperlink_color))
+                                                                        .underline(),
+                                                                )
+                                                                .sense(egui::Sense::click()),
+                                                            )
+                                                            .clicked()
+                                                        {
+                                                            hyperlink =
+                                                                Some((view.id, run.hyperlink));
+                                                        }
+                                                    } else {
+                                                        ui.label(rich);
+                                                    }
+                                                }
+                                            });
+                                        },
+                                    );
+                                }
+                                4 => {
+                                    let response = ui.add(
+                                        egui::Label::new(
+                                            RichText::new(&view.grid)
+                                                .monospace()
+                                                .size(13.0)
+                                                .color(text),
+                                        )
+                                        .sense(egui::Sense::click()),
+                                    );
+                                    if response.clicked()
+                                        && let Some(pos) = response.interact_pointer_pos()
+                                    {
+                                        click = Some((
+                                            view.id,
+                                            ((pos.x - rect.min.x) / 8.0).max(0.0) as u32,
+                                            ((pos.y - rect.min.y) / 16.0).max(0.0) as u32,
+                                        ));
+                                    }
+                                }
+                                5 => {
+                                    let response = ui.allocate_rect(rect, egui::Sense::click());
+                                    if let Some(graphics) = self.graphics.get(&view.id) {
+                                        let destination = egui::Rect::from_min_size(
+                                            rect.min,
+                                            graphics.texture.size_vec2(),
+                                        );
+                                        ui.painter().image(
+                                            graphics.texture.id(),
+                                            destination,
+                                            egui::Rect::from_min_max(
+                                                egui::Pos2::ZERO,
+                                                egui::pos2(1.0, 1.0),
+                                            ),
+                                            Color32::WHITE,
+                                        );
+                                    }
+                                    if response.clicked()
+                                        && let Some(pos) = response.interact_pointer_pos()
+                                    {
+                                        click = Some((
+                                            view.id,
+                                            (pos.x - rect.min.x).max(0.0) as u32,
+                                            (pos.y - rect.min.y).max(0.0) as u32,
+                                        ));
+                                    }
+                                }
+                                _ => {}
+                            }
+                        },
+                    );
+                }
+                if let Some(vm) = &mut self.vm {
+                    if let Some((window, x, y)) = click {
+                        let _ = vm.mouse_input(window, x, y);
+                    }
+                    if let Some((window, value)) = hyperlink {
+                        let _ = vm.hyperlink_input(window, value);
+                    }
+                }
             });
     }
 
@@ -659,22 +867,63 @@ impl PlayerApp {
             )
             .show(context, |ui| {
                 ui.horizontal(|ui| {
+                    if let Some(vm) = &mut self.vm {
+                        let windows = vm.pending_input_windows();
+                        if windows.len() > 1 {
+                            let mut selected = vm.input_window();
+                            egui::ComboBox::from_id_salt("input-window")
+                                .selected_text(format!("Window {selected}"))
+                                .show_ui(ui, |ui| {
+                                    for window in windows {
+                                        ui.selectable_value(
+                                            &mut selected,
+                                            window,
+                                            format!("Window {window}"),
+                                        );
+                                    }
+                                });
+                            if selected != vm.input_window() {
+                                let _ = vm.update_line_input(&self.input);
+                                vm.select_input_window(selected);
+                                self.input = vm.initial_input();
+                            }
+                        }
+                    }
                     ui.label(match request.unwrap() {
                         InputRequest::Line { .. } => ">",
                         InputRequest::Character => "Key",
+                        InputRequest::File { writing: true } => "Save file",
+                        InputRequest::File { writing: false } => "Open file",
                     });
                     let response = ui.add_sized(
                         [ui.available_width() - 72.0, 30.0],
                         egui::TextEdit::singleline(&mut self.input)
                             .font(egui::TextStyle::Monospace),
                     );
-                    response.request_focus();
-                    let enter = response.lost_focus()
+                    if response.changed()
+                        && let Some(vm) = &mut self.vm
+                    {
+                        let _ = vm.update_line_input(&self.input);
+                    }
+                    let enter = (response.has_focus() || response.lost_focus())
                         && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                    response.request_focus();
                     let character_typed = matches!(request, Some(InputRequest::Character))
                         && response.changed()
                         && !self.input.is_empty();
-                    if ui.button("Send").clicked() || enter || character_typed {
+                    let terminator = if matches!(request, Some(InputRequest::Line { .. })) {
+                        self.vm.as_ref().and_then(|vm| {
+                            vm.line_terminators().iter().copied().find(|code| {
+                                glk_terminator_key(*code)
+                                    .is_some_and(|key| ui.input(|input| input.key_pressed(key)))
+                            })
+                        })
+                    } else {
+                        None
+                    };
+                    if let Some(terminator) = terminator {
+                        self.submit_terminated_input(terminator);
+                    } else if ui.button("Send").clicked() || enter || character_typed {
                         self.submit_input();
                     }
                 });
@@ -698,6 +947,41 @@ impl PlayerApp {
     }
 
     fn dialogs(&mut self, context: &egui::Context) {
+        if self.show_story_info
+            && let Some(vm) = &self.vm
+        {
+            let metadata = vm.metadata();
+            if self.cover.is_none()
+                && let Some(data) = vm.cover()
+                && let Ok(pixels) = image::load_from_memory(data)
+            {
+                self.cover = Some(context.load_texture(
+                    "story-cover",
+                    color_image(&pixels.to_rgba8()),
+                    egui::TextureOptions::LINEAR,
+                ));
+            }
+            egui::Window::new("Story information")
+                .open(&mut self.show_story_info)
+                .show(context, |ui| {
+                    ui.heading(vm.story_title());
+                    if let Some(cover) = &self.cover {
+                        ui.add(egui::Image::new(cover).max_height(300.0));
+                    }
+                    if !metadata.author.is_empty() {
+                        ui.label(format!("By {}", metadata.author));
+                    }
+                    if !metadata.headline.is_empty() {
+                        ui.label(&metadata.headline);
+                    }
+                    if !metadata.description.is_empty() {
+                        ui.label(&metadata.description);
+                    }
+                    if !metadata.ifid.is_empty() {
+                        ui.small(format!("IFID: {}", metadata.ifid));
+                    }
+                });
+        }
         if let Some(error) = self.error.clone() {
             let mut open = true;
             egui::Window::new("Glulx error")
@@ -781,6 +1065,41 @@ impl PlayerApp {
 impl eframe::App for PlayerApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, STORAGE_KEY, &self.settings);
+        if let Some(vm) = &self.vm {
+            let _ = vm.flush_streams();
+        }
+        if let Some(vm) = &self.vm
+            && vm.state() != RunState::Halted
+        {
+            let canvases = self
+                .graphics
+                .iter()
+                .map(|(&window, canvas)| SavedCanvas {
+                    window,
+                    width: canvas.pixels.width(),
+                    height: canvas.pixels.height(),
+                    pixels: canvas.pixels.as_raw().clone(),
+                })
+                .collect();
+            eframe::set_value(
+                storage,
+                "glulx-session-v1",
+                &SessionRef {
+                    version: 1,
+                    vm,
+                    transcript: &self.transcript,
+                    input: &self.input,
+                    timer: vm.timer_interval(),
+                    canvases,
+                },
+            );
+        } else {
+            storage.set_string("glulx-session-v1", String::new());
+        }
+    }
+
+    fn auto_save_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(30)
     }
 
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
@@ -806,7 +1125,7 @@ impl eframe::App for PlayerApp {
         self.poll_graphics(context);
         self.poll_translations();
         self.menu_bar(context);
-        self.game_status_bar(context);
+
         self.status_bar(context);
         self.input_bar(context);
         self.story_view(context);
@@ -903,6 +1222,33 @@ fn is_story_path(path: &Path) -> bool {
                 "ulx" | "blb" | "blorb" | "glb" | "gblorb"
             )
         })
+}
+
+fn color_word(value: u32) -> Color32 {
+    Color32::from_rgb((value >> 16) as u8, (value >> 8) as u8, value as u8)
+}
+
+fn glk_terminator_key(code: u32) -> Option<egui::Key> {
+    use egui::Key;
+    if code == 0xffff_fff8 {
+        return Some(Key::Escape);
+    }
+    [
+        Key::F1,
+        Key::F2,
+        Key::F3,
+        Key::F4,
+        Key::F5,
+        Key::F6,
+        Key::F7,
+        Key::F8,
+        Key::F9,
+        Key::F10,
+        Key::F11,
+        Key::F12,
+    ]
+    .get(0xffff_ffefu32.wrapping_sub(code) as usize)
+    .copied()
 }
 
 #[cfg(test)]
