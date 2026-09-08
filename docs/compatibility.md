@@ -15,10 +15,35 @@ for coverage and reproducible evidence. This is not a claim of exhaustive confor
 - Text styles, inline/margin images, date/time APIs and audio channels with repeat, pause, fades and notifications.
 - Desktop file prompts, open/restart/stop, scrollback, settings, translation and automatic session restoration.
 
+## Not yet implemented
+
+Raw `.ulx` files cannot attach a separate Blorb resource archive through the GUI,
+CLI or public API, and the player does not discover same-name archives. Resources
+are currently read only from the story's own Blorb container. Separate archive
+selection and session restoration are tracked in the specification checklist. Blorb
+IFhd identity checks and conflicting executable/resource arguments also need
+coverage. Loose PIC/SND/DATA resource-directory loading is an optional missing
+player feature. Container validation currently tolerates nonzero padding and an
+unindexed GLUL fallback; it does not reject every malformed archive.
+
+The deprecated, optional Blorb `SONG` format, which references AIFF samples stored
+as separate resources, is not implemented.
+
+The current headless loop is a line-oriented automation adapter. It does not render
+text-grid/status windows or provide terminal editing of prefilled text, live input
+cancellation, or immediate character input without Enter. A real terminal host is
+pending; its capability reporting must match its supported windows and input.
+
+Light font-weight requests currently
+render as regular weight; selecting a real light face is also pending.
+
 ## Limits
 
 VM memory is limited to 256 MiB. Undo retains at most 16 snapshots within a
-64 MiB combined budget; older snapshots are evicted and an oversized save fails.
+64 MiB estimated budget counting memory, stack and story image; heap-index and
+allocator overhead are excluded. Older snapshots are evicted and an oversized save
+fails. setmemsize/malloc handle their configured limits and memory reservation
+failures; this is not a general promise of recovering from every process allocation failure.
 Portable IFZS excludes Glk, RNG, I/O system and string-table state as required;
 the separate versioned desktop session includes host state and bundled story data.
 Desktop sessions are local player snapshots, not an interchange format.
@@ -33,7 +58,7 @@ alternatives are available in Story information. Text-buffer style hints 0–9 a
 indentation/hanging indents and all four justification modes are implemented. Grid
 cells retain style and hyperlinks; grid layout hints 0–3/6 are ignored to keep equal
 cell dimensions, while weight/oblique/color hints apply. Measurements reflect actual
-rendering; light-weight requests fall back to regular when unavailable. System outline
+rendering; light-weight requests currently fall back to regular. System outline
 fonts are loaded automatically, and Options accepts an extra TTF/OTF/TTC fallback.
 CharOutput reports missing glyphs accurately. Text-buffer window sizing uses the
 normal style’s actual font metrics; grids keep uniform 8×16 cells.
