@@ -13,6 +13,10 @@ This repository is an early executable milestone, not yet a drop-in replacement
 for Git or Glulxe. See [docs/compatibility.md](docs/compatibility.md) for the
 exact implemented surface.
 
+The specification-based [compatibility checklist](docs/glulx-spec-checklist.md)
+tracks implemented features, remaining gaps, and validation work against the
+public Glulx, Glk, and Blorb specifications.
+
 ## Run
 
 ```sh
