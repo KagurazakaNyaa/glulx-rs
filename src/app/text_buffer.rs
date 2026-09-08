@@ -32,7 +32,7 @@ impl ImageCache {
 }
 
 enum Paint {
-    Text(Arc<egui::Galley>),
+    Text(Arc<egui::Galley>, bool),
     Image(u32),
 }
 
@@ -46,7 +46,25 @@ struct Item {
     hyperlink: u32,
 }
 
+#[derive(Clone, Copy, Default)]
+struct ParagraphStyle {
+    indentation: f32,
+    first_indent: f32,
+    justification: u32,
+}
+
+impl From<crate::vm::ResolvedStyle> for ParagraphStyle {
+    fn from(style: crate::vm::ResolvedStyle) -> Self {
+        Self {
+            indentation: style.indentation as f32,
+            first_indent: style.paragraph_indentation as f32,
+            justification: style.justification,
+        }
+    }
+}
+
 enum Token {
+    Paragraph(ParagraphStyle),
     Word(Vec<Item>),
     Space(Vec<Item>),
     Image(Item),
@@ -65,7 +83,9 @@ struct Layout {
     ascent: f32,
     descent: f32,
     y: f32,
-    line: Vec<(f32, Item)>,
+    line: Vec<(f32, Item, bool)>,
+    paragraph: ParagraphStyle,
+    first_line: bool,
     floats: Vec<(u32, egui::Rect)>,
     placed: Vec<Placed>,
 }
@@ -78,12 +98,14 @@ impl Layout {
             descent,
             y: 0.0,
             line: Vec::new(),
+            paragraph: ParagraphStyle::default(),
+            first_line: true,
             floats: Vec::new(),
             placed: Vec::new(),
         }
     }
 
-    fn bounds(&self) -> (f32, f32) {
+    fn margin_bounds(&self) -> (f32, f32) {
         self.floats
             .iter()
             .filter(|(_, rect)| rect.bottom() > self.y)
@@ -96,17 +118,33 @@ impl Layout {
             })
     }
 
+    fn bounds(&self) -> (f32, f32) {
+        let (left, right) = self.margin_bounds();
+        let first = if self.first_line {
+            self.paragraph.first_indent
+        } else {
+            0.0
+        };
+        let left = left + self.paragraph.indentation + first;
+        (left, (right - self.paragraph.indentation).max(left + 1.0))
+    }
+
     fn cursor(&self) -> f32 {
         self.line
             .last()
-            .map_or_else(|| self.bounds().0, |(x, item)| x + item.size.x)
+            .map_or_else(|| self.bounds().0, |(x, item, _)| x + item.size.x)
     }
 
     /// If both margins leave too little room, continue beneath the first ending image.
-    fn make_room(&mut self, width: f32) {
+    fn make_room(&mut self, width: f32, margin: bool) {
         loop {
-            let (left, right) = self.bounds();
-            if width <= right - left || (left == 0.0 && right == self.width) {
+            let (left, right) = if margin {
+                self.margin_bounds()
+            } else {
+                self.bounds()
+            };
+            if width <= right - left || !self.floats.iter().any(|(_, rect)| rect.bottom() > self.y)
+            {
                 return;
             }
             let next = self
@@ -133,14 +171,14 @@ impl Layout {
                 // A trailing space cannot create an extra line before a newline.
                 return;
             }
-            self.end_line(false);
+            self.end_line(false, false);
         }
         if self.line.is_empty() {
-            self.make_room(width);
+            self.make_room(width, false);
         }
         for item in items {
             let x = self.cursor();
-            self.line.push((x, *item));
+            self.line.push((x, *item, space));
         }
     }
 
@@ -150,8 +188,8 @@ impl Layout {
         if !self.line.is_empty() {
             return;
         }
-        self.make_room(item.size.x);
-        let (left, right) = self.bounds();
+        self.make_room(item.size.x, true);
+        let (left, right) = self.margin_bounds();
         let x = if item.alignment == 4 {
             left
         } else {
@@ -162,7 +200,7 @@ impl Layout {
         self.placed.push(Placed { item, rect });
     }
 
-    fn end_line(&mut self, force: bool) {
+    fn end_line(&mut self, force: bool, last: bool) {
         if self.line.is_empty() {
             if force {
                 self.y += self.ascent + self.descent;
@@ -172,24 +210,54 @@ impl Layout {
         let ascent = self
             .line
             .iter()
-            .filter_map(|(_, item)| item.ascent)
+            .filter_map(|(_, item, _)| item.ascent)
             .fold(self.ascent, f32::max);
         let mut top = -ascent;
         let mut bottom = self.descent;
-        for (_, item) in &self.line {
+        for (_, item, _) in &self.line {
             let relative_top = item_top(*item, ascent);
             top = top.min(relative_top);
             bottom = bottom.max(relative_top + item.size.y);
         }
         let baseline = self.y - top;
-        for (x, item) in self.line.drain(..) {
+        let content_end = self
+            .line
+            .iter()
+            .rposition(|(_, _, space)| !space)
+            .map(|i| self.line[i].0 + self.line[i].1.size.x)
+            .unwrap_or_else(|| self.bounds().0);
+        let (left, right) = self.bounds();
+        let remaining = (right - content_end).max(0.0);
+        let shift = match self.paragraph.justification {
+            2 => remaining / 2.0,
+            3 => remaining,
+            _ => 0.0,
+        };
+        let gaps = self
+            .line
+            .iter()
+            .filter(|(x, _, space)| *space && *x > left && *x < content_end)
+            .count();
+        let expansion = if self.paragraph.justification == 1 && !last && gaps > 0 {
+            remaining / gaps as f32
+        } else {
+            0.0
+        };
+        let mut offset = shift;
+        for (x, mut item, space) in self.line.drain(..) {
+            let position = x + offset;
+            if space && x > left && x < content_end {
+                item.size.x += expansion;
+                offset += expansion;
+            }
             let rect = egui::Rect::from_min_size(
-                egui::pos2(x, baseline + item_top(item, ascent)),
+                egui::pos2(position, baseline + item_top(item, ascent)),
                 item.size,
             );
             self.placed.push(Placed { item, rect });
         }
         self.y += bottom - top;
+        self.first_line = false;
     }
 
     fn flow_break(&mut self) {
@@ -199,7 +267,7 @@ impl Layout {
             .map(|(_, rect)| rect.bottom())
             .fold(self.y, f32::max);
         if bottom > self.y {
-            self.end_line(false);
+            self.end_line(false, true);
             self.y = self.y.max(bottom);
         }
     }
@@ -208,6 +276,10 @@ impl Layout {
         let mut empty_tail = false;
         for token in tokens {
             match token {
+                Token::Paragraph(style) => {
+                    self.paragraph = *style;
+                    self.first_line = true;
+                }
                 Token::Word(items) => {
                     self.word(items, false);
                     empty_tail = false;
@@ -223,7 +295,8 @@ impl Layout {
                     empty_tail = false;
                 }
                 Token::Newline => {
-                    self.end_line(true);
+                    self.end_line(true, true);
+                    self.first_line = true;
                     empty_tail = true;
                 }
                 Token::FlowBreak => {
@@ -233,7 +306,7 @@ impl Layout {
                 }
             }
         }
-        self.end_line(false);
+        self.end_line(false, true);
         if empty_tail {
             self.y += self.ascent + self.descent;
         }
@@ -264,27 +337,16 @@ fn rich_text(
     view: &WindowView,
     settings: &PlayerSettings,
 ) -> RichText {
-    let hint = |index| view.hints.get(&(run.style, index)).copied();
-    let mut foreground = hint(7).map(color_word).unwrap_or(rgb(settings.text_color));
-    let mut background = hint(8).map(color_word);
-    if hint(9) == Some(1) {
-        let old = foreground;
-        foreground = background.unwrap_or(rgb(settings.background_color));
-        background = Some(old);
-    }
-    let size = (settings.font_size + hint(3).unwrap_or(0) as i32 as f32 * 2.0).clamp(8.0, 64.0);
-    let mut rich = RichText::new(text).size(size).color(foreground);
-    if hint(4).map_or(matches!(run.style, 3 | 4 | 5 | 8), |v| v as i32 > 0) {
-        rich = rich.strong();
-    }
-    if hint(5).map_or(matches!(run.style, 1 | 5), |v| v != 0) {
+    let style = view.style(run.style);
+    let mut rich = RichText::new(text)
+        .size(style.font_size)
+        .color(color_word(style.foreground))
+        .background_color(color_word(style.background));
+    if style.oblique {
         rich = rich.italics();
     }
-    if hint(6) == Some(0) || run.style == 2 {
+    if !style.proportional {
         rich = rich.monospace();
-    }
-    if let Some(color) = background {
-        rich = rich.background_color(color);
     }
     if run.hyperlink != 0 {
         rich = rich.color(rgb(settings.hyperlink_color)).underline();
@@ -329,7 +391,12 @@ fn prepare(
     let descent = (base.size().y - ascent).max(0.0);
     let mut tokens = Vec::new();
     let mut paints = Vec::new();
+    let mut paragraph_start = true;
     for run in &view.runs {
+        if paragraph_start && (!run.text.is_empty() || run.image.is_some()) {
+            tokens.push(Token::Paragraph(view.style(run.style).into()));
+            paragraph_start = false;
+        }
         if run.flow_break {
             tokens.push(Token::FlowBreak);
         }
@@ -353,7 +420,12 @@ fn prepare(
             if first == '\n' {
                 tokens.push(Token::Newline);
                 start += 1;
+                paragraph_start = true;
                 continue;
+            }
+            if paragraph_start {
+                tokens.push(Token::Paragraph(view.style(run.style).into()));
+                paragraph_start = false;
             }
             let space = first.is_whitespace();
             let mut end = start + first.len_utf8();
@@ -397,7 +469,7 @@ fn prepare(
                     alignment: 0,
                     hyperlink: run.hyperlink,
                 };
-                paints.push(Paint::Text(galley));
+                paints.push(Paint::Text(galley, view.style(run.style).weight > 0));
                 match tokens.last_mut() {
                     Some(Token::Word(items)) if merge && !space => items.push(item),
                     Some(Token::Space(items)) if merge && space => items.push(item),
@@ -429,9 +501,20 @@ pub(super) fn show(
             continue;
         }
         match &paints[placed.item.index] {
-            Paint::Text(galley) => {
+            Paint::Text(galley, bold) => {
+                if let Some(section) = galley.job.sections.first() {
+                    ui.painter()
+                        .rect_filled(destination, 0.0, section.format.background);
+                }
                 ui.painter()
-                    .galley(destination.min, galley.clone(), Color32::WHITE)
+                    .galley(destination.min, galley.clone(), Color32::WHITE);
+                if *bold {
+                    ui.painter().galley(
+                        destination.min + egui::vec2(0.45, 0.0),
+                        galley.clone(),
+                        Color32::WHITE,
+                    );
+                }
             }
             Paint::Image(resource) => {
                 if let Some(texture) = images.get(ui, vm, *resource) {
@@ -494,6 +577,69 @@ mod tests {
             .find(|item| item.item.index == index)
             .unwrap()
             .rect
+    }
+
+    fn paragraph(indentation: f32, first_indent: f32, justification: u32) -> Token {
+        Token::Paragraph(ParagraphStyle {
+            indentation,
+            first_indent,
+            justification,
+        })
+    }
+    fn space(index: usize, width: f32) -> Token {
+        let Token::Word(items) = text(index, width) else {
+            unreachable!()
+        };
+        Token::Space(items)
+    }
+
+    #[test]
+    fn paragraph_alignment_and_hanging_indent_use_available_line_width() {
+        for (align, expected) in [(0, 10.0), (2, 35.0), (3, 60.0)] {
+            let (items, _) = layout(&[paragraph(10.0, 0.0, align), text(0, 30.0)], 100.0);
+            assert_eq!(rect(&items, 0).left(), expected);
+        }
+        let (items, _) = layout(
+            &[
+                paragraph(20.0, -10.0, 0),
+                text(0, 60.0),
+                text(1, 50.0),
+                Token::Newline,
+                text(2, 10.0),
+            ],
+            100.0,
+        );
+        assert_eq!(rect(&items, 0).left(), 10.0);
+        assert_eq!(rect(&items, 1).left(), 20.0);
+        assert_eq!(rect(&items, 2).left(), 10.0);
+    }
+
+    #[test]
+    fn full_justification_expands_only_wrapped_lines_and_respects_margins() {
+        let (items, _) = layout(
+            &[
+                paragraph(10.0, 10.0, 1),
+                text(0, 30.0),
+                space(1, 5.0),
+                text(2, 30.0),
+                space(3, 5.0),
+                text(4, 30.0),
+            ],
+            100.0,
+        );
+        assert_eq!(rect(&items, 0).left(), 20.0);
+        assert_eq!(rect(&items, 2).right(), 90.0);
+        assert_eq!(rect(&items, 4).left(), 10.0);
+        let (items, _) = layout(
+            &[
+                paragraph(8.0, 0.0, 3),
+                picture(0, 20.0, 80.0, 5),
+                text(1, 20.0),
+            ],
+            100.0,
+        );
+        assert_eq!(rect(&items, 1).right(), 68.0);
+        assert_eq!(rect(&items, 0).right(), 100.0);
     }
 
     #[test]
@@ -677,11 +823,15 @@ mod tests {
                     rect: [0, 0, 100, 100],
                     runs: vec![run("sec", 0), run("ret", 1)],
                     grid: String::new(),
+                    grid_cells: Vec::new(),
+                    grid_size: [0, 0],
+                    grid_cursor: [0, 0],
+                    appearance: Default::default(),
                     hints: Default::default(),
                 };
                 let settings = PlayerSettings::default();
                 let (tokens, _, _, _) = prepare(ui, &view, &settings, 200.0);
-                assert!(matches!(&tokens[..], [Token::Word(items)] if items.len() == 2));
+                assert!(matches!(&tokens[..], [Token::Paragraph(_), Token::Word(items)] if items.len() == 2));
                 view.runs = vec![run(
                     "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz",
                     0,
@@ -693,7 +843,7 @@ mod tests {
                 let reconstructed: String = paints
                     .iter()
                     .filter_map(|paint| match paint {
-                        Paint::Text(galley) => Some(galley.text()),
+                        Paint::Text(galley, _) => Some(galley.text()),
                         _ => None,
                     })
                     .collect();
@@ -722,6 +872,10 @@ mod tests {
                     rect: [0, 0, 200, 200],
                     runs: vec![image],
                     grid: String::new(),
+                    grid_cells: Vec::new(),
+                    grid_size: [0, 0],
+                    grid_cursor: [0, 0],
+                    appearance: Default::default(),
                     hints: Default::default(),
                 };
                 let settings = PlayerSettings::default();

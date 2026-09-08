@@ -13,16 +13,20 @@ address checks and a bounded allocation policy.
 bounded run interface keeps the GUI responsive. Unsupported instructions are typed
 errors carrying execution context. Host behavior is split into modules under
 `src/vm`: `windows`, `streams`, `events`, `presentation`, `unicode`, `datetime`,
-`sound`, `save`, `session` and `acceleration`. The VM depends on neither egui nor HTTP; sound uses
+`sound`, `save`, `session`, `acceleration`, `strings` and `grid`. The VM depends on neither egui nor HTTP; sound uses
 rodio; MOD resources are generated incrementally by a Rust tracker player. Multi-play
 channels enter the device as one aligned source. Presentation returns window rectangles,
 text runs with image/flow markers, and graphics commands. The GUI text-buffer layout
 formats inline images and floating margins together with styled text, retaining image
-rules for resize and caching textures per story.
+rules for resize and caching textures per story. Styles resolve once through a shared
+VM/presentation model so style_measure matches rendered sizes/colors. Grid cells retain
+style and hyperlink attributes with consistent paint and input geometry. Host font
+coverage and metrics are injected callbacks, omitted from portable and desktop
+serialization and reinstalled by the GUI. This keeps egui out of the VM.
 
 `PlayerApp` executes short slices, renders each window, and supplies keyboard,
 mouse, hyperlink and file-selection results. Waiting states distinguish line,
-character, file and general events. The terminal adapter reads stdin on a worker
+character, file (including overwrite confirmation) and general events. The terminal adapter reads stdin on a worker
 so waiting for a line does not prevent timer delivery. Streams flush at stop/save.
 
 ## Persistence

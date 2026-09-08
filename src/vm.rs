@@ -1,15 +1,18 @@
 mod acceleration;
 mod datetime;
 mod events;
+mod grid;
 mod presentation;
 mod save;
 mod session;
 mod sound;
 mod streams;
+mod strings;
 mod unicode;
 mod windows;
 use events::Request;
-pub use presentation::{BufferImage, TextRun, WindowView};
+pub use grid::{GRID_CELL_HEIGHT, GRID_CELL_WIDTH, GRID_FONT_SIZE, GridCell};
+pub use presentation::{BufferImage, ResolvedStyle, TextAppearance, TextRun, WindowView};
 #[cfg(test)]
 mod conformance;
 
@@ -21,6 +24,11 @@ use std::{
 use thiserror::Error;
 
 use crate::{Story, memory::Memory};
+
+/// A graphical host reports the characters represented by its active fonts.
+/// Available fonts belong to the host and are not part of a saved VM state.
+pub type GlyphSupport = std::sync::Arc<dyn Fn(char) -> bool + Send + Sync>;
+pub type TextMetrics = std::sync::Arc<dyn Fn(ResolvedStyle) -> [u32; 2] + Send + Sync>;
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunState {
@@ -55,7 +63,14 @@ pub enum GraphicsRequest {
     Fill {
         window: u32,
         color: u32,
+        // Origins are signed; width and height retain their unsigned u32 bit
+        // patterns. Keeping this shape also reads existing desktop sessions.
         rect: [i32; 4],
+        canvas_size: [u32; 2],
+    },
+    Resize {
+        window: u32,
+        background: u32,
         canvas_size: [u32; 2],
     },
     Clear {
@@ -99,6 +114,8 @@ struct LineRequest {
     unicode: bool,
     initial: String,
     echo: bool,
+    #[serde(default)]
+    terminators: Vec<u32>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
@@ -131,9 +148,17 @@ struct GlkWindow {
     cursor_x: u32,
     cursor_y: u32,
     grid: Vec<char>,
+    #[serde(default)]
+    grid_styles: Vec<u32>,
+    #[serde(default)]
+    grid_hyperlinks: Vec<u32>,
     background_color: u32,
     parent: u32,
     children: Option<[u32; 2]>,
+    // Physical child order is fixed when a split is created. None identifies
+    // older desktop sessions, whose order is inferred once from their layout.
+    #[serde(default)]
+    children_reversed: Option<bool>,
     method: u32,
     split_size: u32,
     key: u32,
@@ -162,6 +187,8 @@ enum GlkStreamTarget {
         address: u32,
         length: u32,
         position: u32,
+        #[serde(default)]
+        extent: Option<u32>,
         write_count: u32,
         read_count: u32,
         mode: u32,
@@ -184,10 +211,13 @@ impl GlkWindow {
             height,
             cursor_x: 0,
             cursor_y: 0,
+            grid_styles: vec![0; grid.len()],
+            grid_hyperlinks: vec![0; grid.len()],
             grid,
             background_color: 0x00ff_ffff,
             parent: 0,
             children: None,
+            children_reversed: None,
             method: 0,
             split_size: 0,
             key: 0,
@@ -201,22 +231,6 @@ impl GlkWindow {
             echo_line: true,
             terminators: Vec::new(),
         }
-    }
-
-    fn put_grid_char(&mut self, character: char) {
-        if character == '\n' {
-            self.cursor_x = 0;
-            self.cursor_y = (self.cursor_y + 1).min(self.height.saturating_sub(1));
-            return;
-        }
-        if self.cursor_x >= self.width || self.cursor_y >= self.height {
-            return;
-        }
-        let index = self.cursor_y.saturating_mul(self.width) + self.cursor_x;
-        if let Some(cell) = self.grid.get_mut(index as usize) {
-            *cell = character;
-        }
-        self.cursor_x += 1;
     }
 
     fn grid_text(&self) -> String {
@@ -381,10 +395,16 @@ impl Stack {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Vm {
+    #[serde(skip)]
+    glyph_support: Option<GlyphSupport>,
+    #[serde(skip)]
+    text_metrics: Option<TextMetrics>,
     #[serde(default)]
     acceleration: acceleration::Acceleration,
     #[serde(default)]
     accelerated_return: Option<u32>,
+    #[serde(default)]
+    text_appearance: TextAppearance,
     graphical_host: bool,
     #[serde(skip)]
     audio: sound::AudioDevice,
@@ -433,8 +453,11 @@ impl Vm {
         let stack_size = story.header.stack_size;
         let start_func = story.header.start_func;
         let mut vm = Self {
+            glyph_support: None,
+            text_metrics: None,
             acceleration: acceleration::Acceleration::default(),
             accelerated_return: None,
+            text_appearance: TextAppearance::default(),
             graphical_host: true,
             audio: sound::AudioDevice::default(),
             channels: BTreeMap::new(),
@@ -488,8 +511,8 @@ impl Vm {
     pub fn input_request(&self) -> Option<InputRequest> {
         match self.state {
             RunState::WaitingForLine => match self.requests.get(&self.input_window) {
-                Some(Request::Line(request)) => Some(InputRequest::Line {
-                    maximum_length: request.max_len,
+                Some(Request::Line(_)) => Some(InputRequest::Line {
+                    maximum_length: self.line_input_max_len(),
                 }),
                 _ => None,
             },
@@ -1407,7 +1430,6 @@ impl Vm {
         }
 
         let frame_ptr = self.stack.len();
-        self.stack.frame_ptr = frame_ptr;
         while format.len() % 4 != 0 {
             format.push(0);
         }
@@ -1422,18 +1444,15 @@ impl Vm {
             }
         }
         let frame_len = align(local_cursor, 4);
+        let frame_end = frame_ptr
+            .checked_add(frame_len)
+            .filter(|end| *end <= self.stack.maximum)
+            .ok_or(VmError::StackOverflow)?;
+        self.stack.frame_ptr = frame_ptr;
         self.stack.push_u32(frame_len)?;
         self.stack.push_u32(locals_pos)?;
-        if self
-            .stack
-            .len()
-            .checked_add(format.len() as u32)
-            .is_none_or(|end| end > self.stack.maximum)
-        {
-            return Err(VmError::StackOverflow);
-        }
         self.stack.bytes.extend_from_slice(&format);
-        self.stack.bytes.resize((frame_ptr + frame_len) as usize, 0);
+        self.stack.bytes.resize(frame_end as usize, 0);
 
         if function_type == 0xc1 {
             for ((position, size), value) in positions.iter().zip(arguments.iter()) {
@@ -1598,217 +1617,6 @@ impl Vm {
             self.memory.resize(self.heap_next)?;
         }
         Ok(())
-    }
-
-    fn stream_string(&mut self, address: u32) -> Result<(), VmError> {
-        let kind = self.memory.read8(address)?;
-        if !matches!(kind, 0xe0..=0xe2) {
-            return Err(VmError::InvalidString { address, kind });
-        }
-        self.push_call_stub(11, 0, self.pc)?;
-        match kind {
-            0xe0 => self.resume_c_string(address + 1),
-            0xe1 => self.resume_compressed(address + 1, 0),
-            0xe2 => self.resume_unicode_string(address + 4),
-            _ => unreachable!("string type was validated"),
-        }
-    }
-
-    fn stream_character(&mut self, value: u32) -> Result<(), VmError> {
-        match self.io_system {
-            0 => Ok(()),
-            1 => self.call(self.io_rock, &[value], Destination::Discard),
-            2 => {
-                self.glk_write_char(0, char::from_u32(value).unwrap_or('\u{fffd}'));
-                Ok(())
-            }
-            _ => Ok(()),
-        }
-    }
-
-    fn enter_filter(&mut self, value: u32) -> Result<(), VmError> {
-        self.enter_function(self.io_rock, &[value])
-    }
-
-    fn resume_number(&mut self, value: u32, next: u32) -> Result<(), VmError> {
-        if self.io_system == 0 {
-            return self.finish_string();
-        }
-        let text = (value as i32).to_string();
-        let Some(character) = text.as_bytes().get(next as usize).copied() else {
-            return self.finish_string();
-        };
-        if self.io_system == 1 {
-            self.push_call_stub(12, next + 1, value)?;
-            return self.enter_filter(u32::from(character));
-        }
-        self.glk_write_text(0, &text[next as usize..]);
-        self.finish_string()
-    }
-
-    fn resume_c_string(&mut self, mut cursor: u32) -> Result<(), VmError> {
-        let mut character = self.memory.read8(cursor)?;
-        cursor = cursor.wrapping_add(1);
-        if character == 0 || self.io_system == 0 {
-            return self.finish_string();
-        }
-        if self.io_system == 1 {
-            self.push_call_stub(13, 0, cursor)?;
-            return self.enter_filter(u32::from(character));
-        }
-        while character != 0 {
-            self.glk_write_char(0, char::from(character));
-            character = self.memory.read8(cursor)?;
-            cursor = cursor.wrapping_add(1);
-        }
-        self.finish_string()
-    }
-
-    fn resume_unicode_string(&mut self, mut cursor: u32) -> Result<(), VmError> {
-        let character = self.memory.read32(cursor)?;
-        cursor = cursor.wrapping_add(4);
-        if character == 0 || self.io_system == 0 {
-            return self.finish_string();
-        }
-        if self.io_system == 1 {
-            self.push_call_stub(14, 0, cursor)?;
-            return self.enter_filter(character);
-        }
-        let mut character = character;
-        while character != 0 {
-            self.glk_write_char(0, char::from_u32(character).unwrap_or('\u{fffd}'));
-            character = self.memory.read32(cursor)?;
-            cursor = cursor.wrapping_add(4);
-        }
-        self.finish_string()
-    }
-
-    fn resume_compressed(&mut self, mut byte_address: u32, mut bit: u8) -> Result<(), VmError> {
-        let table = self.story.header.decoding_table;
-        if table == 0 {
-            return Err(VmError::InvalidDecodingTable(
-                "no decoding table is selected",
-            ));
-        }
-        let root = self.memory.read32(table + 8)?;
-        let root_type = self.memory.read8(root)?;
-        if root_type == 1 {
-            return self.finish_string();
-        }
-        if root_type != 0 {
-            return Err(VmError::InvalidDecodingTable("root node is not a branch"));
-        }
-
-        loop {
-            let mut node = root;
-            while self.memory.read8(node)? == 0 {
-                let packed = self.memory.read8(byte_address)?;
-                let direction = (packed >> bit) & 1;
-                bit += 1;
-                if bit == 8 {
-                    bit = 0;
-                    byte_address = byte_address.wrapping_add(1);
-                }
-                node = self.memory.read32(node + 1 + u32::from(direction) * 4)?;
-            }
-
-            match self.memory.read8(node)? {
-                1 => return self.finish_string(),
-                2 => {
-                    let character = u32::from(self.memory.read8(node + 1)?);
-                    match self.io_system {
-                        0 => {}
-                        1 => {
-                            self.push_call_stub(10, u32::from(bit), byte_address)?;
-                            return self.enter_filter(character);
-                        }
-                        2 => self.glk_write_char(0, char::from(character as u8)),
-                        _ => {}
-                    }
-                }
-                3 => {
-                    self.push_call_stub(10, u32::from(bit), byte_address)?;
-                    return self.resume_c_string(node + 1);
-                }
-                4 => {
-                    let value = self.memory.read32(node + 1)?;
-                    match self.io_system {
-                        0 => {}
-                        1 => {
-                            self.push_call_stub(10, u32::from(bit), byte_address)?;
-                            return self.enter_filter(value);
-                        }
-                        2 => self.glk_write_char(0, char::from_u32(value).unwrap_or('\u{fffd}')),
-                        _ => {}
-                    }
-                }
-                5 => {
-                    self.push_call_stub(10, u32::from(bit), byte_address)?;
-                    return self.resume_unicode_string(node + 1);
-                }
-                kind @ 8..=11 => {
-                    let indirect = matches!(kind, 9 | 11);
-                    let has_arguments = matches!(kind, 10 | 11);
-                    let mut object = self.memory.read32(node + 1)?;
-                    if indirect {
-                        object = self.memory.read32(object)?;
-                    }
-                    let arguments = if has_arguments {
-                        let count = self.memory.read32(node + 5)?;
-                        let mut values = Vec::with_capacity(count as usize);
-                        for index in 0..count {
-                            values.push(self.memory.read32(node + 9 + index * 4)?);
-                        }
-                        values
-                    } else {
-                        Vec::new()
-                    };
-
-                    self.push_call_stub(10, u32::from(bit), byte_address)?;
-                    return match self.memory.read8(object)? {
-                        0xe0 => self.resume_c_string(object + 1),
-                        0xe1 => self.resume_compressed(object + 1, 0),
-                        0xe2 => self.resume_unicode_string(object + 4),
-                        0xc0 | 0xc1 => self.enter_function(object, &arguments),
-                        object_type => Err(VmError::InvalidString {
-                            address: object,
-                            kind: object_type,
-                        }),
-                    };
-                }
-                kind => return Err(VmError::UnsupportedStringNode(kind)),
-            }
-        }
-    }
-
-    fn push_call_stub(
-        &mut self,
-        destination_type: u32,
-        destination_address: u32,
-        pc: u32,
-    ) -> Result<(), VmError> {
-        self.stack.push_u32(destination_type)?;
-        self.stack.push_u32(destination_address)?;
-        self.stack.push_u32(pc)?;
-        self.stack.push_u32(self.stack.frame_ptr)
-    }
-
-    fn finish_string(&mut self) -> Result<(), VmError> {
-        let frame_ptr = self.stack.pop_raw_u32()?;
-        let pc = self.stack.pop_raw_u32()?;
-        let destination_address = self.stack.pop_raw_u32()?;
-        let destination_type = self.stack.pop_raw_u32()?;
-        match destination_type {
-            10 => {
-                self.stack.frame_ptr = frame_ptr;
-                self.resume_compressed(pc, destination_address as u8)
-            }
-            11 => {
-                self.pc = pc;
-                Ok(())
-            }
-            _ => Err(VmError::InvalidCallStub),
-        }
     }
 
     fn glk_write_char(&mut self, stream: u32, character: char) {
@@ -2016,6 +1824,8 @@ impl Vm {
                 if let Some(window) = self.glk_windows.get_mut(&window_id) {
                     window.runs.clear();
                     window.grid.fill(' ');
+                    window.grid_styles.fill(0);
+                    window.grid_hyperlinks.fill(0);
                     window.cursor_x = 0;
                     window.cursor_y = 0;
                     if window.kind == WINTYPE_GRAPHICS {
@@ -2086,6 +1896,8 @@ impl Vm {
             0x0060..=0x0068 => {
                 if selector == 0x0062 {
                     self.file_request = Some(streams::FileRequest {
+                        selected_path: None,
+                        notice: None,
                         usage: arguments.first().copied().unwrap_or(0),
                         mode: arguments.get(1).copied().unwrap_or(2),
                         rock: arguments.get(2).copied().unwrap_or(0),
@@ -2098,7 +1910,11 @@ impl Vm {
             }
             0x0043 | 0x0139 => {
                 let address = arguments.first().copied().unwrap_or(0);
-                let length = arguments.get(1).copied().unwrap_or(0);
+                let length = if address == 0 {
+                    0
+                } else {
+                    arguments.get(1).copied().unwrap_or(0)
+                };
                 let rock = arguments.get(3).copied().unwrap_or(0);
                 let mode = arguments.get(2).copied().unwrap_or(3);
                 let width = if selector == 0x0139 { 4 } else { 1 };
@@ -2108,7 +1924,8 @@ impl Vm {
                             .checked_mul(width)
                             .and_then(|n| address.checked_add(n))
                             .is_none_or(|end| {
-                                end > self.memory.len() || address < self.memory.ram_start()
+                                end > self.memory.len()
+                                    || (mode != 2 && address < self.memory.ram_start())
                             }))
                 {
                     return self.store_destination(&destination, 0, Width::Word);
@@ -2123,6 +1940,7 @@ impl Vm {
                             address,
                             length,
                             position: 0,
+                            extent: Some(if mode == 1 { 0 } else { length }),
                             write_count: 0,
                             read_count: 0,
                             mode: arguments.get(2).copied().unwrap_or(3),
@@ -2243,9 +2061,7 @@ impl Vm {
                 return Ok(());
             }
             0x00c1 => {
-                self.poll_events()?;
-                let event = self.events.pop_front().unwrap_or([0, 0, 0, 0]);
-                self.write_event(arguments.first().copied().unwrap_or(0), event)?;
+                self.select_poll(arguments.first().copied().unwrap_or(0))?;
                 0
             }
             0x00d0 | 0x0141 => {
@@ -2400,18 +2216,53 @@ impl Vm {
         self.store_destination(&destination, result, Width::Word)
     }
 
+    pub fn set_glyph_support(&mut self, support: GlyphSupport) {
+        self.glyph_support = Some(support);
+    }
+
+    pub fn set_text_metrics(&mut self, metrics: TextMetrics) {
+        if self
+            .text_metrics
+            .as_ref()
+            .is_some_and(|current| std::sync::Arc::ptr_eq(current, &metrics))
+        {
+            return;
+        }
+        self.text_metrics = Some(metrics);
+        self.layout_windows();
+        if self.glk_root != 0 && !self.events.iter().any(|event| event[0] == 5) {
+            self.events.push_back([5, 0, 0, 0]);
+        }
+    }
+
+    fn window_text_metrics(&self, window: &GlkWindow) -> [u32; 2] {
+        let style = ResolvedStyle::resolve(window.kind, 0, &window.hints, self.text_appearance);
+        self.text_metrics
+            .as_ref()
+            .map_or([8, 16], |metrics| metrics(style).map(|value| value.max(1)))
+    }
+
     fn glk_gestalt(&self, selector: u32, argument: u32) -> u32 {
         let printable = char::from_u32(argument).is_some_and(|c| !c.is_control());
         match selector {
             0 => 0x0000_0706,
-            1 => u32::from(printable || argument == 0xffff_fffa),
+            1 => u32::from(
+                printable
+                    || argument == 0xffff_fffa
+                    || (self.graphical_host
+                        && events::is_special_key(argument)
+                        && argument != u32::MAX),
+            ),
             2 => u32::from(printable),
             3 => {
-                if printable || argument == 10 {
-                    2
-                } else {
-                    0
-                }
+                let visible = printable
+                    && (!self.graphical_host
+                        || char::from_u32(argument).is_some_and(|c| {
+                            self.glyph_support
+                                .as_ref()
+                                .map_or(c.is_ascii(), |support| support(c))
+                        }));
+                if visible || argument == 10 { 2 } else { 0 }
             }
             4 => u32::from(self.graphical_host && matches!(argument, 4 | 5)), // MouseInput
             5 => 1,                                                           // Timer
@@ -2422,8 +2273,8 @@ impl Vm {
             8..=10 | 21 => u32::from(self.sound_available()), // Sound capabilities
             11 => 1,                                          // Hyperlinks
             13 => u32::from(self.sound_available()),          // MOD tracker music
-            12 => u32::from(self.graphical_host && argument == 3), // HyperlinkInput (GUI supports text buffers)
-            17..=18 => u32::from(self.graphical_host),             // Line input echo / terminators
+            12 => u32::from(self.graphical_host && matches!(argument, 3 | 4)), // HyperlinkInput
+            17..=18 => u32::from(self.graphical_host),        // Line input echo / terminators
             19 => u32::from(
                 self.graphical_host && matches!(argument, 0xffff_fff8 | 0xffff_ffe4..=0xffff_ffef),
             ),
@@ -3224,6 +3075,14 @@ mod tests {
         let requests = vm.take_graphics();
         assert!(matches!(
             requests[0],
+            GraphicsRequest::Resize {
+                background: 0xffffff,
+                ..
+            }
+        ));
+        let requests = &requests[1..];
+        assert!(matches!(
+            requests[0],
             GraphicsRequest::Fill {
                 color: 0x112233,
                 rect: [1, 2, 3, 4],
@@ -3246,6 +3105,45 @@ mod tests {
             }
         ));
         assert!(matches!(requests[3], GraphicsRequest::Close { .. }));
+    }
+
+    #[test]
+    fn graphics_resizes_capture_background_and_geometry_without_waiting_for_draws() {
+        let story = Story::from_bytes(&image_with_program(&[0x81, 0x20]), None).unwrap();
+        let mut vm = Vm::new(story).unwrap();
+        push_glk_arguments(&mut vm, &[0, 0, 0, WINTYPE_GRAPHICS, 0]);
+        vm.glk(0x23, 5, Destination::Memory(0x120)).unwrap();
+        let window = vm.memory.read32(0x120).unwrap();
+        vm.take_graphics();
+        push_glk_arguments(&mut vm, &[window, 0x123456]);
+        vm.glk(0xeb, 2, Destination::Discard).unwrap();
+        assert!(vm.take_graphics().is_empty()); // Background changes do not repaint.
+        vm.resize_windows(400, 300);
+        vm.resize_windows(0, 0);
+        vm.resize_windows(800, 600);
+        let requests = vm.take_graphics();
+        assert_eq!(requests.len(), 3);
+        for (request, expected) in requests.iter().zip([[400, 300], [0, 0], [800, 600]]) {
+            assert!(
+                matches!(request, GraphicsRequest::Resize { window: id, background: 0x123456, canvas_size }
+                if *id == window && *canvas_size == expected)
+            );
+        }
+        let restored: Vec<GraphicsRequest> =
+            serde_json::from_str(&serde_json::to_string(&requests).unwrap()).unwrap();
+        assert_eq!(restored.len(), 3);
+        push_glk_arguments(
+            &mut vm,
+            &[window, 0xabcdef, i32::MIN as u32, 0, u32::MAX, u32::MAX],
+        );
+        vm.glk(0xea, 6, Destination::Discard).unwrap();
+        assert!(matches!(
+            vm.take_graphics()[0],
+            GraphicsRequest::Fill {
+                rect: [i32::MIN, 0, -1, -1],
+                ..
+            }
+        ));
     }
 
     #[test]

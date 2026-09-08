@@ -1,5 +1,7 @@
 use super::*;
-use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone, Timelike, Utc};
+use chrono::{
+    DateTime, Datelike, Duration, Local, NaiveDate, NaiveDateTime, Offset, TimeZone, Timelike, Utc,
+};
 
 impl Vm {
     pub(super) fn datetime_call(&mut self, selector: u32, args: &[u32]) -> Result<u32, VmError> {
@@ -50,38 +52,26 @@ impl Vm {
                 for (i, value) in date.iter_mut().enumerate() {
                     *value = self.read_glk_word(arg(0), i)? as i32;
                 }
-                let month = date[1] as i64 - 1;
-                let year = (date[0] as i64)
-                    .checked_add(month.div_euclid(12))
-                    .and_then(|v| i32::try_from(v).ok())
-                    .ok_or(VmError::InvalidTime)?;
-                let day = NaiveDate::from_ymd_opt(year, month.rem_euclid(12) as u32 + 1, 1)
-                    .ok_or(VmError::InvalidTime)?;
-                let naive = day
-                    .and_hms_opt(0, 0, 0)
-                    .unwrap()
-                    .checked_add_signed(Duration::days(date[2] as i64 - 1))
-                    .and_then(|v| v.checked_add_signed(Duration::hours(date[4] as i64)))
-                    .and_then(|v| v.checked_add_signed(Duration::minutes(date[5] as i64)))
-                    .and_then(|v| v.checked_add_signed(Duration::seconds(date[6] as i64)))
-                    .and_then(|v| v.checked_add_signed(Duration::microseconds(date[7] as i64)))
-                    .ok_or(VmError::InvalidTime)?;
-                let time = if selector & 1 == 0 {
-                    Utc.from_utc_datetime(&naive)
-                } else {
-                    Local
-                        .from_local_datetime(&naive)
-                        .earliest()
-                        .ok_or(VmError::InvalidTime)?
-                        .with_timezone(&Utc)
-                };
+                let time = normalize_date(date).and_then(|naive| {
+                    if selector & 1 == 0 {
+                        Some(Utc.from_utc_datetime(&naive))
+                    } else {
+                        local_time(&Local, naive).map(|v| v.with_timezone(&Utc))
+                    }
+                });
                 if selector >= 0x16e {
                     if arg(1) == 0 {
                         return Err(VmError::InvalidTime);
                     }
-                    Ok(time.timestamp().div_euclid(arg(1) as i64) as u32)
+                    Ok(time.map_or(u32::MAX, |v| v.timestamp().div_euclid(arg(1) as i64) as u32))
                 } else {
-                    self.write_time(arg(1), time)?;
+                    if let Some(time) = time {
+                        self.write_time(arg(1), time)?;
+                    } else {
+                        for (i, value) in [u32::MAX, u32::MAX, 0].into_iter().enumerate() {
+                            self.write_glk_word(arg(1), i, value)?;
+                        }
+                    }
                     Ok(0)
                 }
             }
@@ -137,4 +127,118 @@ fn date_fields<T: TimeZone>(time: DateTime<T>) -> [u32; 8] {
         time.second(),
         time.timestamp_subsec_micros(),
     ]
+}
+
+fn normalize_date(date: [i32; 8]) -> Option<NaiveDateTime> {
+    let month = date[1] as i64 - 1;
+    let year = i32::try_from(date[0] as i64 + month.div_euclid(12)).ok()?;
+    NaiveDate::from_ymd_opt(year, month.rem_euclid(12) as u32 + 1, 1)?
+        .and_hms_opt(0, 0, 0)?
+        .checked_add_signed(Duration::days(date[2] as i64 - 1))?
+        .checked_add_signed(Duration::hours(date[4] as i64))?
+        .checked_add_signed(Duration::minutes(date[5] as i64))?
+        .checked_add_signed(Duration::seconds(date[6] as i64))?
+        .checked_add_signed(Duration::microseconds(date[7] as i64))
+}
+
+fn local_time<T: TimeZone>(zone: &T, naive: NaiveDateTime) -> Option<DateTime<T>> {
+    if let Some(time) = zone.from_local_datetime(&naive).earliest() {
+        return Some(time);
+    }
+    // A nonexistent wall time in a spring clock jump is normalized forward
+    // using the offset before the gap, as mktime commonly does. Include date
+    // line changes that skipped an entire day, not just one-hour DST shifts.
+    for half_hours in 1..=96 {
+        let earlier = naive.checked_sub_signed(Duration::minutes(half_hours * 30))?;
+        if let Some(previous) = zone.from_local_datetime(&earlier).earliest() {
+            let offset = previous.offset().fix().local_minus_utc();
+            let utc = naive.checked_sub_signed(Duration::seconds(offset as i64))?;
+            return Some(zone.from_utc_datetime(&utc));
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn vm() -> Vm {
+        Vm::new(
+            Story::from_bytes(
+                &super::super::tests::image_with_program(&[0x81, 0x20]),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+    #[test]
+    fn unsupported_calendar_dates_return_failure_without_stopping_execution() {
+        let mut vm = vm();
+        for date in [
+            [i32::MAX, 1, 1, 0, 0, 0, 0, 0],
+            [2000, i32::MIN, 1, 0, 0, 0, 0, 0],
+            [2000, 1, i32::MAX, 0, 0, 0, 0, 0],
+        ] {
+            for (i, field) in date.into_iter().enumerate() {
+                vm.memory
+                    .write32(0x100 + i as u32 * 4, field as u32)
+                    .unwrap();
+            }
+            for selector in [0x16c, 0x16d] {
+                vm.datetime_call(selector, &[0x100, 0x140]).unwrap();
+                assert_eq!(vm.memory.read32(0x140).unwrap(), u32::MAX);
+                assert_eq!(vm.memory.read32(0x144).unwrap(), u32::MAX);
+            }
+            for selector in [0x16e, 0x16f] {
+                assert_eq!(vm.datetime_call(selector, &[0x100, 60]).unwrap(), u32::MAX);
+            }
+            assert_eq!(vm.state(), RunState::Running);
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn local_calendar_normalizes_dst_gaps_in_isolated_timezones() {
+        let marker = "GLULX_DATETIME_TEST_ZONE";
+        if let Ok(zone) = std::env::var(marker) {
+            let (date, expected) = if zone == "America/New_York" {
+                ([2024, 3, 10, 0, 2, 30, 0, 0], "2024-03-10T07:30:00+00:00")
+            } else {
+                ([2011, 12, 30, 0, 12, 0, 0, 0], "2011-12-30T22:00:00+00:00")
+            };
+            assert_eq!(
+                local_time(&Local, normalize_date(date).unwrap())
+                    .unwrap()
+                    .with_timezone(&Utc)
+                    .to_rfc3339(),
+                expected
+            );
+            return;
+        }
+        for zone in ["America/New_York", "Pacific/Apia"] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "vm::datetime::tests::local_calendar_normalizes_dst_gaps_in_isolated_timezones",
+                ])
+                .env("TZ", zone)
+                .env(marker, zone)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{zone}: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[test]
+    fn calendar_normalization_handles_negative_and_overflowing_fields() {
+        let date = normalize_date([2024, 14, 0, 999, 25, -1, 61, -1]).unwrap();
+        assert_eq!(date.to_string(), "2025-02-01 01:00:00.999999");
+        let fixed = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
+        assert_eq!(local_time(&fixed, date).unwrap().naive_local(), date);
+    }
 }

@@ -88,12 +88,18 @@ impl Memory {
     }
 
     pub fn zero(&mut self, address: u32, length: u32) -> Result<(), VmError> {
+        if length == 0 {
+            return Ok(());
+        }
         self.check_write(address, length)?;
         self.bytes[address as usize..(address + length) as usize].fill(0);
         Ok(())
     }
 
     pub fn copy(&mut self, source: u32, destination: u32, length: u32) -> Result<(), VmError> {
+        if length == 0 {
+            return Ok(());
+        }
         self.slice(source, length)?;
         self.check_write(destination, length)?;
         self.bytes.copy_within(
@@ -243,5 +249,17 @@ mod tests {
 
         assert_eq!(memory.read32(0x100).unwrap(), 0x1234_5678);
         assert_eq!(memory.read32(0x104).unwrap(), 0);
+    }
+
+    #[test]
+    fn zero_length_block_operations_do_not_access_memory() {
+        let mut memory = Memory::new(&story());
+        let before = memory.bytes.clone();
+        for address in [0, 0x20, 0x100, memory.len(), u32::MAX] {
+            memory.zero(address, 0).unwrap();
+            memory.copy(address, u32::MAX, 0).unwrap();
+            memory.copy(u32::MAX, address, 0).unwrap();
+        }
+        assert_eq!(memory.bytes, before);
     }
 }

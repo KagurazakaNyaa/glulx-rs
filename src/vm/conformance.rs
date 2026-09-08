@@ -383,6 +383,8 @@ fn unicode_transform_expansion_titlecase_normalization_and_capability_arguments(
     assert_eq!(vm.glk_gestalt(7, 5), 1);
     assert_eq!(vm.glk_gestalt(7, 3), 1);
     assert_eq!(vm.glk_gestalt(2, 0xd800), 0);
+    assert_eq!(vm.glk_gestalt(3, 0x4e2d), 0);
+    vm.set_glyph_support(std::sync::Arc::new(|c| c.is_ascii() || c == '中'));
     assert_eq!(vm.glk_gestalt(3, 0x4e2d), 2);
     assert_eq!(vm.glk_gestalt(16, 0), 1);
 }
@@ -580,7 +582,7 @@ fn style_hints_links_mouse_and_terminator_events() {
     assert_eq!(view.hints.get(&(1, 7)), Some(&0x123456));
     glk(&mut vm, 0x102, &[window]);
     vm.hyperlink_input(window, 99).unwrap();
-    glk(&mut vm, 0xc1, &[0x100]);
+    vm.select_event(0x100, Destination::Discard).unwrap();
     assert_eq!(vm.memory.read32(0x100).unwrap(), 8);
     assert_eq!(vm.memory.read32(0x108).unwrap(), 99);
     vm.memory.write32(0x100, 0xffff_fff8).unwrap();
@@ -594,7 +596,7 @@ fn style_hints_links_mouse_and_terminator_events() {
     let graphics = glk(&mut vm, 0x23, &[window, 0x21, 50, 5, 0]);
     glk(&mut vm, 0xd4, &[graphics]);
     vm.mouse_input(graphics, 12, 34).unwrap();
-    glk(&mut vm, 0xc1, &[0x120]);
+    vm.select_event(0x120, Destination::Discard).unwrap();
     assert_eq!(vm.memory.read32(0x120).unwrap(), 4);
     assert_eq!(vm.memory.read32(0x128).unwrap(), 12);
 }
@@ -684,4 +686,20 @@ fn float_nan_modulo_and_power_identities() {
     );
     assert!(f32::from_bits(vm.stack.pop_u32().unwrap()).is_nan());
     assert!(f32::from_bits(vm.stack.pop_u32().unwrap()).is_nan());
+}
+
+#[test]
+fn function_locals_cannot_exceed_the_declared_stack_size() {
+    let mut vm = vm();
+    for (i, byte) in [0xc1, 4, 255, 0, 0, 0x31, 0].into_iter().enumerate() {
+        vm.memory.write8(0x140 + i as u32, byte).unwrap();
+    }
+    let frame = vm.stack.frame_ptr;
+    let before = vm.stack.len();
+    assert!(matches!(
+        vm.enter_function(0x140, &[]),
+        Err(VmError::StackOverflow)
+    ));
+    assert_eq!(vm.stack.frame_ptr, frame);
+    assert_eq!(vm.stack.len(), before);
 }

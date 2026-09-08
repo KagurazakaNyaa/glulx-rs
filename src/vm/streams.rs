@@ -10,7 +10,11 @@ pub(super) struct FileRef {
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub(super) struct FileStream {
     path: Option<PathBuf>,
+    // `data` only reads desktop snapshots from the decoded-character format.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     data: Vec<u32>,
+    #[serde(default)]
+    bytes: Option<Vec<u8>>,
     position: u32,
     read_count: u32,
     write_count: u32,
@@ -24,26 +28,18 @@ pub(super) struct FileRequest {
     pub mode: u32,
     pub rock: u32,
     pub destination: Destination,
+    #[serde(default)]
+    pub selected_path: Option<PathBuf>,
+    #[serde(default)]
+    pub notice: Option<String>,
 }
 
 impl FileStream {
     fn from_bytes(bytes: &[u8], unicode: bool, text: bool) -> Self {
-        let data = if unicode && text {
-            String::from_utf8_lossy(bytes)
-                .chars()
-                .map(|c| c as u32)
-                .collect()
-        } else if unicode {
-            bytes
-                .chunks_exact(4)
-                .map(|b| u32::from_be_bytes(b.try_into().unwrap()))
-                .collect()
-        } else {
-            bytes.iter().map(|b| *b as u32).collect()
-        };
         Self {
             path: None,
-            data,
+            data: Vec::new(),
+            bytes: Some(bytes.to_vec()),
             position: 0,
             read_count: 0,
             write_count: 0,
@@ -52,6 +48,97 @@ impl FileStream {
             text,
         }
     }
+    fn encode_values(&self, values: &[u32]) -> Vec<u8> {
+        if self.unicode && self.text {
+            values
+                .iter()
+                .map(|&c| char::from_u32(c).unwrap_or('\u{fffd}'))
+                .collect::<String>()
+                .into_bytes()
+        } else if self.unicode {
+            values.iter().flat_map(|v| v.to_be_bytes()).collect()
+        } else {
+            values
+                .iter()
+                .map(|&v| if v > 255 { b'?' } else { v as u8 })
+                .collect()
+        }
+    }
+    fn byte_position(&self) -> u32 {
+        if self.bytes.is_some() {
+            return self.position;
+        }
+        // Older sessions measured a decoded character index. Convert only
+        // when loading them; new snapshots always retain raw encoded bytes.
+        self.encode_values(&self.data[..(self.position as usize).min(self.data.len())])
+            .len() as u32
+    }
+    fn materialize_bytes(&mut self) {
+        if self.bytes.is_none() {
+            self.position = self.byte_position();
+            self.bytes = Some(self.encode_values(&self.data));
+            self.data.clear();
+        }
+    }
+    fn position_scale(&self) -> u32 {
+        // Binary Unicode files expose word offsets. UTF-8 text files and
+        // resources expose native byte offsets so get/set marks round-trip.
+        if self.unicode && !self.text && self.path.is_some() {
+            4
+        } else {
+            1
+        }
+    }
+    fn read_value(&mut self) -> Option<u32> {
+        self.materialize_bytes();
+        let bytes = self.bytes.as_ref().unwrap();
+        let offset = self.position as usize;
+        let first = *bytes.get(offset)?;
+        let (value, length) = if !self.unicode {
+            (first as u32, 1)
+        } else if !self.text {
+            let Some(value) = bytes.get(offset..offset + 4) else {
+                self.position = bytes.len() as u32;
+                return None;
+            };
+            (u32::from_be_bytes(value.try_into().unwrap()), 4)
+        } else {
+            let length = match first {
+                0..=0x7f => 1,
+                0xc2..=0xdf => 2,
+                0xe0..=0xef => 3,
+                0xf0..=0xf4 => 4,
+                _ => 1,
+            };
+            match bytes
+                .get(offset..offset + length)
+                .and_then(|raw| std::str::from_utf8(raw).ok())
+            {
+                Some(text) => (text.chars().next().unwrap() as u32, length),
+                None => (0xfffd, 1),
+            }
+        };
+        self.position += length as u32;
+        self.read_count = self.read_count.wrapping_add(1);
+        Some(value)
+    }
+    fn write_value(&mut self, value: u32) -> Result<(), VmError> {
+        self.materialize_bytes();
+        let encoded = self.encode_values(&[value]);
+        let bytes = self.bytes.as_mut().unwrap();
+        let start = self.position as usize;
+        let end = start.checked_add(encoded.len()).ok_or(VmError::StreamIo)?;
+        if end > bytes.len() {
+            bytes
+                .try_reserve(end - bytes.len())
+                .map_err(|_| VmError::StreamIo)?;
+            bytes.resize(end, 0);
+        }
+        bytes[start..end].copy_from_slice(&encoded);
+        self.position = end.try_into().map_err(|_| VmError::StreamIo)?;
+        self.write_count = self.write_count.wrapping_add(1);
+        Ok(())
+    }
     fn flush(&self) -> Result<(), VmError> {
         if self.mode == 2 {
             return Ok(());
@@ -59,18 +146,14 @@ impl FileStream {
         let Some(path) = &self.path else {
             return Ok(());
         };
-        let data: Vec<u8> = if self.unicode && self.text {
-            self.data
-                .iter()
-                .map(|&c| char::from_u32(c).unwrap_or('\u{fffd}'))
-                .collect::<String>()
-                .into_bytes()
-        } else if self.unicode {
-            self.data.iter().flat_map(|v| v.to_be_bytes()).collect()
+        let legacy;
+        let bytes = if let Some(bytes) = &self.bytes {
+            bytes
         } else {
-            self.data.iter().map(|&v| v as u8).collect()
+            legacy = self.encode_values(&self.data);
+            &legacy
         };
-        std::fs::write(path, data).map_err(|_| VmError::StreamIo)
+        std::fs::write(path, bytes).map_err(|_| VmError::StreamIo)
     }
 }
 
@@ -90,12 +173,57 @@ impl Vm {
         self.filerefs.insert(id, FileRef { path, usage, rock });
         id
     }
+    pub fn file_prompt_message(&self) -> String {
+        let Some(request) = &self.file_request else {
+            return String::new();
+        };
+        if let Some(path) = &request.selected_path {
+            let action = if request.mode == 1 {
+                "Replace"
+            } else {
+                "Modify"
+            };
+            return format!(
+                "{action} existing file {}? Enter yes or no.",
+                path.display()
+            );
+        }
+        if let Some(notice) = &request.notice {
+            return format!("{notice} Enter another file path (empty cancels).");
+        }
+        if request.mode == 2 {
+            "Existing file path (empty cancels):".to_owned()
+        } else {
+            "File path (empty cancels):".to_owned()
+        }
+    }
     pub(super) fn provide_file(&mut self, name: &str) -> Result<(), VmError> {
-        let request = self.file_request.take().ok_or(VmError::UnexpectedInput)?;
-        let result = if name.is_empty() {
+        let mut request = self.file_request.take().ok_or(VmError::UnexpectedInput)?;
+        let result = if let Some(path) = request.selected_path.take() {
+            match name.trim().to_ascii_lowercase().as_str() {
+                "yes" | "y" => self.add_fileref(path, request.usage, request.rock),
+                "no" | "n" | "" => 0,
+                _ => {
+                    request.selected_path = Some(path);
+                    self.file_request = Some(request);
+                    return Ok(());
+                }
+            }
+        } else if name.is_empty() {
             0
         } else {
-            self.add_fileref(PathBuf::from(name), request.usage, request.rock)
+            let path = PathBuf::from(name);
+            if path.is_dir() || (request.mode == 2 && !path.is_file()) {
+                request.notice = Some(format!("Not an existing file: {}.", path.display()));
+                self.file_request = Some(request);
+                return Ok(());
+            }
+            if request.mode != 2 && path.exists() {
+                request.selected_path = Some(path);
+                self.file_request = Some(request);
+                return Ok(());
+            }
+            self.add_fileref(path, request.usage, request.rock)
         };
         self.store_destination(&request.destination, result, Width::Word)?;
         self.state = RunState::Running;
@@ -221,7 +349,7 @@ impl Vm {
         file.path = Some(reference.path.clone());
         file.mode = mode;
         if mode == 5 {
-            file.position = file.data.len() as u32;
+            file.position = file.bytes.as_ref().unwrap().len() as u32;
         }
         if file.flush().is_err() {
             return 0;
@@ -250,6 +378,14 @@ impl Vm {
         {
             return (0, 0);
         }
+        if self.glk_current_stream == id {
+            self.glk_current_stream = 0;
+        }
+        for window in self.glk_windows.values_mut() {
+            if window.echo_stream == id {
+                window.echo_stream = 0;
+            }
+        }
         match self.glk_streams.remove(&id).map(|s| s.target) {
             Some(GlkStreamTarget::Memory {
                 read_count,
@@ -274,6 +410,7 @@ impl Vm {
                 address,
                 length,
                 position,
+                extent,
                 write_count,
                 mode,
                 unicode,
@@ -295,6 +432,7 @@ impl Vm {
                         }
                     }
                     *position += 1;
+                    *extent = Some(extent.unwrap_or(*length).max(*position));
                 }
                 Ok(())
             }
@@ -302,21 +440,7 @@ impl Vm {
                 if file.mode == 2 {
                     return Err(VmError::StreamIo);
                 }
-                let position = file.position as usize;
-                if position >= file.data.len() {
-                    file.data
-                        .try_reserve(position + 1 - file.data.len())
-                        .map_err(|_| VmError::StreamIo)?;
-                    file.data.resize(position + 1, 0);
-                }
-                file.data[position] = if !file.unicode && value > 255 {
-                    b'?' as u32
-                } else {
-                    value
-                };
-                file.position += 1;
-                file.write_count = file.write_count.wrapping_add(1);
-                Ok(())
+                file.write_value(value)
             }
             _ => Err(VmError::StreamIo),
         }
@@ -356,12 +480,7 @@ impl Vm {
                 if file.mode == 1 || file.mode == 5 {
                     return Err(VmError::StreamIo);
                 }
-                let value = file.data.get(file.position as usize).copied();
-                if value.is_some() {
-                    file.position += 1;
-                    file.read_count = file.read_count.wrapping_add(1);
-                }
-                Ok(value)
+                Ok(file.read_value())
             }
             _ => Err(VmError::StreamIo),
         }
@@ -370,11 +489,22 @@ impl Vm {
         let Some(target) = args.first().and_then(|id| self.glk_streams.get_mut(id)) else {
             return;
         };
-        let (position, length, clamp) = match &mut target.target {
+        let (position, length, scale) = match &mut target.target {
             GlkStreamTarget::Memory {
-                position, length, ..
-            } => (position, *length, true),
-            GlkStreamTarget::File(f) => (&mut f.position, f.data.len() as u32, false),
+                position,
+                length,
+                extent,
+                ..
+            } => (position, extent.unwrap_or(*length), 1),
+            GlkStreamTarget::File(f) => {
+                f.materialize_bytes();
+                let scale = f.position_scale();
+                (
+                    &mut f.position,
+                    f.bytes.as_ref().unwrap().len() as u32,
+                    scale,
+                )
+            }
             _ => return,
         };
         let base = match args.get(2) {
@@ -383,14 +513,13 @@ impl Vm {
             Some(2) => length,
             _ => return,
         };
-        let result = (base as i64 + args.get(1).copied().unwrap_or(0) as i32 as i64)
-            .clamp(0, u32::MAX as i64) as u32;
-        *position = if clamp { result.min(length) } else { result };
+        *position = (base as i64 + args.get(1).copied().unwrap_or(0) as i32 as i64 * scale as i64)
+            .clamp(0, length as i64) as u32;
     }
     pub(super) fn stream_position(&self, id: u32) -> u32 {
         match self.glk_streams.get(&id).map(|s| &s.target) {
             Some(GlkStreamTarget::Memory { position, .. }) => *position,
-            Some(GlkStreamTarget::File(f)) => f.position,
+            Some(GlkStreamTarget::File(f)) => f.byte_position() / f.position_scale(),
             _ => 0,
         }
     }
@@ -484,5 +613,204 @@ impl Vm {
             );
         }
         Ok(data)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vm::tests::{image_with_program, push_glk_arguments};
+
+    fn vm() -> Vm {
+        Vm::new(Story::from_bytes(&image_with_program(&[0x81, 0x20]), None).unwrap()).unwrap()
+    }
+    fn glk(vm: &mut Vm, selector: u32, args: &[u32]) -> u32 {
+        push_glk_arguments(vm, args);
+        vm.glk(selector, args.len() as u32, Destination::Stack)
+            .unwrap();
+        vm.stack.pop_u32().unwrap()
+    }
+
+    #[test]
+    fn closing_an_echo_stream_detaches_all_windows_and_current_stream() {
+        let mut vm = vm();
+        let window = glk(&mut vm, 0x23, &[0, 0, 0, 3, 0]);
+        let other = glk(&mut vm, 0x23, &[window, 0x21, 50, 3, 0]);
+        let stream = glk(&mut vm, 0x43, &[0x100, 32, 1, 0]);
+        for id in [window, other] {
+            glk(&mut vm, 0x2d, &[id, stream]);
+        }
+        glk(&mut vm, 0x47, &[stream]);
+        vm.close_stream(stream);
+        assert_eq!(glk(&mut vm, 0x48, &[]), 0);
+        for id in [window, other] {
+            assert_eq!(glk(&mut vm, 0x2e, &[id]), 0);
+        }
+        vm.glk_write_char(vm.glk_windows[&window].stream, 'x');
+        assert_eq!(vm.take_output(), "x");
+    }
+
+    #[test]
+    fn output_memory_seek_end_tracks_written_extent_and_null_stream_counts() {
+        let mut vm = vm();
+        let stream = glk(&mut vm, 0x43, &[0x100, 8, 1, 0]);
+        vm.seek_stream(&[stream, 0, 2]);
+        assert_eq!(vm.stream_position(stream), 0);
+        vm.write_stream_value(stream, 65).unwrap();
+        vm.write_stream_value(stream, 66).unwrap();
+        vm.seek_stream(&[stream, -1i32 as u32, 2]);
+        vm.write_stream_value(stream, 67).unwrap();
+        assert_eq!(
+            (0..2)
+                .map(|i| vm.memory.read8(0x100 + i).unwrap())
+                .collect::<Vec<_>>(),
+            b"AC"
+        );
+        assert_eq!(vm.close_stream(stream), (0, 3));
+        let stream = glk(&mut vm, 0x43, &[0, u32::MAX, 3, 0]);
+        for _ in 0..4 {
+            vm.write_stream_value(stream, 65).unwrap();
+        }
+        assert_eq!(vm.stream_position(stream), 0);
+        assert_eq!(vm.read_stream_value(stream).unwrap(), None);
+        assert_eq!(vm.close_stream(stream), (0, 4));
+    }
+
+    #[test]
+    fn readonly_memory_stream_can_read_rom() {
+        let mut vm = vm();
+        let stream = glk(&mut vm, 0x43, &[1, 3, 2, 0]);
+        assert_ne!(stream, 0);
+        assert_eq!(glk(&mut vm, 0x92, &[stream, 0x100, 3]), 3);
+        assert_eq!(
+            (0..3)
+                .map(|i| vm.memory.read8(0x100 + i).unwrap())
+                .collect::<Vec<_>>(),
+            b"lul"
+        );
+    }
+
+    #[test]
+    fn file_modes_preserve_append_seek_and_unicode_encodings() {
+        let mut vm = vm();
+        let path = std::env::temp_dir().join(format!(
+            "glulx-stream-contract-{:08x}",
+            unpredictable_seed()
+        ));
+        let reference = vm.add_fileref(path.clone(), 0x100, 0);
+        let stream = vm.open_file_stream(&[reference, 1, 0], true);
+        for value in ['é', '中', '\n'] {
+            vm.write_stream_value(stream, value as u32).unwrap();
+        }
+        assert_eq!(vm.close_stream(stream), (0, 3));
+        assert_eq!(std::fs::read(&path).unwrap(), "é中\n".as_bytes());
+        let stream = vm.open_file_stream(&[reference, 5, 0], true);
+        vm.write_stream_value(stream, 'z' as u32).unwrap();
+        vm.seek_stream(&[stream, 0, 0]);
+        vm.write_stream_value(stream, 'a' as u32).unwrap();
+        vm.close_stream(stream);
+        assert_eq!(std::fs::read(&path).unwrap(), b"a\xa9\xe4\xb8\xad\nz");
+        // ReadWrite keeps the rest of an existing file and starts at zero.
+        let binary = vm.add_fileref(path.clone(), 0, 0);
+        let stream = vm.open_file_stream(&[binary, 3, 0], false);
+        assert_eq!(vm.read_stream_value(stream).unwrap(), Some(b'a' as u32));
+        vm.seek_stream(&[stream, 0, 0]);
+        vm.write_stream_value(stream, b'A' as u32).unwrap();
+        vm.close_stream(stream);
+        assert_eq!(std::fs::read(&path).unwrap(), b"A\xa9\xe4\xb8\xad\nz");
+        let stream = vm.open_file_stream(&[binary, 1, 0], true);
+        vm.write_stream_value(stream, 0x4e2d).unwrap();
+        vm.close_stream(stream);
+        assert_eq!(std::fs::read(&path).unwrap(), [0, 0, 0x4e, 0x2d]);
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn unicode_resource_marks_and_utf8_file_marks_round_trip_encoded_offsets() {
+        let mut vm = vm();
+        let resource = vm.add_file_stream(FileStream::from_bytes("é中z".as_bytes(), true, true), 0);
+        assert_eq!(vm.read_stream_value(resource).unwrap(), Some('é' as u32));
+        assert_eq!(vm.stream_position(resource), 2);
+        let mark = vm.stream_position(resource);
+        assert_eq!(vm.read_stream_value(resource).unwrap(), Some('中' as u32));
+        vm.seek_stream(&[resource, mark, 0]);
+        assert_eq!(vm.read_stream_value(resource).unwrap(), Some('中' as u32));
+        vm.seek_stream(&[resource, -1i32 as u32, 2]);
+        assert_eq!(vm.read_stream_value(resource).unwrap(), Some('z' as u32));
+
+        let resource = vm.add_file_stream(
+            FileStream::from_bytes(&[0, 0, 0, 65, 0, 0, 0, 66], true, false),
+            0,
+        );
+        assert_eq!(vm.read_stream_value(resource).unwrap(), Some(65));
+        assert_eq!(vm.stream_position(resource), 4);
+        vm.seek_stream(&[resource, 4, 0]);
+        assert_eq!(vm.read_stream_value(resource).unwrap(), Some(66));
+
+        let mut file = FileStream::from_bytes("é中z".as_bytes(), true, true);
+        file.path = Some(PathBuf::from("unused-readonly"));
+        let file = vm.add_file_stream(file, 0);
+        assert_eq!(vm.read_stream_value(file).unwrap(), Some('é' as u32));
+        let mark = vm.stream_position(file);
+        vm.read_stream_value(file).unwrap();
+        vm.seek_stream(&[file, mark, 0]);
+        assert_eq!(vm.read_stream_value(file).unwrap(), Some('中' as u32));
+    }
+
+    #[test]
+    fn legacy_decoded_session_streams_migrate_without_losing_position() {
+        let mut file = FileStream::from_bytes(&[], true, true);
+        file.bytes = None;
+        file.data = vec!['é' as u32, '中' as u32, 'z' as u32];
+        file.position = 1;
+        assert_eq!(file.byte_position(), 2);
+        assert_eq!(file.read_value(), Some('中' as u32));
+        assert_eq!(file.position, 5);
+        assert_eq!(file.bytes.unwrap(), "é中z".as_bytes());
+        assert!(file.data.is_empty());
+    }
+
+    #[test]
+    fn prompted_files_require_existing_reads_and_confirm_modification() {
+        let mut vm = vm();
+        let path = std::env::temp_dir().join(format!(
+            "glulx-prompt-contract-{:08x}",
+            unpredictable_seed()
+        ));
+        let name = path.to_str().unwrap();
+        push_glk_arguments(&mut vm, &[1, 2, 0]);
+        vm.glk(0x62, 3, Destination::Memory(0x100)).unwrap();
+        vm.provide_file(name).unwrap();
+        assert_eq!(vm.state, RunState::WaitingForFile);
+        assert!(vm.file_prompt_message().contains("Not an existing file"));
+        vm.provide_file("").unwrap();
+        assert_eq!(vm.memory.read32(0x100).unwrap(), 0);
+        std::fs::write(&path, b"original").unwrap();
+        for mode in [1, 3, 5] {
+            push_glk_arguments(&mut vm, &[1, mode, 0]);
+            vm.glk(0x62, 3, Destination::Memory(0x100)).unwrap();
+            vm.provide_file(name).unwrap();
+            assert_eq!(vm.state, RunState::WaitingForFile);
+            assert!(vm.file_prompt_message().contains(if mode == 1 {
+                "Replace"
+            } else {
+                "Modify"
+            }));
+            vm.provide_file("no").unwrap();
+            assert_eq!(vm.memory.read32(0x100).unwrap(), 0);
+            assert_eq!(std::fs::read(&path).unwrap(), b"original");
+        }
+        push_glk_arguments(&mut vm, &[1, 1, 0]);
+        vm.glk(0x62, 3, Destination::Memory(0x100)).unwrap();
+        vm.provide_file(name).unwrap();
+        vm.provide_file("yes").unwrap();
+        assert_eq!(vm.state, RunState::Running);
+        let reference = vm.memory.read32(0x100).unwrap();
+        assert_ne!(reference, 0);
+        assert_eq!(std::fs::read(&path).unwrap(), b"original");
+        let stream = vm.open_file_stream(&[reference, 1, 0], false);
+        assert_ne!(stream, 0);
+        assert!(std::fs::read(&path).unwrap().is_empty());
+        vm.close_stream(stream);
+        std::fs::remove_file(path).unwrap();
     }
 }

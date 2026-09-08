@@ -37,15 +37,18 @@ adapter compiled into the same executable:
 cargo run --release -- --headless path/to/story.ulx
 ```
 
-Game-requested save/load prompts accept a path in the input bar. The desktop
+Game-requested save/load prompts accept a path in the input bar; existing files
+require confirmation before modification, and read prompts require an existing file. The desktop
 also saves its session every 30 seconds and on normal exit; launching without a
 story restores the previous session. `View -> Story information` shows available
 iFiction metadata and cover art. Portable game saves and desktop sessions are
 separate formats.
 
-The desktop supports inline and margin images with resizing, picture hyperlinks,
+The desktop supports paragraph alignment and indentation, styled grids with inline
+editing, inline and margin images with resizing, picture hyperlinks,
 and MOD music alongside sampled audio. Inform acceleration functions 1–13 are
-available; see the compatibility document for tested media formats and limits.
+available. System fonts supply Unicode fallback; an extra font can be selected
+in `View -> Options`. See the compatibility document for tested media formats and limits.
 
 ## Translation
 
@@ -86,6 +89,13 @@ clickable pictures, window resizing and MOD playback:
 ```sh
 python3 tools/make-media-fixture.py /tmp/glulx-media.gblorb
 cargo run -- /tmp/glulx-media.gblorb
+```
+
+Paragraph styles and grid interaction have a separate original fixture:
+
+```sh
+python3 tools/make-style-fixture.py /tmp/glulx-styles.ulx
+cargo run -- /tmp/glulx-styles.ulx
 ```
 
 The release profile uses LTO and strips symbols. Tagged GitHub releases build

@@ -66,6 +66,12 @@ impl StoryHeader {
                 actual: bytes.len(),
             });
         }
+        if self.ext_start as usize != bytes.len() {
+            return Err(StoryError::UnexpectedLength {
+                expected: self.ext_start as usize,
+                actual: bytes.len(),
+            });
+        }
         if self.start_func >= self.ext_start {
             return Err(StoryError::InvalidStartFunction(self.start_func));
         }
@@ -334,6 +340,8 @@ pub enum StoryError {
     InvalidLayout,
     #[error("story is truncated: expected at least {expected} bytes, got {actual}")]
     Truncated { expected: usize, actual: usize },
+    #[error("story length mismatch: expected {expected} bytes from EXTSTART, got {actual}")]
+    UnexpectedLength { expected: usize, actual: usize },
     #[error("invalid start function address {0:#010x}")]
     InvalidStartFunction(u32),
     #[error("story checksum mismatch: expected {expected:#010x}, got {actual:#010x}")]
@@ -389,6 +397,31 @@ mod tests {
         blorb.extend_from_slice(&(image.len() as u32).to_be_bytes());
         blorb.extend_from_slice(&image);
         assert_eq!(Story::from_bytes(&blorb, None).unwrap().image, image);
+    }
+
+    #[test]
+    fn verifies_executable_length_in_raw_and_blorb_stories() {
+        let mut image = minimal_image();
+        image.extend_from_slice(&[0; 256]);
+        assert!(matches!(
+            Story::from_bytes(&image, None),
+            Err(StoryError::UnexpectedLength {
+                expected: 256,
+                actual: 512
+            })
+        ));
+        let mut blorb = b"FORM".to_vec();
+        blorb.extend_from_slice(&(4 + 8 + image.len() as u32).to_be_bytes());
+        blorb.extend_from_slice(b"IFRSGLUL");
+        blorb.extend_from_slice(&(image.len() as u32).to_be_bytes());
+        blorb.extend_from_slice(&image);
+        assert!(matches!(
+            Story::from_bytes(&blorb, None),
+            Err(StoryError::UnexpectedLength {
+                expected: 256,
+                actual: 512
+            })
+        ));
     }
 
     #[test]

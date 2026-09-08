@@ -212,6 +212,44 @@ def acceleration_story():
     return image, expected
 
 
+def core_boundary_story():
+    """Valid zero-length block operations and a long Huffman substring stream."""
+    builder = StoryBuilder()
+    mem = lambda address: (7, address)
+    builder.instruction(0x149, 2, 0)
+    builder.glk(0x23, [0, 0, 0, 3, 0], mem(0x800))
+    builder.glk(0x2f, [mem(0x800)])
+    # No bytes are accessed, so ROM and out-of-range addresses are harmless.
+    for address in [0, 32, 0x800, 0x3000, 0xffffffff]:
+        builder.instruction(0x170, 0, address)
+        builder.instruction(0x171, 0, address, 0xffffffff)
+        builder.instruction(0x171, 0, 0xffffffff, address)
+    builder.text('ZERO-OK\n')
+    builder.instruction(0x141, 0x900)
+    builder.instruction(0x72, 0xa00)
+    builder.text('\nSTRING-OK\n')
+    builder.instruction(0x120)
+    image = builder.finish(ram_start=0x800, ext_start=0x3000, end_mem=0x3000)
+
+    def word(address, value):
+        image[address:address + 4] = u32(value)
+
+    # Bit0 emits the substring "A"; bit1 terminates the encoded string.
+    word(0x900, 0x61)
+    word(0x904, 3)
+    word(0x908, 0x910)
+    image[0x910] = 0
+    word(0x911, 0x920)
+    word(0x915, 0x960)
+    image[0x920:0x923] = b'\x03A\0'
+    image[0x960] = 1
+    image[0xa00] = 0xe1
+    image[0xa01 + 5000] = 1
+    word(32, 0)
+    word(32, sum(value[0] for value in struct.iter_unpack('>I', image)))
+    return image, 'ZERO-OK\n' + 'A' * 40_000 + '\nSTRING-OK\n'
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--reference', type=pathlib.Path, required=True)
@@ -245,6 +283,18 @@ def main():
             transcripts.append(output)
         assert transcripts[0] == transcripts[1], 'Acceleration transcripts differ'
         print(f'PASS acceleration: all 13 functions, {len(expected)} result checks, exact reference transcript')
+
+        image = root / 'core-boundaries.ulx'
+        data, expected = core_boundary_story()
+        image.write_bytes(data)
+        transcripts = []
+        for candidate in [False, True]:
+            executable = args.candidate if candidate else args.reference
+            output = run(executable, image, root / 'unused', '', candidate)
+            assert output.strip() == expected.strip(), f'Core boundary output mismatch: candidate={candidate}'
+            transcripts.append(output)
+        assert transcripts[0] == transcripts[1], 'Core boundary transcripts differ'
+        print('PASS core boundaries: zero-length memory operations and 40000 Huffman substrings, exact reference transcript')
 
     if args.fixtures:
         import re

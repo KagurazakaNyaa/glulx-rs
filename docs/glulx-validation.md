@@ -1,6 +1,6 @@
 # Glulx 实现验收记录
 
-日期：2026-09-08，Linux x86_64，主实现已提交 `4c16443`，此轮继续实现可选加速与媒体能力。
+日期：2026-09-08，Linux x86_64，核心实现提交 `4c16443`，加速与媒体提交 `c5fcc20`。本轮进一步修复完整规范审计发现的核心、窗口、输入、流、字体及呈现边界。
 
 ## 可复现命令与结果
 
@@ -9,19 +9,22 @@ RUSTC_WRAPPER= cargo fmt --all -- --check
 RUSTC_WRAPPER= cargo test --all-targets
 RUSTC_WRAPPER= cargo clippy --all-targets -- -D warnings
 RUSTC_WRAPPER= cargo build --release
+python3 tools/check-opcodes.py --spec /path/to/Glulx-Spec.md --output /tmp/glulx-opcode-audit.tsv
 python3 tools/check-reference.py --reference /path/to/glulxe --candidate target/debug/glulx-rs --fixtures /path/to/fixtures
 ```
 
-Rust 测试 89 passed / 0 failed；Clippy（warnings 视为错误）及 release 构建通过。
+Rust 测试 136 passed / 0 failed；Clippy（warnings 视为错误）及 release 构建通过。
 脚本不下载样本、不修改仓库游戏资源；合成故事及存档使用临时目录。
-不传 `--fixtures` 仍可运行合成 IFZS 双向互操作、double stack 顺序以及 Inform 加速函数差分检查。
+不传 `--fixtures` 仍可运行合成 IFZS 双向互操作、double stack 顺序、Inform 加速函数、零长度内存及深层字符串差分检查。
+官方 opcode 表 150/150 条分发和操作数数量匹配；官方 Glk dispatch 注册表 124/124 selectors 均有分发。这两项只证明表完整，执行语义仍需运行测试。
 
-完整脚本结果：
+此前完整脚本通过结果：
 
 ```text
 PASS Rust -> Glulxe: save continuation, heap chunk, double stack order
 PASS Glulxe -> Rust: save continuation, heap chunk, double stack order
 PASS acceleration: all 13 functions, 94 result checks, exact reference transcript
+PASS core boundaries: zero-length memory operations and 40000 Huffman substrings, exact reference transcript
 PASS glulxercise.ulx: 92 passing sections
 PASS unicasetest.ulx: exact normalized reference transcript
 PASS resstreamtest.gblorb: exact normalized reference transcript
@@ -30,7 +33,8 @@ PASS Adventure Glulxe -> Rust
 ```
 
 Glulxercise 输入 `all / allfloat / alldouble / quit`，三次 `All tests passed.`。
-其随机分布测试有统计性误报概率，官方样本也明确说明；单次统计失败应记录并分析，不能用重复运行掩盖确定性缺陷。
+其随机分布测试有统计性误报概率，官方样本也明确说明；单次统计失败应记录并分析，不能用重复运行掩盖确定性缺陷。本轮提交前重跑，random 组 240 次取样出现 lobit=141 / hibit=99，超出样本设置的 [100..140]，导致该组两个断言失败；其他组通过，allfloat/alldouble 全通过。此结果记录为统计阈值失败，不算本次整套通过，亦未靠重跑隐藏它；此前完整通过结果保留为历史证据。
+文件流 UTF-8 byte mark/seek 按规范测试；CheapGlk 的 Unicode text stream 存在 mark 除以 4 的实现差异，该边界不宣称差分一致。
 Unicode 输入 `all / quit`，资源流输入 `quit`；比较只归一化 interpreter version 字段，Glulxe 使用 `-q -u` 保证 UTF-8。
 Adventure 的保存方执行 `north / save / 路径 / quit / y`，另一解释器执行
 `restore / 路径 / look / quit / y`，验证恢复到 `In Forest`，双向均通过。
@@ -41,19 +45,19 @@ Adventure 的保存方执行 `north / save / 路径 / quit / y`，另一解释�
 
 | 清单领域 | 本地回归入口/覆盖 | 外部验证 |
 | --- | --- | --- |
-| 解码、寻址、栈、局部变量 | `all_load_address_modes_and_opcode_encodings`、`narrow_copy_integer_extremes_and_stack_bounds` | Glulxercise 综合 |
-| 调用、搜索、字符串/filter | 原 VM 测试、`huffman_leaf_and_indirection_matrix` | Glulxercise 综合 |
+| 解码、寻址、栈、局部变量 | `all_load_address_modes_and_opcode_encodings`、`narrow_copy_integer_extremes_and_stack_bounds`、零长度内存操作、locals 帧容量 | Glulxercise 综合 |
+| 调用、搜索、字符串/filter | 原 VM 测试、`huffman_leaf_and_indirection_matrix`、迭代输出续体及数值 filter 内存档 | Glulxercise 综合；40,000 次 Huffman 子字符串与参考一致 |
 | 单/双精度 | `double_*`、`floating_branches_*`、`float_nan_modulo_and_power_identities` | Glulxercise allfloat/alldouble；双栈结果参考测试 |
 | IFZS | round trip、损坏存档、文件提示、空 MAll | 合成故事及 Adventure 双向互读 |
 | undo/restart/protect/heap | `undo_*`、`allocation_limits_*`、原 heap 回归 | Glulxercise 综合 |
 | Inform 加速 1–13 | [acceleration.rs](../src/vm/acceleration.rs)：注册/取消、类/属性/私有权限、旧/新布局、call/callf/tailcall、压缩字符串和 20,000 次 filter 回调、恢复状态边界 | 13 函数共 94 项结果与 Glulxe 精确一致 |
 | random/verify/gestalt | `random_ranges_determinism_verify_and_capabilities` | Glulxercise 综合 |
-| 流/dispatch | read/seek/Unicode/count、echo cycles、原栈引用测试 | resstreamtest 与参考完全一致 |
-| 窗口/事件 | 嵌套树/关闭/resize、多窗口请求/初始行/取消/计时器 | twocol 启动及 Sensory GUI |
+| 流/dispatch | read/seek/Unicode/count、echo cycles、流关闭解除绑定、写入末尾定位、UTF-8 字节标记和覆盖、旧会话迁移、原栈引用测试 | resstreamtest 与参考完全一致 |
+| 窗口/事件 | 排列方向/嵌套 key/关闭/resize/字体度量、多窗口输入、取消/计时器、select_poll 事件分类、图形裁剪和背景扩展 | twocol 启动及 Sensory GUI |
 | Unicode | 扩展转换、titlecase、NFC/NFD、能力参数 | unicasetest 与参考完全一致 |
 | 文本图像 | [presentation.rs](../src/vm/presentation.rs) 图片顺序、事件关联、动态尺寸、零尺寸及会话；[text_buffer.rs](../src/app/text_buffer.rs) 行内基线、双侧/重复边栏、flow-break、换行/单词、缩放与裁剪 | 合成故事 GUI 缩放/点击/恢复 |
-| 样式/鼠标/链接/终止键 | `style_hints_links_mouse_and_terminator_events` | 输入扩展样本启动；未穷举 GUI 按键 |
-| 日期/时间 | epoch、负时间、规范化、UTC 往返 | datetimetest 启动 |
+| 样式/鼠标/链接/终止键 | 样式快照及真实测量、缩进/四种对齐、echo 样式传播、固定网格样式/链接/编辑；真实中文 glyph 绘制及缺字能力 | 25 种特殊按键、网格 LINK/预填编辑、官方定时取消和恢复编辑 GUI 验收 |
+| 日期/时间 | epoch、负时间、字段规范化、失败 sentinel、UTC 往返、New York DST 间隙及 Apia 跳日 | datetimetest 启动 |
 | 声音 | 无设备 idle sink：同步采样起播、独立暂停/音量、停止/结束/渐变通知；[tracker.rs](../src/vm/sound/tracker.rs)：PCM、速度/BPM/音量/E6 循环、重复及恢复偏移 | Sensory AIFF；合成 MOD GUI 播放及完成通知 |
 | Blorb/产品 | 容器边界/资源索引/元数据测试、session serialization | Adventure/Sensory 关闭重开恢复 |
 
@@ -116,3 +120,20 @@ cargo run -- /tmp/glulx-media.gblorb
 合成故事忽略 Arrange 等非输入事件，以便窗口缩放不会错误结束测试。
 零尺寸图片、无效 margin 放置、flow-break 失效、超宽图像和字体换行等边界由 Rust
 测试覆盖。音量渐变的回归覆盖未及时轮询时中途替换与已完成渐变通知，保证从当前音量继续。
+
+
+## 样式、输入、图形边界验收
+
+原创样式 fixture 覆盖居中标题、悬挂缩进和两端对齐段落、右对齐、网格 LINK 及预填输入：
+
+```sh
+python3 tools/make-style-fixture.py /tmp/glulx-styles.ulx
+cargo run -- /tmp/glulx-styles.ulx
+python3 tools/check-input-ui.py --candidate target/debug/glulx-rs --output /tmp/glulx-input-ui --input-feature /path/to/inputfeaturetest.ulx
+```
+
+样式故事经 Linux Xvfb 验收：点击网格 LINK，预填 Ada 改为 Grace Hopper 并提交，正常关闭重开后保留事件、文本和网格。Rust 绘制测试还验证实际中文 glyph、宽字形单格压缩、斜体/字重/颜色、网格链接命中和编辑。
+
+输入脚本自动分配 X display，保留截图、应用日志及持久会话；使用正常 WM_DELETE_WINDOW 退出。原创故事检查 25 个原生按键事件（F1–F12、方向键、Delete/Backspace、Esc/Tab/Page/Home/End/Enter）的精确值，定时取消时组成的 abc，以及同一 VM 执行片段重新请求时的 NEW 预填。官方 Input Feature Test 检查定时取消后的 ROT13 显示、保留原文 abcdef，并在会话恢复后继续编辑。
+
+图形回归验证：改变尺寸立即保留左上可见像素，裁去缩小区域，用当前背景填充新增区域；缩小后再放大不会恢复已裁像素，零尺寸释放画布。无符号矩形宽高按规范裁剪，包含 0xFFFFFFFF 和负坐标组合。

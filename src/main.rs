@@ -72,12 +72,15 @@ fn run_headless(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
             RunState::Running => continue,
             RunState::WaitingForLine | RunState::WaitingForChar | RunState::WaitingForFile => {
                 if state == RunState::WaitingForFile && !file_prompt_shown {
-                    print!("File path (empty cancels): ");
+                    print!("{} ", vm.file_prompt_message());
                     io::stdout().flush()?;
                     file_prompt_shown = true;
                 }
                 match input.recv_timeout(std::time::Duration::from_millis(10)) {
-                    Ok(line) => vm.provide_input(line?.trim_end_matches(['\r', '\n']))?,
+                    Ok(line) => {
+                        vm.provide_input(line?.trim_end_matches(['\r', '\n']))?;
+                        file_prompt_shown = false;
+                    }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                         vm.stop();

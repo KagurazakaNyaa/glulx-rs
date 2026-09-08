@@ -9,6 +9,7 @@ homepage = "https://github.com/KagurazakaNyaa/glulx-rs"
 documentation = "https://docs.rs/glulx-rs"
 
 [dependencies]
+ab_glyph = "0.2"
 eframe = { version = "0.32", default-features = false, features = ["default_fonts", "glow", "persistence", "wayland", "x11"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }

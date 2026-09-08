@@ -49,6 +49,102 @@ impl BufferImage {
         ]
     }
 }
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq)]
+pub struct TextAppearance {
+    pub font_size: f32,
+    pub foreground: u32,
+    pub background: u32,
+}
+impl Default for TextAppearance {
+    fn default() -> Self {
+        Self {
+            font_size: 18.0,
+            foreground: 0x202225,
+            background: 0xf8f8f6,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ResolvedStyle {
+    pub font_size: f32,
+    pub weight: i32,
+    pub oblique: bool,
+    pub proportional: bool,
+    pub foreground: u32,
+    pub background: u32,
+    pub reverse: bool,
+    pub indentation: i32,
+    pub paragraph_indentation: i32,
+    pub justification: u32,
+}
+
+impl ResolvedStyle {
+    pub(super) fn resolve(
+        kind: u32,
+        style: u32,
+        hints: &BTreeMap<(u32, u32), u32>,
+        appearance: TextAppearance,
+    ) -> Self {
+        let hint = |id| hints.get(&(style, id)).copied();
+        let grid = kind == WINTYPE_TEXT_GRID;
+        let reverse = hint(9) == Some(1);
+        let mut foreground = hint(7).unwrap_or(appearance.foreground) & 0xffffff;
+        let mut background = hint(8).unwrap_or(appearance.background) & 0xffffff;
+        if reverse {
+            std::mem::swap(&mut foreground, &mut background);
+        }
+        Self {
+            font_size: if grid {
+                13.0
+            } else {
+                (appearance.font_size + hint(3).unwrap_or(0) as i32 as f32 * 2.0).clamp(8.0, 64.0)
+            },
+            // The default font supports regular/bold; a light hint falls back
+            // to regular, and measurements report that actual result.
+            weight: hint(4).map_or(i32::from(matches!(style, 3 | 4 | 5 | 8)), |v| {
+                i32::from(v as i32 > 0)
+            }),
+            oblique: hint(5).map_or(matches!(style, 1 | 5), |v| v != 0),
+            proportional: !grid && hint(6).map_or(style != 2, |v| v != 0),
+            foreground,
+            background,
+            reverse,
+            indentation: if grid {
+                0
+            } else {
+                (hint(0).unwrap_or(0) as i32).saturating_mul(8)
+            },
+            paragraph_indentation: if grid {
+                0
+            } else {
+                (hint(1).unwrap_or(0) as i32).saturating_mul(8)
+            },
+            justification: if grid {
+                0
+            } else {
+                hint(2).filter(|v| *v <= 3).unwrap_or(0)
+            },
+        }
+    }
+
+    fn measure(self, hint: u32) -> Option<u32> {
+        Some(match hint {
+            0 => self.indentation as u32,
+            1 => self.paragraph_indentation as u32,
+            2 => self.justification,
+            3 => self.font_size as u32,
+            4 => self.weight as u32,
+            5 => u32::from(self.oblique),
+            6 => u32::from(self.proportional),
+            7 => self.foreground,
+            8 => self.background,
+            9 => u32::from(self.reverse),
+            _ => return None,
+        })
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct WindowView {
     pub id: u32,
@@ -56,9 +152,39 @@ pub struct WindowView {
     pub rect: [u32; 4],
     pub runs: Vec<TextRun>,
     pub grid: String,
+    pub grid_cells: Vec<GridCell>,
+    pub grid_size: [u32; 2],
+    pub grid_cursor: [u32; 2],
+    pub appearance: TextAppearance,
     pub hints: BTreeMap<(u32, u32), u32>,
 }
+impl WindowView {
+    pub fn style(&self, style: u32) -> ResolvedStyle {
+        ResolvedStyle::resolve(self.kind, style, &self.hints, self.appearance)
+    }
+}
+
 impl Vm {
+    pub fn set_text_appearance(&mut self, font_size: f32, foreground: u32, background: u32) {
+        let font_size = if font_size.is_finite() {
+            font_size.clamp(8.0, 64.0)
+        } else {
+            18.0
+        };
+        let resized = self.text_appearance.font_size != font_size;
+        if resized && self.glk_root != 0 && !self.events.iter().any(|e| e[0] == 5) {
+            self.events.push_back([5, 0, 0, 0]);
+        }
+        self.text_appearance = TextAppearance {
+            font_size,
+            foreground: foreground & 0xffffff,
+            background: background & 0xffffff,
+        };
+        if resized {
+            self.layout_windows();
+        }
+    }
+
     pub fn image_resource(&self, resource: u32) -> Option<&[u8]> {
         self.story.resource(*b"Pict", resource)
     }
@@ -171,6 +297,10 @@ impl Vm {
                 kind: w.kind,
                 rect: w.rect,
                 runs: w.runs.clone(),
+                grid_cells: w.grid_cells(),
+                grid_size: [w.width, w.height],
+                grid_cursor: [w.cursor_x, w.cursor_y],
+                appearance: self.text_appearance,
                 grid: w
                     .grid
                     .chunks(w.width.max(1) as usize)
@@ -192,24 +322,37 @@ impl Vm {
                     self.glk_current_stream
                 };
                 let value = arg(usize::from(explicit));
-                if let Some(GlkStream {
-                    target: GlkStreamTarget::Window(id),
-                    ..
-                }) = self.glk_streams.get(&stream)
-                    && let Some(window) = self.glk_windows.get_mut(id)
-                {
+                let mut stream = stream;
+                let mut seen = HashSet::new();
+                while seen.insert(stream) {
+                    let Some(GlkStream {
+                        target: GlkStreamTarget::Window(id),
+                        ..
+                    }) = self.glk_streams.get(&stream)
+                    else {
+                        break;
+                    };
+                    let Some(window) = self.glk_windows.get_mut(id) else {
+                        break;
+                    };
                     if selector >= 0x100 {
                         window.hyperlink = value;
-                    } else {
-                        window.style = if value <= 10 { value } else { 0 };
+                        break; // Hyperlink state is window-specific, not a style command.
+                    }
+                    window.style = if value <= 10 { value } else { 0 };
+                    stream = window.echo_stream;
+                    if stream == 0 {
+                        break;
                     }
                 }
                 0
             }
             0xb0 | 0xb1 => {
-                if arg(1) <= 10 && (3..=9).contains(&arg(2)) {
-                    for kind in [3] {
-                        if arg(0) == 0 || arg(0) == kind {
+                if arg(1) <= 10 && arg(2) <= 9 {
+                    for kind in [3, 4] {
+                        if (arg(0) == 0 || arg(0) == kind)
+                            && (kind == 3 || matches!(arg(2), 4 | 5 | 7..=9))
+                        {
                             if selector == 0xb0 {
                                 self.style_hints.insert((kind, arg(1), arg(2)), arg(3));
                             } else {
@@ -220,27 +363,27 @@ impl Vm {
                 }
                 0
             }
-            0xb2 => {
-                if let Some(window) = self.glk_windows.get(&arg(0)) {
-                    u32::from(
-                        window.kind == 3
-                            && arg(1) != arg(2)
-                            && (arg(1) <= 10 && arg(2) <= 10)
-                            && (default_style(arg(1)) != default_style(arg(2))
-                                || (0..10).any(|hint| {
-                                    window.hints.get(&(arg(1), hint))
-                                        != window.hints.get(&(arg(2), hint))
-                                })),
-                    )
-                } else {
-                    0
+            0xb2 => self.glk_windows.get(&arg(0)).map_or(0, |w| {
+                if !self.graphical_host || !matches!(w.kind, 3 | 4) || arg(1) > 10 || arg(2) > 10 {
+                    return 0;
                 }
-            }
+                let mut one =
+                    ResolvedStyle::resolve(w.kind, arg(1), &w.hints, self.text_appearance);
+                let mut two =
+                    ResolvedStyle::resolve(w.kind, arg(2), &w.hints, self.text_appearance);
+                one.reverse = false;
+                two.reverse = false;
+                u32::from(one != two)
+            }),
             0xb3 => {
                 let value = self
                     .glk_windows
                     .get(&arg(0))
-                    .and_then(|w| w.hints.get(&(arg(1), arg(2))).copied());
+                    .filter(|w| self.graphical_host && matches!(w.kind, 3 | 4) && arg(1) <= 10)
+                    .and_then(|w| {
+                        ResolvedStyle::resolve(w.kind, arg(1), &w.hints, self.text_appearance)
+                            .measure(arg(2))
+                    });
                 if let Some(value) = value {
                     self.write_glk_reference(arg(3), value)?;
                     1
@@ -265,13 +408,6 @@ impl Vm {
         }
         Ok(())
     }
-}
-fn default_style(style: u32) -> (bool, bool, bool) {
-    (
-        matches!(style, 3 | 4 | 5 | 8),
-        matches!(style, 1 | 5),
-        style == 2,
-    )
 }
 
 impl GlkWindow {
@@ -327,6 +463,92 @@ mod tests {
         let len = blorb.len() as u32 - 8;
         blorb[4..8].copy_from_slice(&len.to_be_bytes());
         Vm::new(Story::from_bytes(&blorb, None).unwrap()).unwrap()
+    }
+
+    fn measured(vm: &mut Vm, window: u32, style: u32, hint: u32) -> u32 {
+        assert_eq!(
+            vm.style_call(0xb3, &[window, style, hint, u32::MAX])
+                .unwrap(),
+            1
+        );
+        vm.stack.pop_u32().unwrap()
+    }
+
+    #[test]
+    fn style_measure_reports_rendered_values_and_hints_apply_only_to_new_windows() {
+        let mut vm = pictured_vm();
+        for (hint, value) in [
+            (0, 2),
+            (1, (-1i32) as u32),
+            (2, 3),
+            (3, 4),
+            (7, 0x123456),
+            (8, 0xabcdef),
+            (9, 1),
+        ] {
+            vm.style_call(0xb0, &[0, 9, hint, value]).unwrap();
+        }
+        let buffer = vm.open_window(&[0, 0, 0, 3, 0]);
+        for (hint, expected) in [
+            (0, 16),
+            (1, (-8i32) as u32),
+            (2, 3),
+            (3, 26),
+            (7, 0xabcdef),
+            (8, 0x123456),
+            (9, 1),
+        ] {
+            assert_eq!(measured(&mut vm, buffer, 9, hint), expected, "hint {hint}");
+        }
+        assert_eq!(measured(&mut vm, buffer, 0, 3), 18);
+        vm.style_call(0xb0, &[3, 9, 3, 2]).unwrap();
+        assert_eq!(measured(&mut vm, buffer, 9, 3), 26);
+        let grid = vm.open_window(&[buffer, 0x12, 3, 4, 0]);
+        assert_eq!(measured(&mut vm, grid, 9, 3), 13);
+        assert_eq!(measured(&mut vm, grid, 9, 0), 0);
+        assert_eq!(measured(&mut vm, grid, 9, 7), 0xabcdef);
+        assert_eq!(measured(&mut vm, grid, 9, 6), 0);
+        vm.set_text_appearance(22.0, 0x001122, 0x334455);
+        assert_eq!(measured(&mut vm, buffer, 0, 3), 22);
+        assert_eq!(measured(&mut vm, buffer, 9, 3), 30);
+        assert_eq!(measured(&mut vm, buffer, 0, 7), 0x001122);
+        assert_eq!(vm.style_call(0xb3, &[buffer, 11, 7, 0]).unwrap(), 0);
+        assert_eq!(vm.style_call(0xb3, &[buffer, 0, 10, 0]).unwrap(), 0);
+    }
+
+    #[test]
+    fn style_commands_follow_echo_chains_without_echoing_backward() {
+        let mut vm = pictured_vm();
+        let first = vm.open_window(&[0, 0, 0, 3, 0]);
+        let second = vm.open_window(&[first, 0x21, 50, 3, 0]);
+        let third = vm.open_window(&[second, 0x21, 50, 4, 0]);
+        let streams = [first, second, third].map(|id| vm.glk_windows[&id].stream);
+        vm.glk_windows.get_mut(&first).unwrap().echo_stream = streams[1];
+        vm.glk_windows.get_mut(&second).unwrap().echo_stream = streams[2];
+        vm.style_call(0x87, &[streams[0], 1]).unwrap();
+        vm.glk_write_char(streams[0], 'A');
+        assert_eq!(vm.glk_windows[&second].runs[0].style, 1);
+        assert_eq!(vm.glk_windows[&third].grid_cells()[0].style, 1);
+        vm.style_call(0x87, &[streams[1], 3]).unwrap();
+        assert_eq!(vm.glk_windows[&first].style, 1);
+        assert_eq!(vm.glk_windows[&second].style, 3);
+        assert_eq!(vm.glk_windows[&third].style, 3);
+    }
+
+    #[test]
+    fn style_distinguish_compares_actual_grid_and_buffer_appearance() {
+        let mut vm = pictured_vm();
+        vm.style_call(0xb0, &[0, 9, 4, u32::MAX]).unwrap(); // unsupported light weight renders regular
+        let buffer = vm.open_window(&[0, 0, 0, 3, 0]);
+        assert_eq!(vm.style_call(0xb2, &[buffer, 0, 9]).unwrap(), 0);
+        assert_eq!(vm.style_call(0xb2, &[buffer, 0, 3]).unwrap(), 1);
+        assert_eq!(vm.style_call(0xb2, &[buffer, 3, 4]).unwrap(), 0);
+        let grid = vm.open_window(&[buffer, 0x12, 3, 4, 0]);
+        assert_eq!(vm.style_call(0xb2, &[grid, 0, 2]).unwrap(), 0);
+        assert_eq!(vm.style_call(0xb2, &[grid, 0, 1]).unwrap(), 1);
+        vm.set_graphical_host(false);
+        assert_eq!(vm.style_call(0xb2, &[buffer, 0, 3]).unwrap(), 0);
+        assert_eq!(vm.style_call(0xb3, &[buffer, 0, 3, 0]).unwrap(), 0);
     }
 
     #[test]

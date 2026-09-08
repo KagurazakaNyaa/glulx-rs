@@ -11,7 +11,9 @@ use crate::{
     translation::{Submission, TranslationSettings, Translator},
 };
 
+mod fonts;
 mod text_buffer;
+mod text_grid;
 
 const STORAGE_KEY: &str = "glulx-rs-settings";
 
@@ -19,6 +21,7 @@ const STORAGE_KEY: &str = "glulx-rs-settings";
 #[serde(default)]
 pub struct PlayerSettings {
     pub font_size: f32,
+    pub fallback_font: String,
     pub text_color: [u8; 3],
     pub background_color: [u8; 3],
     pub hyperlink_color: [u8; 3],
@@ -31,6 +34,7 @@ impl Default for PlayerSettings {
     fn default() -> Self {
         Self {
             font_size: 18.0,
+            fallback_font: String::new(),
             text_color: [32, 34, 37],
             background_color: [248, 248, 246],
             hyperlink_color: [20, 94, 150],
@@ -210,14 +214,16 @@ pub struct PlayerApp {
     translator: Translator,
     pending_translations: HashMap<u64, usize>,
     last_state: RunState,
+    fonts: fonts::Fonts,
 }
 
 impl PlayerApp {
     pub fn new(creation: &eframe::CreationContext<'_>, initial_story: Option<PathBuf>) -> Self {
-        let settings = creation
+        let settings: PlayerSettings = creation
             .storage
             .and_then(|storage| eframe::get_value(storage, STORAGE_KEY))
             .unwrap_or_default();
+        let fonts = fonts::Fonts::new(&creation.egui_ctx, &settings.fallback_font);
         let mut app = Self {
             settings,
             vm: None,
@@ -242,6 +248,7 @@ impl PlayerApp {
             translator: Translator::new(),
             pending_translations: HashMap::new(),
             last_state: RunState::Halted,
+            fonts,
         };
         if let Some(path) = initial_story {
             app.load_story(path);
@@ -340,6 +347,14 @@ impl PlayerApp {
         let Some(vm) = &mut self.vm else {
             return;
         };
+        let word = |c: [u8; 3]| u32::from_be_bytes([0, c[0], c[1], c[2]]);
+        vm.set_glyph_support(self.fonts.support.clone());
+        vm.set_text_metrics(self.fonts.metrics.clone());
+        vm.set_text_appearance(
+            self.settings.font_size,
+            word(self.settings.text_color),
+            word(self.settings.background_color),
+        );
         if let Err(error) = vm.run_steps(25_000) {
             let pc = vm.pc();
             vm.stop();
@@ -353,7 +368,9 @@ impl PlayerApp {
             self.turn_buffer.push_str(&output);
         }
         let state = vm.state();
-        if state == RunState::WaitingForLine && self.last_state != state {
+        // A timer can cancel and re-request input during one VM slice, leaving
+        // the same RunState but supplying a different prefilled line.
+        if state == RunState::WaitingForLine {
             self.input = vm.initial_input();
         }
         if matches!(state, RunState::WaitingForLine | RunState::WaitingForChar)
@@ -413,7 +430,22 @@ impl PlayerApp {
         let mut dirty = HashSet::new();
         for request in requests {
             match request {
+                GraphicsRequest::Resize {
+                    window,
+                    background,
+                    canvas_size,
+                } => {
+                    if canvas_size.contains(&0) {
+                        self.graphics.remove(&window);
+                    } else {
+                        ensure_canvas(context, &mut self.graphics, window, canvas_size, background);
+                        dirty.insert(window);
+                    }
+                }
                 GraphicsRequest::Draw(request) => {
+                    if request.canvas_size.contains(&0) {
+                        continue;
+                    }
                     if let std::collections::hash_map::Entry::Vacant(entry) =
                         self.image_cache.entry(request.resource)
                     {
@@ -447,6 +479,7 @@ impl PlayerApp {
                         &mut self.graphics,
                         request.window,
                         request.canvas_size,
+                        0xffffff,
                     );
                     image::imageops::overlay(
                         &mut canvas.pixels,
@@ -462,7 +495,11 @@ impl PlayerApp {
                     rect,
                     canvas_size,
                 } => {
-                    let canvas = ensure_canvas(context, &mut self.graphics, window, canvas_size);
+                    if canvas_size.contains(&0) {
+                        continue;
+                    }
+                    let canvas =
+                        ensure_canvas(context, &mut self.graphics, window, canvas_size, 0xffffff);
                     fill_rect(&mut canvas.pixels, rect, color);
                     dirty.insert(window);
                 }
@@ -471,7 +508,11 @@ impl PlayerApp {
                     color,
                     canvas_size,
                 } => {
-                    let canvas = ensure_canvas(context, &mut self.graphics, window, canvas_size);
+                    if canvas_size.contains(&0) {
+                        continue;
+                    }
+                    let canvas =
+                        ensure_canvas(context, &mut self.graphics, window, canvas_size, color);
                     let color = rgba(color);
                     for pixel in canvas.pixels.pixels_mut() {
                         *pixel = color;
@@ -531,6 +572,18 @@ impl PlayerApp {
             vm.provide_terminated_input(&input, terminator)
         };
         if let Err(error) = result {
+            self.fail(error.to_string());
+        } else {
+            self.last_state = RunState::Running;
+        }
+    }
+
+    fn submit_key(&mut self, key: u32) {
+        let Some(vm) = &mut self.vm else {
+            return;
+        };
+        self.input.clear();
+        if let Err(error) = vm.provide_key(key) {
             self.fail(error.to_string());
         } else {
             self.last_state = RunState::Running;
@@ -634,7 +687,6 @@ impl PlayerApp {
 
     fn story_view(&mut self, context: &egui::Context) {
         let background = rgb(self.settings.background_color);
-        let text = rgb(self.settings.text_color);
         if self.settings.translation.enabled {
             egui::SidePanel::right("translation")
                 .default_width(360.0)
@@ -702,8 +754,10 @@ impl PlayerApp {
                 } else {
                     Vec::new()
                 };
+                self.poll_graphics(context);
                 let mut click = None;
                 let mut hyperlink = None;
+                let mut grid_submitted = false;
                 for view in views {
                     let rect = egui::Rect::from_min_size(
                         bounds.min + egui::vec2(view.rect[0] as f32, view.rect[1] as f32),
@@ -744,24 +798,27 @@ impl PlayerApp {
                                     );
                                 }
                                 4 => {
-                                    let response = ui.add(
-                                        egui::Label::new(
-                                            RichText::new(&view.grid)
-                                                .monospace()
-                                                .size(13.0)
-                                                .color(text),
-                                        )
-                                        .sense(egui::Sense::click()),
-                                    );
-                                    if response.clicked()
-                                        && let Some(pos) = response.interact_pointer_pos()
-                                    {
-                                        click = Some((
-                                            view.id,
-                                            ((pos.x - rect.min.x) / 8.0).max(0.0) as u32,
-                                            ((pos.y - rect.min.y) / 16.0).max(0.0) as u32,
-                                        ));
+                                    let editor = self.vm.as_ref().and_then(|vm| {
+                                        (vm.is_grid_line_input() && vm.input_window() == view.id)
+                                            .then_some(text_grid::GridEditor {
+                                                text: &mut self.input,
+                                                maximum_length: vm.line_input_max_len(),
+                                            })
+                                    });
+                                    let response =
+                                        text_grid::show(ui, rect, &view, &self.settings, editor);
+                                    if let Some([x, y]) = response.cell {
+                                        click = Some((view.id, x, y));
                                     }
+                                    if let Some(value) = response.hyperlink {
+                                        hyperlink = Some((view.id, value));
+                                    }
+                                    if response.changed
+                                        && let Some(vm) = &mut self.vm
+                                    {
+                                        let _ = vm.update_line_input(&self.input);
+                                    }
+                                    grid_submitted |= response.submitted;
                                 }
                                 5 => {
                                     let response = ui.allocate_rect(rect, egui::Sense::click());
@@ -803,7 +860,45 @@ impl PlayerApp {
                         let _ = vm.hyperlink_input(window, value);
                     }
                 }
+                if grid_submitted {
+                    self.submit_input();
+                }
             });
+    }
+
+    fn character_input(&mut self, context: &egui::Context) {
+        if !matches!(
+            self.vm.as_ref().and_then(Vm::input_request),
+            Some(InputRequest::Character)
+        ) {
+            return;
+        }
+        let key = context.input(|input| {
+            input.events.iter().find_map(|event| match event {
+                egui::Event::Key {
+                    key, pressed: true, ..
+                } => glk_character_key(*key),
+                egui::Event::Text(text) | egui::Event::Paste(text) => {
+                    text.chars().next().map(|c| c as u32)
+                }
+                _ => None,
+            })
+        });
+        if let Some(key) = key {
+            // A game keystroke must not simultaneously navigate or activate
+            // the player's menus (Tab/Return in particular).
+            context.input_mut(|input| {
+                input.events.retain(|event| {
+                    !matches!(
+                        event,
+                        egui::Event::Key { pressed: true, .. }
+                            | egui::Event::Text(_)
+                            | egui::Event::Paste(_)
+                    )
+                })
+            });
+            self.submit_key(key);
+        }
     }
 
     fn input_bar(&mut self, context: &egui::Context) {
@@ -818,6 +913,11 @@ impl PlayerApp {
                     .inner_margin(10.0),
             )
             .show(context, |ui| {
+                if matches!(request, Some(InputRequest::File { .. }))
+                    && let Some(vm) = &self.vm
+                {
+                    ui.label(vm.file_prompt_message());
+                }
                 ui.horizontal(|ui| {
                     if let Some(vm) = &mut self.vm {
                         let windows = vm.pending_input_windows();
@@ -841,28 +941,45 @@ impl PlayerApp {
                             }
                         }
                     }
-                    ui.label(match request.unwrap() {
-                        InputRequest::Line { .. } => ">",
-                        InputRequest::Character => "Key",
-                        InputRequest::File { writing: true } => "Save file",
-                        InputRequest::File { writing: false } => "Open file",
-                    });
-                    let response = ui.add_sized(
-                        [ui.available_width() - 72.0, 30.0],
-                        egui::TextEdit::singleline(&mut self.input)
-                            .font(egui::TextStyle::Monospace),
-                    );
-                    if response.changed()
-                        && let Some(vm) = &mut self.vm
-                    {
-                        let _ = vm.update_line_input(&self.input);
+                    // Changing the window can also change the input kind.
+                    let request = self.vm.as_ref().and_then(Vm::input_request);
+                    if matches!(request, Some(InputRequest::Character)) {
+                        ui.label("Press a key");
+                        if ui.button("Return").clicked() {
+                            self.submit_key(0xffff_fffa);
+                        }
+                        return;
                     }
-                    let enter = (response.has_focus() || response.lost_focus())
-                        && ui.input(|input| input.key_pressed(egui::Key::Enter));
-                    response.request_focus();
-                    let character_typed = matches!(request, Some(InputRequest::Character))
-                        && response.changed()
-                        && !self.input.is_empty();
+                    let grid_line = self.vm.as_ref().is_some_and(Vm::is_grid_line_input);
+                    let mut enter = false;
+                    if !grid_line {
+                        ui.label(match request {
+                            Some(InputRequest::Line { .. }) => ">",
+                            Some(InputRequest::File { writing: true }) => "Save file",
+                            Some(InputRequest::File { writing: false }) => "Open file",
+                            _ => "",
+                        });
+                        let limit = match request {
+                            Some(InputRequest::Line { maximum_length }) => maximum_length as usize,
+                            _ => usize::MAX,
+                        };
+                        let response = ui.add_sized(
+                            [ui.available_width() - 72.0, 30.0],
+                            egui::TextEdit::singleline(&mut self.input)
+                                .char_limit(limit)
+                                .font(egui::TextStyle::Monospace),
+                        );
+                        if response.changed()
+                            && let Some(vm) = &mut self.vm
+                        {
+                            let _ = vm.update_line_input(&self.input);
+                        }
+                        enter = (response.has_focus() || response.lost_focus())
+                            && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                        response.request_focus();
+                    } else {
+                        ui.label("Type in the highlighted field");
+                    }
                     let terminator = if matches!(request, Some(InputRequest::Line { .. })) {
                         self.vm.as_ref().and_then(|vm| {
                             vm.line_terminators().iter().copied().find(|code| {
@@ -875,7 +992,7 @@ impl PlayerApp {
                     };
                     if let Some(terminator) = terminator {
                         self.submit_terminated_input(terminator);
-                    } else if ui.button("Send").clicked() || enter || character_typed {
+                    } else if ui.button("Send").clicked() || enter {
                         self.submit_input();
                     }
                 });
@@ -959,6 +1076,18 @@ impl PlayerApp {
                 ui.add(
                     egui::Slider::new(&mut self.settings.font_size, 12.0..=32.0).text("Text size"),
                 );
+                ui.label("Extra fallback font (TTF, OTF or TTC)");
+                ui.text_edit_singleline(&mut self.settings.fallback_font);
+                if ui.button("Apply font").clicked() {
+                    self.fonts = fonts::Fonts::new(context, &self.settings.fallback_font);
+                }
+                ui.weak(format!(
+                    "{} fallback fonts loaded",
+                    self.fonts.fallback_count
+                ));
+                if let Some(error) = &self.fonts.error {
+                    ui.colored_label(Color32::from_rgb(170, 50, 45), error);
+                }
                 color_setting(ui, "Text", &mut self.settings.text_color);
                 color_setting(ui, "Background", &mut self.settings.background_color);
                 color_setting(ui, "Hyperlinks", &mut self.settings.hyperlink_color);
@@ -1074,6 +1203,7 @@ impl eframe::App for PlayerApp {
             }
         }
         self.run_vm();
+        self.character_input(context);
         self.poll_graphics(context);
         self.poll_translations();
         self.menu_bar(context);
@@ -1120,27 +1250,35 @@ fn ensure_canvas<'a>(
     graphics: &'a mut BTreeMap<u32, DisplayedGraphics>,
     window: u32,
     size: [u32; 2],
+    background: u32,
 ) -> &'a mut DisplayedGraphics {
-    let recreate = graphics
-        .get(&window)
-        .is_some_and(|canvas| canvas.pixels.dimensions() != (size[0].max(1), size[1].max(1)));
-    if recreate {
-        graphics.remove(&window);
+    let canvas = graphics.entry(window).or_insert_with(|| {
+        let mut canvas = DisplayedGraphics::new(context, window, size);
+        for pixel in canvas.pixels.pixels_mut() {
+            *pixel = rgba(background);
+        }
+        canvas
+    });
+    if canvas.pixels.dimensions() != (size[0].max(1), size[1].max(1)) {
+        let mut resized =
+            image::RgbaImage::from_pixel(size[0].max(1), size[1].max(1), rgba(background));
+        image::imageops::overlay(&mut resized, &canvas.pixels, 0, 0);
+        canvas.pixels = resized;
     }
-    graphics
-        .entry(window)
-        .or_insert_with(|| DisplayedGraphics::new(context, window, size))
+    canvas
 }
 
 fn fill_rect(canvas: &mut image::RgbaImage, rect: [i32; 4], color: u32) {
     let [left, top, width, height] = rect;
-    if width <= 0 || height <= 0 {
+    let (left, top) = (i64::from(left), i64::from(top));
+    let (width, height) = (i64::from(width as u32), i64::from(height as u32));
+    if width == 0 || height == 0 {
         return;
     }
-    let right = left.saturating_add(width).clamp(0, canvas.width() as i32);
-    let bottom = top.saturating_add(height).clamp(0, canvas.height() as i32);
-    let left = left.clamp(0, canvas.width() as i32);
-    let top = top.clamp(0, canvas.height() as i32);
+    let right = (left + width).clamp(0, i64::from(canvas.width()));
+    let bottom = (top + height).clamp(0, i64::from(canvas.height()));
+    let left = left.clamp(0, i64::from(canvas.width()));
+    let top = top.clamp(0, i64::from(canvas.height()));
     let color = rgba(color);
     for y in top..bottom {
         for x in left..right {
@@ -1178,6 +1316,37 @@ fn is_story_path(path: &Path) -> bool {
 
 fn color_word(value: u32) -> Color32 {
     Color32::from_rgb((value >> 16) as u8, (value >> 8) as u8, value as u8)
+}
+
+fn glk_character_key(key: egui::Key) -> Option<u32> {
+    use egui::Key;
+    Some(match key {
+        Key::ArrowLeft => 0xffff_fffe,
+        Key::ArrowRight => 0xffff_fffd,
+        Key::ArrowUp => 0xffff_fffc,
+        Key::ArrowDown => 0xffff_fffb,
+        Key::Enter => 0xffff_fffa,
+        Key::Delete | Key::Backspace => 0xffff_fff9,
+        Key::Escape => 0xffff_fff8,
+        Key::Tab => 0xffff_fff7,
+        Key::PageUp => 0xffff_fff6,
+        Key::PageDown => 0xffff_fff5,
+        Key::Home => 0xffff_fff4,
+        Key::End => 0xffff_fff3,
+        Key::F1 => 0xffff_ffef,
+        Key::F2 => 0xffff_ffee,
+        Key::F3 => 0xffff_ffed,
+        Key::F4 => 0xffff_ffec,
+        Key::F5 => 0xffff_ffeb,
+        Key::F6 => 0xffff_ffea,
+        Key::F7 => 0xffff_ffe9,
+        Key::F8 => 0xffff_ffe8,
+        Key::F9 => 0xffff_ffe7,
+        Key::F10 => 0xffff_ffe6,
+        Key::F11 => 0xffff_ffe5,
+        Key::F12 => 0xffff_ffe4,
+        _ => return None,
+    })
 }
 
 fn glk_terminator_key(code: u32) -> Option<egui::Key> {
@@ -1223,5 +1392,34 @@ mod tests {
         assert_eq!(*canvas.get_pixel(1, 1), rgba(0x123456));
         assert_eq!(*canvas.get_pixel(2, 1), rgba(0xffffff));
         assert_eq!(*canvas.get_pixel(0, 0), rgba(0xffffff));
+    }
+
+    #[test]
+    fn graphics_fill_clips_unsigned_extents_without_signed_overflow() {
+        let mut canvas = image::RgbaImage::from_pixel(3, 2, rgba(0xffffff));
+        fill_rect(&mut canvas, [i32::MIN, i32::MIN, -1, -1], 0x123456);
+        assert!(canvas.pixels().all(|pixel| *pixel == rgba(0x123456)));
+        fill_rect(&mut canvas, [0, 0, i32::MIN, i32::MIN], 0xabcdef);
+        assert!(canvas.pixels().all(|pixel| *pixel == rgba(0xabcdef)));
+        fill_rect(&mut canvas, [i32::MAX, 0, -1, -1], 0);
+        fill_rect(&mut canvas, [0, 0, 0, -1], 0);
+        assert!(canvas.pixels().all(|pixel| *pixel == rgba(0xabcdef)));
+    }
+
+    #[test]
+    fn resizing_graphics_preserves_visible_pixels_and_discards_cropped_ones() {
+        let context = egui::Context::default();
+        let mut graphics = BTreeMap::new();
+        let canvas = ensure_canvas(&context, &mut graphics, 1, [4, 3], 0x112233);
+        canvas.pixels.put_pixel(0, 0, rgba(0xabcdef));
+        canvas.pixels.put_pixel(3, 2, rgba(0x334455));
+        // Resize twice without an intervening draw; clipped pixels must not
+        // reappear, and only the newly exposed region gets the new background.
+        ensure_canvas(&context, &mut graphics, 1, [2, 1], 0x556677);
+        let canvas = ensure_canvas(&context, &mut graphics, 1, [4, 3], 0x778899);
+        assert_eq!(*canvas.pixels.get_pixel(0, 0), rgba(0xabcdef));
+        assert_eq!(*canvas.pixels.get_pixel(1, 0), rgba(0x112233));
+        assert_eq!(*canvas.pixels.get_pixel(2, 0), rgba(0x778899));
+        assert_eq!(*canvas.pixels.get_pixel(3, 2), rgba(0x778899));
     }
 }

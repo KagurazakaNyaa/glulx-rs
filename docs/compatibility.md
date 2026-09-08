@@ -25,9 +25,14 @@ Desktop sessions are local player snapshots, not an interchange format.
 
 Text buffers support all five image alignments, margin flow breaks, image hyperlinks
 and Glk 0.7.6 dynamic width/aspect/maximum-width rules. Graphics-window images retain
-their dimensions at draw time. Text-buffer style hints 3–9 are supported; paragraph
-hints 0–2 and grid style hints are ignored. Fonts and glyph availability depend
-on egui and installed/configured fonts.
+their dimensions at draw time. Text-buffer style hints 0–9 are supported; paragraph
+indentation/hanging indents and all four justification modes are implemented. Grid
+cells retain style and hyperlinks; grid layout hints 0–3/6 are ignored to keep equal
+cell dimensions, while weight/oblique/color hints apply. Measurements reflect actual
+rendering; light-weight requests fall back to regular when unavailable. System outline
+fonts are loaded automatically, and Options accepts an extra TTF/OTF/TTC fallback.
+CharOutput reports missing glyphs accurately. Text-buffer window sizing uses the
+normal style’s actual font metrics; grids keep uniform 8×16 cells.
 
 Sound decoding uses rodio/Symphonia plus pure Rust xmrs/xmrsplayer for
 ProTracker/SoundTracker MOD music. MOD is streamed to PCM rather than fully expanded
@@ -36,6 +41,12 @@ are not claimed. `play_multi` submits a single combined output source, aligning
 channels to the same stereo sample frame; physical sound-card output is not measured.
 AIFF and generated MOD resources have GUI coverage, while not every codec/encoding
 combination has a fixture.
+
+File streams preserve encoded-byte positions and Unicode overwrite semantics. File
+prompts reject missing read paths and confirm modifications to existing files.
+Input cancellation echoes the retained composition, line terminators are bound to
+each request, and select_poll leaves player input for select. The GUI supports
+standard special keys and editing directly in grid windows.
 
 The headless adapter exposes terminal text and file prompts and does not advertise
 GUI-only facilities. Without an audio output device the desktop disables sound
