@@ -16,13 +16,12 @@
 
 ## Not Yet Implemented
 
-- Catch/throw continuations.
-- Quetzal save/restore, undo, protected-memory restart, and autosave.
+- Quetzal save/restore and autosave.
 - Heap allocation and Inform acceleration functions.
 - Double-precision floating-point opcodes.
 - Full Glk object dispatch, multiple window layout, hyperlinks, timers, mouse events, file references, and streams.
-- Blorb images, sound/music, cover art, and iFiction metadata.
-- Text grid rendering and graphics windows.
+- Sound/music, cover art, and iFiction metadata.
+- Full text-grid layout and graphics-window compositing.
 
 Modern Inform stories normally use several items in the second list. They will
 currently stop with an explicit compatibility error rather than play to

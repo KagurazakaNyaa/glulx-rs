@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 use thiserror::Error;
 
@@ -99,6 +102,7 @@ pub struct Story {
     pub header: StoryHeader,
     pub image: Vec<u8>,
     pub container: Option<Vec<u8>>,
+    resources: HashMap<(u32, u32), (usize, usize)>,
 }
 
 impl Story {
@@ -111,10 +115,14 @@ impl Story {
     }
 
     pub fn from_bytes(bytes: &[u8], title: Option<&str>) -> Result<Self, StoryError> {
-        let (image, container) = if bytes.starts_with(FORM_MAGIC) {
-            (extract_glul_chunk(bytes)?.to_vec(), Some(bytes.to_vec()))
+        let (image, container, resources) = if bytes.starts_with(FORM_MAGIC) {
+            (
+                extract_glul_chunk(bytes)?.to_vec(),
+                Some(bytes.to_vec()),
+                parse_resource_index(bytes),
+            )
         } else {
-            (bytes.to_vec(), None)
+            (bytes.to_vec(), None, HashMap::new())
         };
         let header = StoryHeader::parse(&image)?;
         let image = image[..header.ext_start as usize].to_vec();
@@ -124,8 +132,61 @@ impl Story {
             header,
             image,
             container,
+            resources,
         })
     }
+
+    pub fn resource(&self, usage: [u8; 4], number: u32) -> Option<&[u8]> {
+        let (start, end) = self.resources.get(&(u32::from_be_bytes(usage), number))?;
+        self.container.as_ref()?.get(*start..*end)
+    }
+}
+
+fn parse_resource_index(bytes: &[u8]) -> HashMap<(u32, u32), (usize, usize)> {
+    let mut resources = HashMap::new();
+    let declared = read_u32(bytes, 4)
+        .ok()
+        .and_then(|length| (length as usize).checked_add(8))
+        .map(|length| length.min(bytes.len()))
+        .unwrap_or(bytes.len());
+    let mut offset = 12usize;
+    while offset.checked_add(8).is_some_and(|end| end <= declared) {
+        let Some(length) = read_u32(bytes, offset + 4).ok().map(|value| value as usize) else {
+            break;
+        };
+        let start = offset + 8;
+        let Some(end) = start.checked_add(length).filter(|end| *end <= declared) else {
+            break;
+        };
+        if &bytes[offset..offset + 4] == b"RIdx" && length >= 4 {
+            let count = read_u32(bytes, start).unwrap_or(0) as usize;
+            for index in 0..count {
+                let entry = start + 4 + index * 12;
+                if entry + 12 > end {
+                    break;
+                }
+                let usage = read_u32(bytes, entry).unwrap_or(0);
+                let number = read_u32(bytes, entry + 4).unwrap_or(0);
+                let chunk = read_u32(bytes, entry + 8).unwrap_or(0) as usize;
+                let Some(chunk_length) =
+                    read_u32(bytes, chunk + 4).ok().map(|value| value as usize)
+                else {
+                    continue;
+                };
+                let data_start = chunk.saturating_add(8);
+                let Some(data_end) = data_start
+                    .checked_add(chunk_length)
+                    .filter(|data_end| *data_end <= declared)
+                else {
+                    continue;
+                };
+                resources.insert((usage, number), (data_start, data_end));
+            }
+            break;
+        }
+        offset = end + (length & 1);
+    }
+    resources
 }
 
 fn extract_glul_chunk(bytes: &[u8]) -> Result<&[u8], StoryError> {
@@ -231,6 +292,37 @@ mod tests {
         blorb.extend_from_slice(&(image.len() as u32).to_be_bytes());
         blorb.extend_from_slice(&image);
         assert_eq!(Story::from_bytes(&blorb, None).unwrap().image, image);
+    }
+
+    #[test]
+    fn indexes_picture_resources_from_blorb() {
+        let image = minimal_image();
+        let picture = b"test-png";
+        let picture_chunk = 12 + 8 + 16 + 8 + image.len();
+        let mut blorb = Vec::new();
+        blorb.extend_from_slice(b"FORM");
+        blorb.extend_from_slice(&0u32.to_be_bytes());
+        blorb.extend_from_slice(b"IFRS");
+        blorb.extend_from_slice(b"RIdx");
+        blorb.extend_from_slice(&16u32.to_be_bytes());
+        blorb.extend_from_slice(&1u32.to_be_bytes());
+        blorb.extend_from_slice(b"Pict");
+        blorb.extend_from_slice(&7u32.to_be_bytes());
+        blorb.extend_from_slice(&(picture_chunk as u32).to_be_bytes());
+        blorb.extend_from_slice(b"GLUL");
+        blorb.extend_from_slice(&(image.len() as u32).to_be_bytes());
+        blorb.extend_from_slice(&image);
+        blorb.extend_from_slice(b"PNG ");
+        blorb.extend_from_slice(&(picture.len() as u32).to_be_bytes());
+        blorb.extend_from_slice(picture);
+        if !picture.len().is_multiple_of(2) {
+            blorb.push(0);
+        }
+        let form_length = blorb.len() as u32 - 8;
+        blorb[4..8].copy_from_slice(&form_length.to_be_bytes());
+
+        let story = Story::from_bytes(&blorb, None).unwrap();
+        assert_eq!(story.resource(*b"Pict", 7), Some(picture.as_slice()));
     }
 
     #[test]

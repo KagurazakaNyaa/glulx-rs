@@ -93,11 +93,19 @@ impl Memory {
         Ok(true)
     }
 
-    pub fn restart(&mut self) {
+    pub fn restart(&mut self, protected: Option<(u32, u32)>) {
+        let protected_bytes = self.protected_bytes(protected);
         self.bytes.resize(self.original_end as usize, 0);
         self.bytes[self.ram_start as usize..self.ext_start as usize]
             .copy_from_slice(&self.initial[self.ram_start as usize..self.ext_start as usize]);
         self.bytes[self.ext_start as usize..].fill(0);
+        self.restore_protected(protected_bytes);
+    }
+
+    pub fn restore(&mut self, snapshot: &Self, protected: Option<(u32, u32)>) {
+        let protected_bytes = self.protected_bytes(protected);
+        *self = snapshot.clone();
+        self.restore_protected(protected_bytes);
     }
 
     pub fn c_string(&self, address: u32) -> Result<String, VmError> {
@@ -130,6 +138,22 @@ impl Memory {
             .filter(|end| *end <= self.len())
             .map(|_| ())
             .ok_or(VmError::MemoryWrite(address))
+    }
+
+    fn protected_bytes(&self, protected: Option<(u32, u32)>) -> Option<(u32, Vec<u8>)> {
+        let (start, length) = protected?;
+        let requested_end = start.saturating_add(length);
+        let start = start.max(self.ram_start).min(self.len());
+        let end = requested_end.max(start).min(self.len());
+        Some((start, self.bytes[start as usize..end as usize].to_vec()))
+    }
+
+    fn restore_protected(&mut self, protected: Option<(u32, Vec<u8>)>) {
+        let Some((start, bytes)) = protected else {
+            return;
+        };
+        let length = bytes.len().min(self.len().saturating_sub(start) as usize);
+        self.bytes[start as usize..start as usize + length].copy_from_slice(&bytes[..length]);
     }
 }
 
@@ -167,5 +191,17 @@ mod tests {
         ));
         memory.write32(0x100, 0x1234_5678).unwrap();
         assert_eq!(memory.read32(0x100).unwrap(), 0x1234_5678);
+    }
+
+    #[test]
+    fn restart_preserves_the_requested_ram_range() {
+        let mut memory = Memory::new(&story());
+        memory.write32(0x100, 0x1234_5678).unwrap();
+        memory.write32(0x104, 0x8765_4321).unwrap();
+
+        memory.restart(Some((0x100, 4)));
+
+        assert_eq!(memory.read32(0x100).unwrap(), 0x1234_5678);
+        assert_eq!(memory.read32(0x104).unwrap(), 0);
     }
 }

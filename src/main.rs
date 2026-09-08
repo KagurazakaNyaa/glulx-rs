@@ -40,7 +40,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn run_headless(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let mut vm = Vm::new(Story::open(path)?)?;
     loop {
-        let state = vm.run_steps(100_000)?;
+        let state = vm
+            .run_steps(100_000)
+            .map_err(|error| format!("{error} at program counter {:#010x}", vm.pc()))?;
         print!("{}", vm.take_output());
         io::stdout().flush()?;
         match state {

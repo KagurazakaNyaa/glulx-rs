@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
 };
 
@@ -7,7 +7,7 @@ use eframe::egui::{self, Color32, RichText};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    InputRequest, RunState, Story, Vm,
+    GraphicsRequest, InputRequest, RunState, Story, Vm,
     translation::{Submission, TranslationSettings, Translator},
 };
 
@@ -43,6 +43,29 @@ impl Default for PlayerSettings {
 struct Turn {
     original: String,
     translation: Option<Result<String, String>>,
+}
+
+struct DisplayedGraphics {
+    pixels: image::RgbaImage,
+    texture: egui::TextureHandle,
+}
+
+impl DisplayedGraphics {
+    fn new(context: &egui::Context, window: u32, size: [u32; 2]) -> Self {
+        let size = [size[0].max(1), size[1].max(1)];
+        let pixels = image::RgbaImage::from_pixel(size[0], size[1], image::Rgba([255; 4]));
+        let texture = context.load_texture(
+            format!("glk-graphics-window-{window}"),
+            color_image(&pixels),
+            egui::TextureOptions::LINEAR,
+        );
+        Self { pixels, texture }
+    }
+
+    fn upload(&mut self) {
+        self.texture
+            .set(color_image(&self.pixels), egui::TextureOptions::LINEAR);
+    }
 }
 
 struct FileBrowser {
@@ -144,6 +167,9 @@ pub struct PlayerApp {
     turn_buffer: String,
     turns: Vec<Turn>,
     input: String,
+    game_status: String,
+    graphics: BTreeMap<u32, DisplayedGraphics>,
+    image_cache: HashMap<u32, image::RgbaImage>,
     status: String,
     error: Option<String>,
     show_options: bool,
@@ -170,6 +196,9 @@ impl PlayerApp {
             turn_buffer: String::new(),
             turns: Vec::new(),
             input: String::new(),
+            game_status: String::new(),
+            graphics: BTreeMap::new(),
+            image_cache: HashMap::new(),
             status: "Open a .ulx or .gblorb story to begin".to_owned(),
             error: None,
             show_options: false,
@@ -202,6 +231,9 @@ impl PlayerApp {
                 self.turns.clear();
                 self.pending_translations.clear();
                 self.input.clear();
+                self.game_status.clear();
+                self.graphics.clear();
+                self.image_cache.clear();
                 self.error = None;
                 self.status = format!("Running {}", path.display());
                 self.last_state = RunState::Running;
@@ -220,6 +252,9 @@ impl PlayerApp {
                     self.transcript.clear();
                     self.turn_buffer.clear();
                     self.turns.clear();
+                    self.game_status.clear();
+                    self.graphics.clear();
+                    self.image_cache.clear();
                     self.error = None;
                     self.status = "Story restarted".to_owned();
                     self.last_state = RunState::Running;
@@ -242,6 +277,7 @@ impl PlayerApp {
             self.status = "VM stopped after an error".to_owned();
         }
         let output = vm.take_output();
+        self.game_status = vm.status_text();
         if !output.is_empty() {
             self.transcript.push_str(&output);
             self.turn_buffer.push_str(&output);
@@ -294,6 +330,88 @@ impl PlayerApp {
         }
         if self.settings.translation.enabled {
             self.queue_untranslated_turns();
+        }
+    }
+
+    fn poll_graphics(&mut self, context: &egui::Context) {
+        let requests = self.vm.as_mut().map(Vm::take_graphics).unwrap_or_default();
+        let mut dirty = HashSet::new();
+        for request in requests {
+            match request {
+                GraphicsRequest::Draw(request) => {
+                    if let std::collections::hash_map::Entry::Vacant(entry) =
+                        self.image_cache.entry(request.resource)
+                    {
+                        match image::load_from_memory(&request.data) {
+                            Ok(decoded) => {
+                                entry.insert(decoded.to_rgba8());
+                            }
+                            Err(error) => {
+                                self.status = format!(
+                                    "Could not decode picture {}: {error}",
+                                    request.resource
+                                );
+                                continue;
+                            }
+                        }
+                    }
+                    let mut source = self.image_cache[&request.resource].clone();
+                    if let Some([width, height]) = request
+                        .requested_size
+                        .filter(|size| size[0] != 0 && size[1] != 0)
+                    {
+                        source = image::imageops::resize(
+                            &source,
+                            width,
+                            height,
+                            image::imageops::FilterType::Triangle,
+                        );
+                    }
+                    let canvas = ensure_canvas(
+                        context,
+                        &mut self.graphics,
+                        request.window,
+                        request.canvas_size,
+                    );
+                    image::imageops::overlay(
+                        &mut canvas.pixels,
+                        &source,
+                        i64::from(request.position[0]),
+                        i64::from(request.position[1]),
+                    );
+                    dirty.insert(request.window);
+                }
+                GraphicsRequest::Fill {
+                    window,
+                    color,
+                    rect,
+                    canvas_size,
+                } => {
+                    let canvas = ensure_canvas(context, &mut self.graphics, window, canvas_size);
+                    fill_rect(&mut canvas.pixels, rect, color);
+                    dirty.insert(window);
+                }
+                GraphicsRequest::Clear {
+                    window,
+                    color,
+                    canvas_size,
+                } => {
+                    let canvas = ensure_canvas(context, &mut self.graphics, window, canvas_size);
+                    let color = rgba(color);
+                    for pixel in canvas.pixels.pixels_mut() {
+                        *pixel = color;
+                    }
+                    dirty.insert(window);
+                }
+                GraphicsRequest::Close { window } => {
+                    self.graphics.remove(&window);
+                }
+            }
+        }
+        for window in dirty {
+            if let Some(canvas) = self.graphics.get_mut(&window) {
+                canvas.upload();
+            }
         }
     }
 
@@ -487,6 +605,18 @@ impl PlayerApp {
                 egui::ScrollArea::vertical()
                     .stick_to_bottom(true)
                     .show(ui, |ui| {
+                        for graphics in self.graphics.values() {
+                            let mut size = graphics.texture.size_vec2();
+                            let scale =
+                                (ui.available_width() / size.x).min(480.0 / size.y).min(1.0);
+                            size *= scale;
+                            ui.add(
+                                egui::Image::new(&graphics.texture)
+                                    .fit_to_exact_size(size)
+                                    .maintain_aspect_ratio(true),
+                            );
+                            ui.add_space(16.0);
+                        }
                         ui.label(
                             RichText::new(&self.transcript)
                                 .size(self.settings.font_size)
@@ -494,6 +624,25 @@ impl PlayerApp {
                         );
                         ui.add_space(16.0);
                     });
+            });
+    }
+
+    fn game_status_bar(&self, context: &egui::Context) {
+        if self.game_status.is_empty() {
+            return;
+        }
+        egui::TopBottomPanel::top("game_status")
+            .frame(
+                egui::Frame::new()
+                    .fill(rgb(self.settings.background_color))
+                    .inner_margin(egui::Margin::symmetric(28, 6)),
+            )
+            .show(context, |ui| {
+                ui.label(
+                    RichText::new(&self.game_status)
+                        .size(self.settings.font_size)
+                        .color(rgb(self.settings.text_color)),
+                );
             });
     }
 
@@ -522,7 +671,10 @@ impl PlayerApp {
                     response.request_focus();
                     let enter = response.lost_focus()
                         && ui.input(|input| input.key_pressed(egui::Key::Enter));
-                    if ui.button("Send").clicked() || enter {
+                    let character_typed = matches!(request, Some(InputRequest::Character))
+                        && response.changed()
+                        && !self.input.is_empty();
+                    if ui.button("Send").clicked() || enter || character_typed {
                         self.submit_input();
                     }
                 });
@@ -651,8 +803,10 @@ impl eframe::App for PlayerApp {
             }
         }
         self.run_vm();
+        self.poll_graphics(context);
         self.poll_translations();
         self.menu_bar(context);
+        self.game_status_bar(context);
         self.status_bar(context);
         self.input_bar(context);
         self.story_view(context);
@@ -690,6 +844,56 @@ fn rgb(value: [u8; 3]) -> Color32 {
     Color32::from_rgb(value[0], value[1], value[2])
 }
 
+fn ensure_canvas<'a>(
+    context: &egui::Context,
+    graphics: &'a mut BTreeMap<u32, DisplayedGraphics>,
+    window: u32,
+    size: [u32; 2],
+) -> &'a mut DisplayedGraphics {
+    let recreate = graphics
+        .get(&window)
+        .is_some_and(|canvas| canvas.pixels.dimensions() != (size[0].max(1), size[1].max(1)));
+    if recreate {
+        graphics.remove(&window);
+    }
+    graphics
+        .entry(window)
+        .or_insert_with(|| DisplayedGraphics::new(context, window, size))
+}
+
+fn fill_rect(canvas: &mut image::RgbaImage, rect: [i32; 4], color: u32) {
+    let [left, top, width, height] = rect;
+    if width <= 0 || height <= 0 {
+        return;
+    }
+    let right = left.saturating_add(width).clamp(0, canvas.width() as i32);
+    let bottom = top.saturating_add(height).clamp(0, canvas.height() as i32);
+    let left = left.clamp(0, canvas.width() as i32);
+    let top = top.clamp(0, canvas.height() as i32);
+    let color = rgba(color);
+    for y in top..bottom {
+        for x in left..right {
+            canvas.put_pixel(x as u32, y as u32, color);
+        }
+    }
+}
+
+fn rgba(color: u32) -> image::Rgba<u8> {
+    image::Rgba([
+        ((color >> 16) & 0xff) as u8,
+        ((color >> 8) & 0xff) as u8,
+        (color & 0xff) as u8,
+        0xff,
+    ])
+}
+
+fn color_image(pixels: &image::RgbaImage) -> egui::ColorImage {
+    egui::ColorImage::from_rgba_unmultiplied(
+        [pixels.width() as usize, pixels.height() as usize],
+        pixels.as_raw(),
+    )
+}
+
 fn is_story_path(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
@@ -710,5 +914,16 @@ mod tests {
         assert!(is_story_path(Path::new("story.ULX")));
         assert!(is_story_path(Path::new("story.gblorb")));
         assert!(!is_story_path(Path::new("story.z5")));
+    }
+
+    #[test]
+    fn graphics_fill_is_clipped_to_the_canvas() {
+        let mut canvas = image::RgbaImage::from_pixel(3, 2, rgba(0xffffff));
+        fill_rect(&mut canvas, [-1, 1, 3, 2], 0x123456);
+
+        assert_eq!(*canvas.get_pixel(0, 1), rgba(0x123456));
+        assert_eq!(*canvas.get_pixel(1, 1), rgba(0x123456));
+        assert_eq!(*canvas.get_pixel(2, 1), rgba(0xffffff));
+        assert_eq!(*canvas.get_pixel(0, 0), rgba(0xffffff));
     }
 }

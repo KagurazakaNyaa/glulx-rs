@@ -5,4 +5,4 @@ pub mod translation;
 pub mod vm;
 
 pub use story::{Story, StoryError, StoryHeader};
-pub use vm::{InputRequest, RunState, Vm, VmError};
+pub use vm::{GraphicsRequest, ImageRequest, InputRequest, RunState, Vm, VmError};
