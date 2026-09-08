@@ -2,5 +2,20 @@
 name = "glulx-rs"
 version = "0.1.0"
 edition = "2024"
+description = "A cross-platform Glulx virtual machine and interactive fiction player"
+license = "AGPL-3.0-only"
+repository = "https://github.com/KagurazakaNyaa/glulx-rs"
+homepage = "https://github.com/KagurazakaNyaa/glulx-rs"
+documentation = "https://docs.rs/glulx-rs"
 
 [dependencies]
+eframe = { version = "0.32", default-features = false, features = ["default_fonts", "glow", "persistence", "wayland", "x11"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
