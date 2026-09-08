@@ -89,6 +89,14 @@ impl Memory {
         if new_size < self.original_end || !new_size.is_multiple_of(0x100) {
             return Ok(false);
         }
+        if new_size > self.len()
+            && self
+                .bytes
+                .try_reserve_exact((new_size - self.len()) as usize)
+                .is_err()
+        {
+            return Ok(false);
+        }
         self.bytes.resize(new_size as usize, 0);
         Ok(true)
     }

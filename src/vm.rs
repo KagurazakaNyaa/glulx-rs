@@ -98,6 +98,8 @@ struct UndoState {
     random_state: u32,
     decoding_table: u32,
     destination: Destination,
+    heap_next: u32,
+    heap_blocks: BTreeMap<u32, u32>,
 }
 
 const WINTYPE_TEXT_BUFFER: u32 = 3;
@@ -339,11 +341,14 @@ pub struct Vm {
     glk_next_stream: u32,
     input_window: u32,
     graphics: Vec<GraphicsRequest>,
+    heap_next: u32,
+    heap_blocks: BTreeMap<u32, u32>,
 }
 
 impl Vm {
     pub fn new(story: Story) -> Result<Self, VmError> {
         let memory = Memory::new(&story);
+        let heap_next = memory.len();
         let stack_size = story.header.stack_size;
         let start_func = story.header.start_func;
         let mut vm = Self {
@@ -370,6 +375,8 @@ impl Vm {
             glk_next_stream: 1,
             input_window: 0,
             graphics: Vec::new(),
+            heap_next,
+            heap_blocks: BTreeMap::new(),
         };
         vm.enter_function(start_func, &[])?;
         Ok(vm)
@@ -479,6 +486,8 @@ impl Vm {
         self.input_window = 0;
         self.undo = None;
         self.graphics.clear();
+        self.heap_next = self.memory.len();
+        self.heap_blocks.clear();
         self.enter_function(self.story.header.start_func, &[])
     }
 
@@ -768,7 +777,11 @@ impl Vm {
             }
             0x103 => {
                 let size = load!(0);
-                let result = if self.memory.resize(size)? { 0 } else { 1 };
+                let result = if self.heap_blocks.is_empty() && self.memory.resize(size)? {
+                    0
+                } else {
+                    1
+                };
                 store!(1, result);
             }
             0x104 => self.pc = load!(0),
@@ -801,6 +814,8 @@ impl Vm {
                     random_state: self.random_state,
                     decoding_table: self.story.header.decoding_table,
                     destination: destination.clone(),
+                    heap_next: self.heap_next,
+                    heap_blocks: self.heap_blocks.clone(),
                 });
                 self.store_destination(&destination, 0, Width::Word)?;
             }
@@ -818,6 +833,8 @@ impl Vm {
                     self.char_requested = false;
                     self.pending_select = None;
                     self.state = RunState::Running;
+                    self.heap_next = undo.heap_next;
+                    self.heap_blocks = undo.heap_blocks;
                     self.store_destination(&undo.destination, u32::MAX, Width::Word)?;
                 } else {
                     self.store_destination(&failure_destination, 1, Width::Word)?;
@@ -916,6 +933,15 @@ impl Vm {
                 let source = load!(1);
                 let destination = load!(2);
                 self.memory.copy(source, destination, length)?;
+            }
+            0x178 => {
+                let size = load!(0);
+                let address = self.malloc(size)?;
+                store!(1, address);
+            }
+            0x179 => {
+                let address = load!(0);
+                self.mfree(address)?;
             }
             0x190 => {
                 let value = (load!(0) as i32 as f32).to_bits();
@@ -1318,6 +1344,49 @@ impl Vm {
         Ok(())
     }
 
+    fn malloc(&mut self, size: u32) -> Result<u32, VmError> {
+        if size == 0 {
+            return Ok(0);
+        }
+        let Some(size) = size.checked_add(3).map(|value| value & !3) else {
+            return Ok(0);
+        };
+        if self.heap_blocks.is_empty() {
+            self.heap_next = self.memory.len();
+        }
+        // First-fit over live allocations implicitly coalesces all free gaps.
+        let mut address = self.heap_next;
+        for (&start, &length) in &self.heap_blocks {
+            if start - address >= size {
+                break;
+            }
+            address = start + length;
+        }
+        let Some(end) = address.checked_add(size) else {
+            return Ok(0);
+        };
+        if end > self.memory.len() {
+            let Some(memory_size) = end.checked_add(0xff).map(|value| value & !0xff) else {
+                return Ok(0);
+            };
+            if !self.memory.resize(memory_size)? {
+                return Ok(0);
+            }
+        }
+        self.heap_blocks.insert(address, size);
+        Ok(address)
+    }
+
+    fn mfree(&mut self, address: u32) -> Result<(), VmError> {
+        if self.heap_blocks.remove(&address).is_none() {
+            return Err(VmError::InvalidHeapAddress(address));
+        }
+        if self.heap_blocks.is_empty() {
+            self.memory.resize(self.heap_next)?;
+        }
+        Ok(())
+    }
+
     fn stream_string(&mut self, address: u32) -> Result<(), VmError> {
         let kind = self.memory.read8(address)?;
         if !matches!(kind, 0xe0..=0xe2) {
@@ -1606,7 +1675,15 @@ impl Vm {
             4 => u32::from(matches!(argument, 0..=2)),
             5 => 1,
             6 => 1,
-            7..=10 => 0,
+            7 => 1,
+            8 => {
+                if self.heap_blocks.is_empty() {
+                    0
+                } else {
+                    self.heap_next
+                }
+            }
+            9..=10 => 0,
             11 => 1,
             _ => 0,
         }
@@ -1619,11 +1696,8 @@ impl Vm {
         destination: Destination,
     ) -> Result<(), VmError> {
         let mut arguments = Vec::with_capacity(argument_count as usize);
-        // Unlike a Glulx function call, the `glk` opcode leaves its argument
-        // words on the value stack. Generated code consumes them after the
-        // dispatch (and may use their values while handling output structs).
-        for depth in 0..argument_count {
-            arguments.push(self.stack.peek(depth)?);
+        for _ in 0..argument_count {
+            arguments.push(self.stack.pop_u32()?);
         }
         let result = match selector {
             0x0001 => {
@@ -1854,6 +1928,11 @@ impl Vm {
                     .unwrap_or(0);
                 if self.glk_current_stream == stream_id {
                     self.glk_current_stream = 0;
+                }
+                if arguments.get(1) == Some(&u32::MAX) {
+                    // Glulx's -1 reference writes each struct field to the stack.
+                    self.stack.push_u32(0)?;
+                    self.stack.push_u32(write_count)?;
                 }
                 if let Some(result_address) = arguments
                     .get(1)
@@ -2398,6 +2477,7 @@ fn operand_count(opcode: u32) -> Option<usize> {
         | 0x121
         | 0x125..=0x126
         | 0x128
+        | 0x179
         | 0x140..=0x141 => 1,
         0x15
         | 0x1b
@@ -2413,6 +2493,7 @@ fn operand_count(opcode: u32) -> Option<usize> {
         | 0x148..=0x149
         | 0x160
         | 0x170
+        | 0x178
         | 0x190..=0x192
         | 0x198..=0x199
         | 0x1a8..=0x1aa
@@ -2442,6 +2523,8 @@ fn operand_count(opcode: u32) -> Option<usize> {
 
 #[derive(Debug, Error)]
 pub enum VmError {
+    #[error("invalid heap allocation address {0:#010x}")]
+    InvalidHeapAddress(u32),
     #[error("memory read outside the VM address space at {0:#010x}")]
     MemoryRead(u32),
     #[error("memory write outside the VM address space at {0:#010x}")]
@@ -2528,6 +2611,87 @@ mod tests {
             .map(|word| u32::from_be_bytes(word.try_into().unwrap()))
             .fold(0u32, u32::wrapping_add);
         image[32..36].copy_from_slice(&checksum.to_be_bytes());
+    }
+
+    #[test]
+    fn heap_reuses_coalesced_gaps_and_releases_memory() {
+        let story = Story::from_bytes(&image_with_program(&[0x81, 0x20]), None).unwrap();
+        let mut vm = Vm::new(story).unwrap();
+        let original = vm.memory.len();
+        assert!(vm.memory.resize(original + 256).unwrap());
+        let base = vm.memory.len();
+        let a = vm.malloc(5).unwrap();
+        let b = vm.malloc(8).unwrap();
+        let c = vm.malloc(8).unwrap();
+        assert_eq!((a, b, c), (base, base + 8, base + 16));
+        vm.memory.write32(c, 77).unwrap();
+        vm.mfree(a).unwrap();
+        vm.mfree(b).unwrap();
+        assert_eq!(vm.malloc(16).unwrap(), a);
+        assert_eq!(vm.memory.read32(c).unwrap(), 77);
+        assert_eq!(vm.malloc(u32::MAX).unwrap(), 0);
+        assert_eq!(vm.malloc(0).unwrap(), 0);
+        vm.mfree(a).unwrap();
+        assert!(matches!(vm.mfree(a), Err(VmError::InvalidHeapAddress(_))));
+        vm.mfree(c).unwrap();
+        assert_eq!(vm.memory.len(), base);
+        assert_eq!(vm.gestalt(8, 0), 0);
+    }
+
+    #[test]
+    fn heap_opcodes_block_resize_until_last_free() {
+        let program = [
+            0x81, 0x78, 0xd1, 8, 0x20, // malloc 8 -> RAM+32
+            0x81, 0x03, 0xd2, 0x04, 0x00, 0x24, // setmemsize 1024 -> RAM+36
+            0x81, 0x79, 0x0d, 0x20, // mfree RAM+32
+            0x81, 0x03, 0xd2, 0x04, 0x00, 0x28, 0x81, 0x20,
+        ];
+        let mut vm =
+            Vm::new(Story::from_bytes(&image_with_program(&program), None).unwrap()).unwrap();
+        assert_eq!(vm.run_steps(10).unwrap(), RunState::Halted);
+        assert_eq!(vm.memory.read32(0x124).unwrap(), 1);
+        assert_eq!(vm.memory.read32(0x128).unwrap(), 0);
+        assert_eq!(vm.memory.len(), 1024);
+    }
+
+    #[test]
+    fn undo_and_restart_restore_heap_ownership() {
+        let program = [0x81, 0x25, 0x00, 0x81, 0x26, 0x00];
+        let mut vm =
+            Vm::new(Story::from_bytes(&image_with_program(&program), None).unwrap()).unwrap();
+        let base = vm.memory.len();
+        let a = vm.malloc(8).unwrap();
+        vm.memory.write32(a, 123).unwrap();
+        vm.run_steps(1).unwrap();
+        vm.mfree(a).unwrap();
+        vm.malloc(512).unwrap();
+        vm.run_steps(1).unwrap();
+        assert_eq!(vm.heap_blocks.get(&a), Some(&8));
+        assert_eq!(vm.memory.read32(a).unwrap(), 123);
+        vm.mfree(a).unwrap();
+        assert_eq!(vm.memory.len(), base);
+        vm.malloc(8).unwrap();
+        vm.restart().unwrap();
+        assert!(vm.heap_blocks.is_empty());
+        assert_eq!(vm.memory.len(), base);
+    }
+
+    #[test]
+    fn stream_close_stack_reference_returns_fields_and_consumes_arguments() {
+        let mut vm =
+            Vm::new(Story::from_bytes(&image_with_program(&[0x81, 0x20]), None).unwrap()).unwrap();
+        let depth = vm.stack.len();
+        push_glk_arguments(&mut vm, &[0x140, 8, 1, 0]);
+        vm.glk(0x43, 4, Destination::Stack).unwrap();
+        let stream = vm.stack.pop_u32().unwrap();
+        assert_eq!(vm.stack.len(), depth);
+        vm.glk_write_text(stream, "hello");
+        push_glk_arguments(&mut vm, &[stream, u32::MAX]);
+        vm.glk(0x44, 2, Destination::Discard).unwrap();
+        assert_eq!(vm.stack.pop_u32().unwrap(), 5);
+        assert_eq!(vm.stack.pop_u32().unwrap(), 0);
+        assert_eq!(vm.stack.len(), depth);
+        assert!(vm.take_output().is_empty());
     }
 
     #[test]
