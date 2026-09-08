@@ -1,5 +1,7 @@
 # Compatibility
 
+[English](compatibility.md) | [中文](compatibility.ZH.md)
+
 The implemented target is Glulx 3.1.3 with Glk 0.7.6. See the
 [specification checklist](glulx-spec-checklist.md) and [validation record](glulx-validation.md)
 for coverage and reproducible evidence. This is not a claim of exhaustive conformance.

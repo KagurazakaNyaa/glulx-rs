@@ -1,5 +1,7 @@
 # glulx-rs
 
+[English](README.md) | [中文](README.ZH.md)
+
 A pure Rust Glulx virtual machine with a cross-platform graphical player.
 
 The VM follows the Glulx specification and uses

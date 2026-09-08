@@ -1,33 +1,35 @@
-# Glulx 公开规范来源与核对笔记
+# Public Glulx Specification Sources and Review Notes
 
-调研及复核日期：2026-09-08。已实际读取官方 Glulx/Glk/Blorb 首页及 Glulx 3.1.3、Glk 0.7.6、Blorb 2.0.5 正文。具体实现状态见 [兼容性 checklist](glulx-spec-checklist.md)；这里记录规范依据，避免将实现计划或旧文档当作规范。`5816d37` 之后的缺口及验收要求另见 [剩余能力复核](glulx-remaining-spec-audit.md)。
+[English](glulx-spec-research.md) | [中文](glulx-spec-research.ZH.md)
 
-## 正确入口与版本
+Researched and reviewed: 2026-09-08. The official Glulx/Glk/Blorb home pages and the complete Glulx 3.1.3, Glk 0.7.6, and Blorb 2.0.5 specifications were read. For implementation status, see the [compatibility checklist](glulx-spec-checklist.md). This document records specification evidence so implementation plans or old documentation are not mistaken for the specification. Gaps and validation requirements after `5816d37` are covered in the [remaining capability audit](glulx-remaining-spec-audit.md).
 
-| 范围 | 官方来源 | 本次核实结果 |
+## Correct Entry Points and Versions
+
+| Scope | Official sources | Verified findings |
 | --- | --- | --- |
-| Glulx VM | [首页](https://eblong.com/zarf/glulx/)、[HTML](https://eblong.com/zarf/glulx/Glulx-Spec.html)、[Markdown](https://eblong.com/zarf/glulx/Glulx-Spec.md) | 当前版本 3.1.3 |
-| Glk I/O | [首页](https://eblong.com/zarf/glk/)、[HTML](https://eblong.com/zarf/glk/Glk-Spec-076.html)、[Markdown](https://eblong.com/zarf/glk/Glk-Spec-076.md) | 当前版本 0.7.6；本仓库已声明并实现 0.7.6 |
-| Blorb 容器 | [首页](https://eblong.com/zarf/blorb/)、[规范](https://eblong.com/zarf/blorb/Blorb-Spec.html) | 版本 2.0.5；后续已核对正文的资源包、IFhd、媒体格式及可选范围 |
+| Glulx VM | [Home](https://eblong.com/zarf/glulx/), [HTML](https://eblong.com/zarf/glulx/Glulx-Spec.html), [Markdown](https://eblong.com/zarf/glulx/Glulx-Spec.md) | Current version: 3.1.3 |
+| Glk I/O | [Home](https://eblong.com/zarf/glk/), [HTML](https://eblong.com/zarf/glk/Glk-Spec-076.html), [Markdown](https://eblong.com/zarf/glk/Glk-Spec-076.md) | Current version: 0.7.6; this repository advertises and implements 0.7.6 |
+| Blorb container | [Home](https://eblong.com/zarf/blorb/), [specification](https://eblong.com/zarf/blorb/Blorb-Spec.html) | Version 2.0.5; subsequent review covered resource archives, IFhd, media formats, and optional features in the full text |
 
-注意：[旧小写 URL](https://eblong.com/zarf/glulx/glulx-spec.html) 仍可访问，但本次返回的是 **3.1.2** 分页规范。新增文档应使用上表的大小写正确入口，避免漏掉双精度和扩展 undo。
+Note: the [old lowercase URL](https://eblong.com/zarf/glulx/glulx-spec.html) remains accessible, but returned the paginated **3.1.2** specification during this review. New documentation should use the correctly capitalized entry points above to avoid missing double precision and extended undo.
 
-## 可以直接用于 checklist 的规范要求
+## Specification Requirements for the Checklist
 
-| 规范部分 | 对实现/验收的意义 |
+| Specification section | Implementation/validation implications |
 | --- | --- |
-| [The Machine](https://eblong.com/zarf/glulx/Glulx-Spec.html) | 核对内存图、文件头、栈帧、call stub、指令编码与对象类型；不能只统计 opcode 数量。 |
-| [Save-Game Format](https://eblong.com/zarf/glulx/Glulx-Spec.html#saveformat) | 存档为 Quetzal 变体：CMem/UMem 含当前内存尺寸，保存 RAMSTART 到当前内存末尾；栈包含续体，MAll 保存堆，IFhd 使用前 128 字节。 |
-| [State Not Saved，位于存档章节](https://eblong.com/zarf/glulx/Glulx-Spec.html#saveformat) | Glk 状态、保护区定义、RNG 内部状态、I/O system 和字符串表地址不随 restart/restore/restoreundo 回退。当前实现及回归已按此区分状态边界。 |
-| [Random Number Generator](https://eblong.com/zarf/glulx/Glulx-Spec.html#opcodes_rand) | 非零 seed 必须产生可重复序列；seed=0 和初始启动为非确定模式；RNG 不属于存档状态。 |
-| [Accelerated Functions](https://eblong.com/zarf/glulx/Glulx-Spec.html#opcodes_accel) | 可以不提供任何具体加速函数；未知加速函数编号解除该地址的加速注册；未知参数设置忽略。必须区分设置指令与实际优化函数。 |
-| [Gestalt / Miscellaneous](https://eblong.com/zarf/glulx/Glulx-Spec.html#opcodes_misc) | Acceleration(9) 对 3.1.1+ 必须为真；AccelFunc(10) 查询具体函数；Float(11)、ExtUndo(12)、Double(13) 分别查询对应能力。Glulx Unicode 不能代替 Glk Unicode 探测。 |
-| [Double-Precision Math](https://eblong.com/zarf/glulx/Glulx-Spec.html#opcodes_double)、[Comparisons](https://eblong.com/zarf/glulx/Glulx-Spec.html#opcodes_doublebranch) | 3.1.3 新增双精度；解释器可不支持，但必须准确报告 Double 能力。覆盖指令定义在 0x200–0x239 范围，并非所有中间数值都有指令。 |
-| [Game State，见指令正文](https://eblong.com/zarf/glulx/Glulx-Spec.html) | hasundo/discardundo 为 3.1.3 扩展，以 ExtUndo 查询。verify 检查文件长度/checksum；规范指出解释器可以在启动时先自动验证。 |
-| [Glk 0.7.6 正文](https://eblong.com/zarf/glk/Glk-Spec-076.html) | Glk 与 VM 是独立兼容性层，包含窗口、流、事件、字符、图像、声音及可选模块。0.7.6 新增 image_draw_scaled_ext，并改变文本窗口中过宽图片的适配行为；仓库已完成这项升级，其测试证据见验收记录。 |
+| [The Machine](https://eblong.com/zarf/glulx/Glulx-Spec.html) | Check the memory map, header, stack frames, call stubs, instruction encoding, and object types; counting opcodes alone is insufficient. |
+| [Save-Game Format](https://eblong.com/zarf/glulx/Glulx-Spec.html#saveformat) | Saves are a Quetzal variant: CMem/UMem include the current memory size and save RAMSTART through the current memory end; the stack includes continuations, MAll saves the heap, and IFhd uses the first 128 bytes. |
+| [State Not Saved, in the save section](https://eblong.com/zarf/glulx/Glulx-Spec.html#saveformat) | Glk state, protection definition, internal RNG state, I/O system, and string-table address do not roll back on restart/restore/restoreundo. The current implementation and regressions observe this state boundary. |
+| [Random Number Generator](https://eblong.com/zarf/glulx/Glulx-Spec.html#opcodes_rand) | Nonzero seeds must produce repeatable sequences; seed=0 and initial startup use nondeterministic mode; RNG is not saved state. |
+| [Accelerated Functions](https://eblong.com/zarf/glulx/Glulx-Spec.html#opcodes_accel) | Implementations may provide no concrete acceleration functions. An unknown function number unregisters acceleration at that address; unknown parameter settings are ignored. Distinguish setup instructions from actual optimized functions. |
+| [Gestalt / Miscellaneous](https://eblong.com/zarf/glulx/Glulx-Spec.html#opcodes_misc) | Acceleration(9) must be true for 3.1.1+; AccelFunc(10) queries a specific function; Float(11), ExtUndo(12), and Double(13) query their respective capabilities. Glulx Unicode does not replace Glk Unicode detection. |
+| [Double-Precision Math](https://eblong.com/zarf/glulx/Glulx-Spec.html#opcodes_double), [Comparisons](https://eblong.com/zarf/glulx/Glulx-Spec.html#opcodes_doublebranch) | 3.1.3 adds double precision; interpreters may omit it but must report Double accurately. Defined instructions lie in 0x200–0x239, with gaps. |
+| [Game State, in the instruction text](https://eblong.com/zarf/glulx/Glulx-Spec.html) | hasundo/discardundo are 3.1.3 extensions queried through ExtUndo. verify checks file length/checksum; the specification permits automatic verification at startup. |
+| [Glk 0.7.6 specification](https://eblong.com/zarf/glk/Glk-Spec-076.html) | Glk is a compatibility layer independent of the VM, covering windows, streams, events, characters, images, sound, and optional modules. 0.7.6 adds image_draw_scaled_ext and changes oversized-image fitting in text windows. The repository has completed this upgrade; test evidence is in the validation record. |
 
-## 实现核对方法
+## Implementation Review Method
 
-将每条要求映射到 [vm.rs](../src/vm.rs) 的 `operand_count/step/gestalt/glk/glk_gestalt`、[memory.rs](../src/memory.rs)、[story.rs](../src/story.rs) 与 [app.rs](../src/app.rs)。已有分支、返回固定值、无操作占位和完整可用能力应分开记录。测试通过只证明已执行用例，不证明所有规范边界。
+Map each requirement to `operand_count/step/gestalt/glk/glk_gestalt` in [vm.rs](../src/vm.rs), [memory.rs](../src/memory.rs), [story.rs](../src/story.rs), and [app.rs](../src/app.rs). Record implemented branches, constant returns, no-op placeholders, and fully usable capabilities separately. Passing tests proves only the cases executed, not every specification boundary.
 
-行为差分可使用官方入口链接的 [Glulxe 参考实现](https://github.com/erkyrath/glulxe)，以及项目既有参考 [Git](https://github.com/DavidKinder/Git)。初次调研未运行解释器；后续 Glulxe 差分及双向存档互操作已完成，具体版本和结果见 [验收记录](glulx-validation.md)。
+Behavioral differential testing can use the officially linked [Glulxe reference implementation](https://github.com/erkyrath/glulxe) and the project's existing reference, [Git](https://github.com/DavidKinder/Git). The initial research did not run interpreters; subsequent Glulxe differential testing and bidirectional save interoperability are complete. Versions and results are in the [validation record](glulx-validation.md).

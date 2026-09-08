@@ -1,10 +1,12 @@
-# Glulx 实现验收记录
+# Glulx Implementation Validation Record
 
-日期：2026-09-08，Linux x86_64，核心实现提交 `4c16443`，加速与媒体提交 `c5fcc20`，输入/字体/窗口提交 `4870bcf`。随后继续完成媒体格式、共享文件、宽范围日期、IFZS 及图片边界修复。
+[English](glulx-validation.md) | [中文](glulx-validation.ZH.md)
 
-以下通过记录对应已实现能力。独立资源挂载、`SONG`、真实终端宿主和实际 light 字重尚未实现，其验收不能视为已通过；后续待办见 [规范清单](glulx-spec-checklist.md)。
+Date: 2026-09-08, Linux x86_64. Core implementation commit `4c16443`, acceleration/media commit `c5fcc20`, and input/font/window commit `4870bcf`. Subsequent work completed fixes for media formats, shared files, wide-range dates, IFZS, and image edge cases.
 
-## 可复现命令与结果
+Passing records below cover implemented capabilities. Separate resource attachment, `SONG`, a real terminal host, and actual light font weight are not implemented, so their validation must not be treated as passed. Further work is in the [specification checklist](glulx-spec-checklist.md).
+
+## Reproduction Commands and Results
 
 ```sh
 RUSTC_WRAPPER= cargo fmt --all -- --check
@@ -15,12 +17,9 @@ python3 tools/check-opcodes.py --spec /path/to/Glulx-Spec.md --output /tmp/glulx
 python3 tools/check-reference.py --reference /path/to/glulxe --candidate target/debug/glulx-rs --fixtures /path/to/fixtures
 ```
 
-Rust 测试 158 passed / 0 failed；Clippy（warnings 视为错误）及 release 构建通过。
-脚本不下载样本、不修改仓库游戏资源；合成故事及存档使用临时目录。
-不传 `--fixtures` 仍可运行合成 IFZS 双向互操作、double stack 顺序、Inform 加速函数、零长度内存及深层字符串差分检查。
-官方 opcode 表 150/150 条分发和操作数数量匹配；官方 Glk dispatch 注册表 124/124 selectors 均有分发。这两项只证明表完整，执行语义仍需运行测试。
+Rust tests: 158 passed / 0 failed; Clippy with warnings as errors and the release build passed. Scripts do not download fixtures or modify repository game resources; synthetic stories and saves use temporary directories. Without `--fixtures`, synthetic IFZS bidirectional interoperability, double stack order, Inform acceleration, zero-length memory, and deep-string differential checks still run. Dispatch and operand counts match 150/150 official opcodes; all 124/124 official Glk dispatch selectors are present. These two checks establish table completeness only; execution semantics still require runtime tests.
 
-最终整合后的完整脚本通过结果：
+The final integrated full script passed with:
 
 ```text
 PASS Rust -> Glulxe: save continuation, heap chunk, double stack order
@@ -35,50 +34,41 @@ PASS Adventure Rust -> Glulxe
 PASS Adventure Glulxe -> Rust
 ```
 
-Glulxercise 输入 `all / allfloat / alldouble / quit`，三次 `All tests passed.`。
-其随机分布测试有统计性误报概率，官方样本也明确说明；单次统计失败应记录并分析，不能用重复运行掩盖确定性缺陷。`4870bcf` 提交前的一次重跑，random 组 240 次取样出现 lobit=141 / hibit=99，超出样本设置的 [100..140]，导致该组两个断言失败；其他组通过，allfloat/alldouble 全通过。该次记录为统计阈值失败，不算整套通过。随后共享流和 IFZS 改动完成后的必要整合回归，92 个段落及三轮全部通过；此处保留前次统计失败，未修改随机实现或样本阈值。脚本现在会保留失败全文并给出日志路径。
-文件流 UTF-8 byte mark/seek 按规范测试；CheapGlk 的 Unicode text stream 存在 mark 除以 4 的实现差异，该边界不宣称差分一致。
-Unicode 输入 `all / quit`，资源流输入 `quit`；比较只归一化 interpreter version 字段，Glulxe 使用 `-q -u` 保证 UTF-8。
-Adventure 的保存方执行 `north / save / 路径 / quit / y`，另一解释器执行
-`restore / 路径 / look / quit / y`，验证恢复到 `In Forest`，双向均通过。
+Glulxercise received `all / allfloat / alldouble / quit` and reported `All tests passed.` three times. Its random-distribution test can produce statistical false positives, as the official fixture explicitly notes; a single statistical failure should be recorded and analyzed, not rerun to conceal a deterministic defect. In one rerun before `4870bcf`, the random group produced lobit=141 / hibit=99 across 240 samples, outside the fixture's [100..140] threshold, failing two assertions in that group. Other groups and allfloat/alldouble passed. This run is recorded as a statistical threshold failure, not a full-suite pass. The necessary integration regression after shared-stream and IFZS changes passed all 92 sections and all three rounds. The earlier failure is retained here; neither the RNG implementation nor fixture thresholds were changed. The script now preserves full failure output and reports its log path.
 
-## 测试矩阵
+File-stream UTF-8 byte mark/seek is tested against the specification. CheapGlk's Unicode text streams differ by dividing marks by 4; differential agreement is not claimed for this edge case. Unicode receives `all / quit`; resource streams receive `quit`. Comparison normalizes only the interpreter version field, and Glulxe uses `-q -u` for UTF-8. Adventure's saving interpreter receives `north / save / path / quit / y`; the other receives `restore / path / look / quit / y`. Both directions restore to `In Forest` and pass.
 
-本地主要证据在 [conformance.rs](../src/vm/conformance.rs)，原有 VM、Memory、Story 和 GUI 测试仍保留。
+## Test Matrix
 
-| 清单领域 | 本地回归入口/覆盖 | 外部验证 |
+The main local evidence is in [conformance.rs](../src/vm/conformance.rs); existing VM, Memory, Story, and GUI tests are retained.
+
+| Checklist domain | Local regression entry points/coverage | External validation |
 | --- | --- | --- |
-| 解码、寻址、栈、局部变量 | `all_load_address_modes_and_opcode_encodings`、`narrow_copy_integer_extremes_and_stack_bounds`、零长度内存操作、locals 帧容量 | Glulxercise 综合 |
-| 调用、搜索、字符串/filter | 原 VM 测试、`huffman_leaf_and_indirection_matrix`、迭代输出续体及数值 filter 内存档 | Glulxercise 综合；40,000 次 Huffman 子字符串与参考一致 |
-| 单/双精度 | `double_*`、`floating_branches_*`、`float_nan_modulo_and_power_identities` | Glulxercise allfloat/alldouble；双栈结果参考测试 |
-| IFZS | round trip、损坏存档、文件提示、空 MAll、重复注释/扩展/单例块 | 合成故事及 Adventure 双向互读 |
-| undo/restart/protect/heap | `undo_*`、`allocation_limits_*`、原 heap 回归 | Glulxercise 综合 |
-| Inform 加速 1–13 | [acceleration.rs](../src/vm/acceleration.rs)：注册/取消、类/属性/私有权限、旧/新布局、call/callf/tailcall、压缩字符串和 20,000 次 filter 回调、恢复状态边界 | 13 函数共 94 项结果与 Glulxe 精确一致 |
-| random/verify/gestalt | `random_ranges_determinism_verify_and_capabilities` | Glulxercise 综合 |
-| 流/dispatch | read/seek/Unicode/count、echo cycles、流关闭解除绑定、同文件共享缓存/独立位置/dirty flush/旧会话迁移、写入末尾定位、UTF-8 字节标记和覆盖、旧会话迁移、原栈引用测试 | resstreamtest 与参考完全一致；共享流输出/计数/最终文件字节差分一致 |
-| 窗口/事件 | 排列方向/嵌套 key/关闭/resize/字体度量、多窗口输入、取消/计时器、select_poll 事件分类、图形裁剪和背景扩展 | twocol 启动及 Sensory GUI |
-| Unicode | 扩展转换、titlecase、NFC/NFD、能力参数 | unicasetest 与参考完全一致 |
-| 文本图像 | [presentation.rs](../src/vm/presentation.rs) 图片顺序、事件关联、动态尺寸、零尺寸及会话；[text_buffer.rs](../src/app/text_buffer.rs) 行内基线、双侧/重复边栏、flow-break、换行/单词、缩放与裁剪 | 合成故事 GUI 缩放/点击/恢复 |
-| 样式/鼠标/链接/终止键 | 样式快照及真实测量、缩进/四种对齐、echo 样式传播、固定网格样式/链接/编辑；真实中文 glyph 绘制及缺字能力 | 25 种特殊按键、网格 LINK/预填编辑、官方定时取消和恢复编辑 GUI 验收 |
-| 日期/时间 | epoch、负时间、完整 i32 年份、字段/负微秒规范化、UTC 往返、New York DST 间隙、Apia 跳日及远古/未来偏移 | datetimetest 启动 |
-| 声音 | 无设备 idle sink：同步采样起播、独立暂停/音量、停止/结束/渐变通知；[tracker.rs](../src/vm/sound/tracker.rs)：四格式 PCM、S3M OPL、速度/BPM/音量/E6 循环、重复及恢复偏移；sampled 流式编码/时长/重采样边界 | Sensory AIFF；合成 MOD GUI 播放及完成通知 |
-| Blorb/产品 | 容器边界/资源索引/元数据测试、session serialization | Adventure/Sensory 关闭重开恢复 |
+| Decoding, addressing, stack, locals | `all_load_address_modes_and_opcode_encodings`, `narrow_copy_integer_extremes_and_stack_bounds`, zero-length memory operations, locals frame capacity | General Glulxercise |
+| Calls, search, strings/filter | Original VM tests, `huffman_leaf_and_indirection_matrix`, iterative output continuations, saves inside numeric filters | General Glulxercise; 40,000 Huffman substrings match reference |
+| Single/double precision | `double_*`, `floating_branches_*`, `float_nan_modulo_and_power_identities` | Glulxercise allfloat/alldouble; double stack-result reference test |
+| IFZS | Round trips, corrupt saves, file prompts, empty MAll, repeated annotation/extension/singleton chunks | Synthetic-story and Adventure bidirectional interoperability |
+| undo/restart/protect/heap | `undo_*`, `allocation_limits_*`, original heap regressions | General Glulxercise |
+| Inform acceleration 1–13 | [acceleration.rs](../src/vm/acceleration.rs): registration/removal, classes/properties/private access, old/new layouts, call/callf/tailcall, compressed strings and 20,000 filter callbacks, restored-state boundaries | All 94 results across 13 functions exactly match Glulxe |
+| random/verify/gestalt | `random_ranges_determinism_verify_and_capabilities` | General Glulxercise |
+| Streams/dispatch | read/seek/Unicode/count, echo cycles, unbinding on close, same-file shared cache/independent positions/dirty flush/old-session migration, seeking at write end, UTF-8 byte marks and overwrite, old-session migration, original stack-reference tests | Exact resstreamtest reference match; shared-stream output/counts/final file bytes match differential checks |
+| Windows/events | Arrangement direction/nested key/close/resize/font metrics, multi-window input, cancellation/timers, select_poll event classification, graphics clipping and background expansion | twocol startup and Sensory GUI |
+| Unicode | Extended conversion, titlecase, NFC/NFD, capability arguments | Exact unicasetest reference match |
+| Text images | [presentation.rs](../src/vm/presentation.rs): image order, event association, dynamic/zero sizes, sessions; [text_buffer.rs](../src/app/text_buffer.rs): inline baselines, both-side/repeated margins, flow-break, wrapping/words, resizing/clipping | Synthetic-story GUI resize/click/restore |
+| Styles/mouse/links/terminators | Style snapshots and actual measurements, indentation/four justifications, echo style propagation, fixed-grid styles/links/editing, actual Chinese glyph rendering and missing-glyph capabilities | GUI validation of 25 special keys, grid LINK/prefilled editing, official timed cancellation and editing after restore |
+| Date/time | Epoch, negative times, full i32 years, field/negative-microsecond normalization, UTC round trips, New York DST gaps, Apia skipped day, ancient/future offsets | datetimetest startup |
+| Sound | Device-free idle sink: synchronized sample starts, independent pause/volume, stop/end/fade notifications; [tracker.rs](../src/vm/sound/tracker.rs): four-format PCM, S3M OPL, speed/BPM/volume/E6 loops, repetition/restoration offsets; sampled streaming encoding/duration/resampling boundaries | Sensory AIFF; synthetic MOD GUI playback and completion notification |
+| Blorb/product | Container bounds/resource index/metadata tests, session serialization | Adventure/Sensory close-and-reopen restoration |
 
-矩阵是按领域覆盖，不意味着每个合法/非法输入组合均已穷举。
+This matrix describes domain coverage, not exhaustive combinations of valid and invalid inputs.
 
-## 参考版本与样本
+## Reference Versions and Fixtures
 
-Glulxe revision `56ab8743bab565de307bd892c555d8d8897ed517`；CheapGlk revision
-`14d8aaf6e4150669762bd4646a5368e75c1eeee6`。分别来自
-[Glulxe](https://github.com/erkyrath/glulxe) 和 [CheapGlk](https://github.com/erkyrath/cheapglk)。
-在相邻目录构建 CheapGlk 后构建 Glulxe；本轮使用 `OPTIONS='-O2 -Wall -DOS_UNIX -DUNIX_RAND_GETRANDOM'`。
-CheapGlk 不提供桌面图形/声音，因此这些能力不按其返回值盲目对齐。
+Glulxe revision `56ab8743bab565de307bd892c555d8d8897ed517`; CheapGlk revision `14d8aaf6e4150669762bd4646a5368e75c1eeee6`, from [Glulxe](https://github.com/erkyrath/glulxe) and [CheapGlk](https://github.com/erkyrath/cheapglk). Build CheapGlk in an adjacent directory before building Glulxe. This validation used `OPTIONS='-O2 -Wall -DOS_UNIX -DUNIX_RAND_GETRANDOM'`. CheapGlk does not provide desktop graphics/sound, so those capabilities are not blindly aligned with its return values.
 
-除 Adventure 外均来自 [作者官方 Glulx 样本页](https://eblong.com/zarf/glulx/)，下载地址为该目录加下表文件名。
-Adventure 下载自 [IF Archive](https://www.ifarchive.org/if-archive/games/glulx/advent.ulx)，在 fixture 目录命名为 `glulx-advent.ulx`。
-样本和参考解释器源码不随本仓库分发。
+Except for Adventure, fixtures come from the [author's official Glulx fixture page](https://eblong.com/zarf/glulx/); download URLs append the filenames below to that directory. Adventure comes from [IF Archive](https://www.ifarchive.org/if-archive/games/glulx/advent.ulx) and is named `glulx-advent.ulx` in the fixture directory. Fixtures and reference interpreter sources are not distributed with this repository.
 
-| 文件 | SHA-256 |
+| File | SHA-256 |
 | --- | --- |
 | glulxercise.ulx | `b732127fee4cb266a5330981c1111fdfaba237134525754e063e6dc5f449b348` |
 | unicasetest.ulx | `e4b2da7fe1a894913421ba87cf26551f18fa158294df2333bbb79bc39b2f219c` |
@@ -89,49 +79,37 @@ Adventure 下载自 [IF Archive](https://www.ifarchive.org/if-archive/games/glul
 | datetimetest.ulx | `b32ec0803c60a31de07c4c23c00bb5d4f8dbe258956392813b8af0847d71a0b5` |
 | twocol.ulx | `23b2acb6ba725236b9db010342f607a41e9fc5e44758a7360b12d102418b0e6d` |
 
-Glulxercise 二进制为 Release 13 / 241202；同目录下载到的 `.inf` 是 Release 10 / 220722，不能混作同一版本。
-Unicode 为 Release 3，资源流 Release 2，输入扩展 Release 1，日期时间 Release 4，Sensory Jam Release 4，Adventure Release 5 / 961209。
+The Glulxercise binary is Release 13 / 241202; the `.inf` downloaded from the same directory is Release 10 / 220722 and must not be treated as the same version. Unicode is Release 3, resource streams Release 2, input extensions Release 1, date/time Release 4, Sensory Jam Release 4, and Adventure Release 5 / 961209.
 
-## 桌面验收与限制
+## Desktop Validation and Limits
 
-Linux Xvfb、软件 OpenGL，通过 X11 聚焦窗口后发送输入，使用正常
-`WM_DELETE_WINDOW` 退出，再不带故事参数启动：
+On Linux Xvfb with software OpenGL, focus the window through X11, send input, exit normally using `WM_DELETE_WINDOW`, then restart without a story argument:
 
-- Adventure：`north`，关闭、重开，持久会话保留 `In Forest`。
-- Sensory Jam：`hit gong / east / examine photograph`，AIFF 播放返回成功且无不支持提示，图片可见；关闭重开后文字、图形画布仍在。
+- Adventure: `north`, close, reopen; the persistent session retains `In Forest`.
+- Sensory Jam: `hit gong / east / examine photograph`; AIFF playback reports success without an unsupported message, and the image is visible; text and graphics canvases survive close/reopen.
 
-声音验收确认设备/解码/播放路径及事件状态，未做人耳听音或采样波形比对。
-输入扩展、日期、多窗口样本另通过 headless 启动、指令及退出冒烟；这不代表这些样本所有交互项均自动验证。
-Windows/macOS 尚未运行本轮 GUI 测试。未完成任何长篇游戏全通关，也不声明所有媒体编码或实体声卡波形已验证。Sound2 的多声道同步已在软件输出层按立体声采样帧验证。
+Sound validation confirms device/decoder/playback paths and event state; it does not include human listening or sampled-waveform comparison. Input-extension, date, and multi-window fixtures also pass headless startup, command, and exit smoke tests; this does not mean all their interactions were automatically verified. Windows/macOS GUI tests have not been run in this round. No complete long-game walkthrough has been finished, and not all media encodings or physical sound-card waveforms are claimed verified. Sound2 multi-channel synchronization has been checked by stereo sample frame at the software output layer.
 
-真实终端验收需使用 PTY/TTY 检查网格显示、预填编辑、定时取消和无回显单键输入；现有管道转录比较不作为该能力的通过证据。
+Real terminal validation requires PTY/TTY checks for grid display, prefilled editing, timed cancellation, and unechoed single-key input. Existing pipe transcript comparisons are not passing evidence for that capability.
 
-后续验收需要分别提供 Windows/macOS 系统与构建版本、逐项操作结果及失败记录；完整游戏流程需要固定游戏版本和可复现路线；媒体变体需要记录编码参数、输出和失败行为。新增验收结果应注明平台与覆盖范围，再勾选对应待办。
+Further validation must record Windows/macOS system and build versions, individual operation results, and failures. Full game runs require pinned game versions and reproducible routes; media variants require encoding parameters, output, and failure behavior. New results should state platform and coverage before corresponding tasks are checked off.
 
+## Added Synthetic Media Validation
 
-## 新增合成媒体验收
-
-以下 fixture 完全由仓库脚本生成，包含原创 PNG 和四声道 MOD，不依赖下载游戏：
+This fixture is generated entirely by repository scripts, with original PNG and four-channel MOD content and no downloaded game dependency:
 
 ```sh
 python3 tools/make-media-fixture.py /tmp/glulx-media.gblorb
 cargo run -- /tmp/glulx-media.gblorb
 ```
 
-在 Linux Xvfb 中，窗口分别调整为 1100×820、700×820：三种行内图片对齐正确，
-左右边栏按窗口宽度缩小，文字在图片旁绕排并在图片下恢复全宽。
-图片点击产生 `Image hyperlink received.`，音频结束产生 `MOD playback completed.`；
-正常关闭后不指定故事启动，这些文字、图像和待输入状态保留。再次运行 Sensory Jam
-原有 AIFF/照片/恢复验收，确认媒体改动没有破坏既有路径。
+Under Linux Xvfb, resize the window to 1100×820 and 700×820: all three inline image alignments are correct, left/right margins shrink with window width, and text wraps beside images then returns to full width below them. Clicking an image produces `Image hyperlink received.`; audio completion produces `MOD playback completed.`. After normal exit and restart without a story argument, the text, images, and pending input remain. The original Sensory Jam AIFF/photo/restoration checks were rerun to confirm media changes preserved existing paths.
 
-合成故事忽略 Arrange 等非输入事件，以便窗口缩放不会错误结束测试。
-零尺寸图片、无效 margin 放置、flow-break 失效、超宽图像和字体换行等边界由 Rust
-测试覆盖。音量渐变的回归覆盖未及时轮询时中途替换与已完成渐变通知，保证从当前音量继续。
+The synthetic story ignores non-input events such as Arrange so resizing cannot incorrectly end the test. Rust tests cover zero-size images, invalid margin placement, ineffective flow-breaks, oversized images, and font wrapping. Fade regressions cover replacement midway and completed-fade notifications when polling is delayed, ensuring continuation from the current volume.
 
+## Style, Input, and Graphics Edge-Case Validation
 
-## 样式、输入、图形边界验收
-
-原创样式 fixture 覆盖居中标题、悬挂缩进和两端对齐段落、右对齐、网格 LINK 及预填输入：
+The original style fixture covers centered headings, hanging indents and justified paragraphs, right alignment, grid LINK, and prefilled input:
 
 ```sh
 python3 tools/make-style-fixture.py /tmp/glulx-styles.ulx
@@ -139,29 +117,27 @@ cargo run -- /tmp/glulx-styles.ulx
 python3 tools/check-input-ui.py --candidate target/debug/glulx-rs --output /tmp/glulx-input-ui --input-feature /path/to/inputfeaturetest.ulx
 ```
 
-样式故事经 Linux Xvfb 验收：点击网格 LINK，预填 Ada 改为 Grace Hopper 并提交，正常关闭重开后保留事件、文本和网格。Rust 绘制测试还验证实际中文 glyph、宽字形单格压缩、斜体/字重/颜色、网格链接命中和编辑。
+The style story passed under Linux Xvfb: click grid LINK, change prefilled Ada to Grace Hopper, submit, and close/reopen normally with events, text, and grid retained. Rust rendering tests also verify actual Chinese glyphs, compression of wide glyphs into a single cell, oblique/weight/color, grid link hits, and editing.
 
-输入脚本自动分配 X display，保留截图、应用日志及持久会话；使用正常 WM_DELETE_WINDOW 退出。原创故事检查 25 个原生按键事件（F1–F12、方向键、Delete/Backspace、Esc/Tab/Page/Home/End/Enter）的精确值，定时取消时组成的 abc，以及同一 VM 执行片段重新请求时的 NEW 预填。官方 Input Feature Test 检查定时取消后的 ROT13 显示、保留原文 abcdef，并在会话恢复后继续编辑。
+The input script allocates an X display automatically and retains screenshots, application logs, and persistent sessions; it exits through normal WM_DELETE_WINDOW. The original story checks exact values for 25 native key events (F1–F12, arrows, Delete/Backspace, Esc/Tab/Page/Home/End/Enter), the composed abc at timed cancellation, and NEW prefilled content when re-requested in the same VM slice. The official Input Feature Test checks ROT13 display after timed cancellation, retention of the original abcdef, and continued editing after session restoration.
 
-图形回归验证：改变尺寸立即保留左上可见像素，裁去缩小区域，用当前背景填充新增区域；缩小后再放大不会恢复已裁像素，零尺寸释放画布。无符号矩形宽高按规范裁剪，包含 0xFFFFFFFF 和负坐标组合。
+Graphics regressions verify that resizing immediately retains visible top-left pixels, clips removed areas, and fills new areas with the current background. Growing after shrinking does not restore clipped pixels; zero size releases the canvas. Unsigned rectangle dimensions clip as specified, including 0xFFFFFFFF combined with negative coordinates.
 
-
-## 媒体格式与后续边界
+## Media Formats and Further Edge Cases
 
 ```sh
 python3 tools/check-graphics-ui.py --candidate target/debug/glulx-rs --output /tmp/glulx-graphics-ui
 python3 tools/check-audio-codecs.py
 ```
 
-图形脚本已通过：缩小窗口裁去右侧绿色方块，放大后绿色不再出现，左上红色方块保留且新增区域填充当前背景；绘制宽高 0xFFFFFFFF、负起点的图片成功，并保留到正常关闭/恢复之后。脚本直接检查截图像素及持久会话，而非仅确认进程未退出。Rust 回归另检查损坏 IDAT 返回失败、透明度合成，以及合法 20000×1 图片上传前适配 GPU 纹理边长，避免 debug panic；VM 仍保留原始图片尺寸。
+The graphics script passed: shrinking clips the right-hand green square, which does not reappear after growing; the top-left red square remains and new areas use the current background. Drawing an image with width/height 0xFFFFFFFF and a negative origin succeeds and persists through normal close/restore. The script checks screenshot pixels and persistent sessions directly, beyond process survival. Rust regressions also check failure on corrupt IDAT, alpha compositing, and adaptation of valid 20000×1 images to GPU texture-dimension limits before upload to avoid debug panics; the VM retains original image dimensions.
 
-Blorb RIdx 必须位于首块且唯一；RDes 解析验证 UTF-8、无条目间 padding、截断及重复条目，图像/声音文字描述显示于故事信息面板。依据 [Blorb 2.0.5](https://eblong.com/zarf/blorb/Blorb-Spec.md)。IFZS 重复块依据 [Quetzal 1.4 §8.8–8.9](https://www.ifarchive.org/if-archive/infocom/interpreters/specification/savefile_14.txt)。
+Blorb RIdx must be first and unique. RDes parsing validates UTF-8, the absence of inter-entry padding, truncation, and duplicate entries; image/sound descriptions appear in Story information. Reference: [Blorb 2.0.5](https://eblong.com/zarf/blorb/Blorb-Spec.md). Duplicate IFZS chunks follow [Quetzal 1.4 §8.8–8.9](https://www.ifarchive.org/if-archive/infocom/interpreters/specification/savefile_14.txt).
 
-日期原始字节码差分中，10^13 秒返回 YEAR:318857，与 Glulxe 一致。共享文件原始字节码检查不同句柄读取刚写入的内容、独立读写计数及最终文件 XYC；已并入 check-reference.py。
+In raw-bytecode date differential tests, 10^13 seconds returns YEAR:318857, matching Glulxe. Raw-bytecode shared-file checks verify cross-handle reads of newly written content, independent read/write counts, and final file XYC; these are integrated into check-reference.py.
 
+The four original generated tracker fixtures are in [fixtures.rs](../src/vm/sound/tracker/fixtures.rs). MOD/XM/S3M/IT verify non-silence, completion, complete repetitions, and frame-aligned restoration; S3M additionally checks OPL instrument sound and volume attenuation. [sampled.rs](../src/vm/sound/sampled.rs) decodes sampled sources packet by packet, sharing encoded data and trimming encoder padding using integer container frame counts. Repetitions count natural EOFs, independently of floating-point Duration.
 
-四种 tracker fixture 位于 [fixtures.rs](../src/vm/sound/tracker/fixtures.rs)，均为原创生成文件：MOD/XM/S3M/IT 验证非静音、结束、完整重复和帧对齐恢复；S3M 另检查 OPL 乐器的声音和音量衰减。采样源由 [sampled.rs](../src/vm/sound/sampled.rs) 逐包解码，保持编码数据共享，按容器整数帧数裁掉编码填充。播放重复按自然 EOF 计数，不依赖浮点 Duration。
+The audio codec tool generates original 44.1 kHz stereo tones with ffmpeg, then tests the project's currently built decoder: AIFF/OGG/MP3 at 250 ms (22,050 samples) and 1250 ms (110,250 samples). All six groups pass exact sample counts, duration, finite/infinite repetition, 5 ms restoration, and playback conversion checks. Cargo JSON artifact output identifies the Rodio/Symphonia build, avoiding stale feature combinations. The tool requires cargo/rustc/ffmpeg; the runtime player does not depend on ffmpeg.
 
-音频 codec 工具用 ffmpeg 生成原创 44.1 kHz 立体声音调，再测试项目当前构建的解码器：AIFF/OGG/MP3 各 250 ms（22,050 个样本）和 1250 ms（110,250 个样本），共六组精确样本数、时长、有限/无限重复、5 ms 恢复及播放转换均通过。所用 Rodio/Symphonia 构建由 Cargo 的 JSON artifact 输出定位，避免选择旧 feature 组合。工具需要 cargo/rustc/ffmpeg；运行时播放器不依赖 ffmpeg。
-
-18 项音频专项还验证 8/22.05/48 kHz 输入转 44.1 kHz 时逐样本等于完整缓冲区基准，解码分包及重复边界不重置重采样相位。
+A further 18 audio checks verify that 8/22.05/48 kHz input resampled to 44.1 kHz matches a fully buffered baseline sample for sample; decoder packet and repetition boundaries do not reset resampling phase.

@@ -1,5 +1,7 @@
 # Architecture
 
+[English](architecture.md) | [中文](architecture.ZH.md)
+
 The interpreter is Rust, with no runtime dependency on a C interpreter. Eframe/egui
 provides the Windows, Linux and macOS GUI; the same binary also has a line-oriented headless automation adapter. A full
 terminal display/input host is tracked in the specification checklist.

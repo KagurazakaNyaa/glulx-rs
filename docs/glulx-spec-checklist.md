@@ -1,93 +1,95 @@
-# Glulx 规范兼容性 checklist
+# Glulx Specification Compatibility Checklist
 
-更新：2026-09-08。原清单主要缺口已在 `4c16443` 提交；加速函数、MOD 与文本内嵌图像在 `c5fcc20` 提交。窗口、输入、字体和样式提交 `4870bcf`，媒体、流、日期和存档边界提交 `5816d37`。本次补列原清单未覆盖的播放器能力、可选扩展及验收工作。`[x]` 表示实现及列出的验证已完成，不表示穷尽规范认证；新增待办使用 `[ ]`。本次逐项规范依据、类别和验收条件见 [剩余能力复核](glulx-remaining-spec-audit.md)。详细测试、样本版本、复现命令见 [验收记录](glulx-validation.md)，实现限制见 [兼容性](compatibility.md)。
+[English](glulx-spec-checklist.md) | [中文](glulx-spec-checklist.ZH.md)
 
-## 规范边界
+Updated: 2026-09-08. The original checklist's main gaps were addressed in `4c16443`; acceleration functions, MOD, and inline text images in `c5fcc20`; windows, input, fonts, and styles in `4870bcf`; and media, streams, dates, and save edge cases in `5816d37`. This update adds previously unlisted player capabilities, optional extensions, and validation work. `[x]` means implementation and the listed validation are complete, not exhaustive conformance certification; new work uses `[ ]`. Specification evidence, classifications, and acceptance criteria are in the [remaining capability audit](glulx-remaining-spec-audit.md). Test details, fixture versions, and reproduction commands are in the [validation record](glulx-validation.md); implementation limits are in [compatibility](compatibility.md).
 
-- [Glulx 3.1.3](https://eblong.com/zarf/glulx/Glulx-Spec.html)：VM、指令、存档和能力查询。
-- [Glk 0.7.6](https://eblong.com/zarf/glk/Glk-Spec-076.html)：窗口、流、输入和可选媒体扩展。
-- [Blorb 2.0.5](https://eblong.com/zarf/blorb/)：执行文件与资源容器。
-- [Glulxe](https://github.com/erkyrath/glulxe)：差分和存档互操作参考。来源调研保留在 [原调研](glulx-spec-research.md)。
+## Specification Boundaries
 
-## VM 核心
+- [Glulx 3.1.3](https://eblong.com/zarf/glulx/Glulx-Spec.html): VM, instructions, saves, and capability queries.
+- [Glk 0.7.6](https://eblong.com/zarf/glk/Glk-Spec-076.html): windows, streams, input, and optional media extensions.
+- [Blorb 2.0.5](https://eblong.com/zarf/blorb/): executable and resource containers.
+- [Glulxe](https://github.com/erkyrath/glulxe): differential and save interoperability reference. Source research remains in the [original research notes](glulx-spec-research.md).
 
-证据：[VM](../src/vm.rs)、[Memory](../src/memory.rs)、[存档](../src/vm/save.rs)、[回归矩阵](../src/vm/conformance.rs)。
+## VM Core
 
-- [x] 文件头、版本、checksum、ROM/RAM/扩展内存校验；`verify` 检查原始执行映像，不再固定成功。
-- [x] 大端访问、ROM 保护、扩缩内存、重叠复制；setmemsize/malloc 超限或预留失败按规范返回失败；栈超限返回错误；零长度 mzero/mcopy 不访问地址，函数帧遵守栈容量。
-- [x] opcode 编码和标准寻址、窄局部变量、整数/位/数组/搜索/栈操作及边界；官方 150 条 opcode 分发和操作数数量逐项匹配。
-- [x] C0/C1、call/callf/tailcall、return、catch/throw、调用续体。
-- [x] Null/filter/Glk I/O、byte/Unicode/Huffman 字符串、间接节点与带参调用；输出续体迭代执行，40,000 次 Huffman 子字符串输出与参考一致。
-- [x] 单精度和双精度完整指令族；转换、NaN/Infinity、正负零、容差和双 word 存储次序；不跳转时也消费分支操作数。
-- [x] `save/restore`：IFZS 身份、CMem/UMem、Stks、MAll、失败不替换状态和保护区；与 Glulxe 双向互读。
-- [x] `accelfunc/accelparam` 与 Inform 加速函数 1–13；未知函数取消注册，未知参数合法忽略。属性、类、隐私和旧/新对象布局与 Glulxe 差分一致。
-- [x] Glulx gestalt 与实现对齐：3.1.3、Float、Double、ExtUndo、加速设置；加速函数 1–13 均声明支持。
-- [x] 启动和 `setrandom(0)` 使用系统熵；非零 seed 可复现，正/负/零范围有回归。
-- [x] 多级 undo、hasundo/discardundo 正确结果；最多 16 个状态且共用 64 MiB 估算预算。
-- [x] restore/undo/restart 不回滚 RNG、I/O system、字符串表、Glk 对象及保护区定义；restart 保留 undo。
-- [x] 堆分配、碎片合并、释放回缩、存档/undo 所有权；256 MiB 内存上限、失败分配及保护区跨扩展内存回归。
+Evidence: [VM](../src/vm.rs), [Memory](../src/memory.rs), [saves](../src/vm/save.rs), [regression matrix](../src/vm/conformance.rs).
+
+- [x] Header, version, checksum, and ROM/RAM/extended-memory validation; `verify` checks the original executable image instead of always succeeding.
+- [x] Big-endian access, ROM protection, memory growth/shrinkage, and overlapping copies; setmemsize/malloc return specification-defined failure on limits or reservation failure; stack overflow returns an error; zero-length mzero/mcopy do not access addresses, and function frames obey stack capacity.
+- [x] Opcode encoding and standard addressing, narrow locals, integer/bit/array/search/stack operations and edge cases; dispatch and operand counts match all 150 official opcodes individually.
+- [x] C0/C1, call/callf/tailcall, return, catch/throw, and call continuations.
+- [x] Null/filter/Glk I/O, byte/Unicode/Huffman strings, indirect nodes, and calls with arguments; iterative output continuations, with 40,000 Huffman substring outputs matching the reference.
+- [x] Complete single- and double-precision instruction families; conversions, NaN/Infinity, signed zero, tolerance, and double-word store order; branch operands are consumed even when not branching.
+- [x] `save/restore`: IFZS identity, CMem/UMem, Stks, MAll, state preservation on failure, and protection ranges; bidirectional compatibility with Glulxe.
+- [x] `accelfunc/accelparam` and Inform acceleration functions 1–13; unknown functions unregister and unknown parameters are legally ignored. Properties, classes, privacy, and old/new object layouts match Glulxe in differential tests.
+- [x] Glulx gestalt matches implementation: 3.1.3, Float, Double, ExtUndo, and acceleration setup; functions 1–13 all advertise support.
+- [x] Startup and `setrandom(0)` use system entropy; nonzero seeds are repeatable, with positive/negative/zero range regressions.
+- [x] Multiple undo levels and correct hasundo/discardundo results; at most 16 states sharing a 64 MiB estimated budget.
+- [x] restore/undo/restart do not roll back RNG, I/O system, string table, Glk objects, or protection definition; restart retains undo.
+- [x] Heap allocation, coalescing, shrinkage on free, and save/undo ownership; regressions for the 256 MiB memory limit, failed allocation, and protection spanning extended memory.
 
 ## Glk
 
-证据：[窗口树](../src/vm/windows.rs)、[流](../src/vm/streams.rs)、[事件](../src/vm/events.rs)、[呈现](../src/vm/presentation.rs)、[声音](../src/vm/sound.rs)、[GUI](../src/app.rs)。
+Evidence: [window tree](../src/vm/windows.rs), [streams](../src/vm/streams.rs), [events](../src/vm/events.rs), [presentation](../src/vm/presentation.rs), [sound](../src/vm/sound.rs), [GUI](../src/app.rs).
 
-- [x] pair 窗口树、父子/sibling、排列查询/修改、嵌套布局、关闭子树和 resize/arrange 事件；修改排列不翻转物理子窗顺序，blank/pair 返回零尺寸，文本窗尺寸使用实际字体度量。
-- [x] fileref 创建/选择/销毁、文件/内存/资源流，byte/Unicode 读写 char/line/buffer、seek、计数和 echo stream；按编码字节定位/覆盖 UTF-8，关闭流解除 echo 绑定，文件选择检查读取路径并提示已有文件修改。
-- [x] 按窗口保存行/字符请求、初始行内容、取消结果、多请求、队列、select/poll、定时器、鼠标和超链接；select_poll 不取走玩家输入，取消输入保留编辑内容，网格原位输入及特殊按键在 GUI 验证。
-- [x] Latin1 输入/大小写、Unicode 扩展大小写/titlecase/NFC/NFD；官方 Unicode 和资源流样本与参考输出一致。
-- [x] 样式状态、查询与 GUI 文本段呈现；支持段落缩进/悬挂缩进/四种对齐及 text-buffer hints 0–9；网格支持字重、斜体、颜色/反色，保留固定格尺寸。样式查询报告实际值，样式命令沿 echo 链传播。
-- [x] text-grid、graphics window、实际窗口布局、图像缩放/裁剪、坐标及窗口类型能力参数；text-buffer 支持三种行内对齐、两侧/重复边栏绕排、flow-break、图片超链接及动态缩放。零尺寸图片不占空间。graphics 画布随窗口裁剪/扩展并填充当前背景，矩形宽高按无符号值裁剪。
-- [x] 声道、播放/重复/停止/暂停、音量及渐变、完成通知和多声道播放；MOD/XM/S3M/IT 使用纯 Rust 按需解码，play_multi 在同一立体声采样帧起播。无音频设备时不声明声音能力。
-- [x] 日期/时间、资源流、行终止键和回显控制；UTC/local、负时间及日期规范化回归；完整 i32 年字段范围使用 Gregorian 运算，DST 间隙、跳日及远古/未来偏移有隔离时区测试。
-- [x] dispatch 的引用/数组/结构体/栈结果、对象生命周期和输出参数；124 个官方 selector 均有分发；未知 selector 记录并返回 0。
-- [x] gestalt 逐参数核对；GUI 按真实字体覆盖返回 CharOutput，支持系统/自选字体；headless 不声明图形、鼠标、声音等 GUI 能力。
-- [x] 升级 Glk 0.7.6，提供 `image_draw_scaled_ext`；graphics 绘图固定调用时尺寸；text-buffer 根据当前窗口宽度动态重排，支持比例/aspect/maxwidth 规则及透明图像。
+- [x] Pair window trees, parent/child/sibling relationships, arrangement queries/changes, nested layout, subtree closure, and resize/arrange events; arrangement changes do not reverse physical child order; blank/pair sizes are zero; text-window sizes use actual font metrics.
+- [x] Fileref creation/selection/destruction, file/memory/resource streams, byte/Unicode char/line/buffer reads and writes, seek, counts, and echo streams; encoded-byte UTF-8 positioning/overwrite; closing streams removes echo bindings; file selection validates read paths and prompts before modifying existing files.
+- [x] Per-window line/character requests, initial line content, cancellation results, multiple requests, queues, select/poll, timers, mouse, and hyperlinks; select_poll leaves player input untouched; cancellation retains edits; GUI validation covers grid inline input and special keys.
+- [x] Latin1 input/case conversion and Unicode extended case/titlecase/NFC/NFD; official Unicode and resource-stream fixtures match reference output.
+- [x] Style state, queries, and GUI text runs; paragraph indentation/hanging indents/four justification modes and text-buffer hints 0–9; grids support weight, oblique, colors/reverse colors while retaining fixed cell sizes. Queries report actual styles, and style commands propagate along echo chains.
+- [x] Text-grid and graphics windows, actual window layout, image scaling/clipping, coordinates, and window-type capability parameters; text buffers support three inline alignments, either-side/repeated margin wrapping, flow-break, picture hyperlinks, and dynamic scaling. Zero-size images take no space. Graphics canvases clip/expand with windows and fill with the current background; rectangle dimensions are clipped as unsigned values.
+- [x] Sound channels, play/repeat/stop/pause, volume/fades, completion notifications, and multi-channel playback; pure Rust on-demand MOD/XM/S3M/IT decoding; play_multi starts at the same stereo sample frame. Sound is not advertised without an audio device.
+- [x] Date/time, resource streams, line terminators, and echo control; UTC/local, negative-time, and date-normalization regressions; Gregorian arithmetic across the full i32 year field, with isolated timezone tests for DST gaps, skipped days, and ancient/future offsets.
+- [x] Dispatch references/arrays/structures/stack results, object lifetimes, and output parameters; all 124 official selectors dispatch; unknown selectors are recorded and return 0.
+- [x] Gestalt checked per argument; GUI CharOutput reflects real font coverage with system/custom fonts; headless does not advertise GUI graphics, mouse, sound, or similar capabilities.
+- [x] Upgrade to Glk 0.7.6 with `image_draw_scaled_ext`; graphics draws retain call-time dimensions; text buffers reflow with current window width, supporting proportional/aspect/maxwidth rules and transparent images.
 
-## Blorb 与播放器
+## Blorb and Player
 
-- [x] FORM/IFRS chunk 边界及 RIdx 校验、索引执行文件、图片/声音/数据资源、FORM 音频资源头。
-- [x] iFiction 元数据、Fspc 封面、RDes 图像/声音文字描述及故事信息面板。
-- [x] GUI 每 30 秒及正常退出保存会话；不指定故事启动时恢复 VM、Glk、输入等待、图形画布、计时器及声音进度。桌面快照独立于可移植 IFZS。
+- [x] FORM/IFRS chunk boundaries and RIdx validation, indexed executables, picture/sound/data resources, and FORM audio resource headers.
+- [x] iFiction metadata, Fspc cover art, RDes image/sound descriptions, and the story information panel.
+- [x] GUI session saving every 30 seconds and on normal exit; startup without a story restores VM, Glk, pending input, graphics canvases, timers, and audio progress. Desktop snapshots are separate from portable IFZS.
 
-## 验收与维护
+## Validation and Maintenance
 
-- [x] 158 个 Rust 测试通过；按领域的测试矩阵和边界覆盖见验收记录。
-- [x] Glulxercise 综合、单精度、双精度最终整合共 92 个通过段落、三轮全部通过；此前一次随机分布阈值失败亦保留在验收记录。
-- [x] Inform 加速函数 1–13 共 94 项结果与 Glulxe 精确一致；合成媒体故事验证图像重排、点击、MOD 完成事件和会话恢复。
-- [x] 固定 Glulxe/CheapGlk revision，合成故事及 Adventure 双向存档验证；Unicode/资源流精确规范化输出比较。
-- [x] 扩展公开故事回归到 Adventure、Unicode、资源流、输入扩展、日期时间、多窗口和 Sensory Jam；明确区分专项测试、启动冒烟与 GUI 操作。
+- [x] 158 Rust tests pass; domain-specific matrices and edge-case coverage are in the validation record.
+- [x] Final integrated Glulxercise general, single-precision, and double-precision runs yielded 92 passing sections, passing all three rounds; an earlier random-distribution threshold failure is also retained in the validation record.
+- [x] All 94 results for Inform acceleration functions 1–13 exactly match Glulxe; the synthetic media story verifies image reflow, clicks, MOD completion events, and session restoration.
+- [x] Pinned Glulxe/CheapGlk revisions, synthetic-story and Adventure bidirectional save validation, and exact normalized Unicode/resource-stream output comparison.
+- [x] Public-story regressions expanded to Adventure, Unicode, resource streams, input extensions, date/time, multiple windows, and Sensory Jam; focused tests, startup smoke tests, and GUI interactions are clearly distinguished.
 
-## 后续审计补充
+## Subsequent Audit Additions
 
-- [x] 同一文件多个流的读写一致性，避免旧句柄关闭时覆盖新数据。
-- [x] 超出 chrono 范围、但 Glk 日期字段仍可表示的时间戳转换。
-- [x] IFZS 重复 ANNO/未知 chunk 及重复已知 chunk 的规范处理。
-- [x] 精确有限音频重复；Blorb MOD 资源内的 XM/S3M/IT 格式；AIFF/OGG/MP3 逐包解码、编码填充裁剪及连续重采样。
-- [x] 损坏图片绘制返回失败，超大目标尺寸的有界裁剪采样，以及 GPU 纹理边长适配。
-- [x] Blorb RIdx 首块规则及 RDes 文本描述。
+- [x] Consistent reads/writes across streams for the same file, preventing older handles from overwriting new data on close.
+- [x] Timestamp conversion beyond chrono's range but within Glk's date fields.
+- [x] Specification handling of repeated IFZS ANNO/unknown chunks and duplicate known chunks.
+- [x] Exact finite audio repetition; XM/S3M/IT inside Blorb MOD resources; packet-based AIFF/OGG/MP3 decoding, encoder-padding trimming, and continuous resampling.
+- [x] Failed draws for corrupt images, bounded clipped sampling for oversized destinations, and GPU texture-dimension adaptation.
+- [x] Blorb RIdx first-chunk rule and RDes text descriptions.
 
-## 待实现功能
+## Features to Implement
 
-- [ ] 独立 Blorb 资源挂载：为原始 `.ulx` 指定不含执行文件的资源包，提供公开 API、CLI 参数和 GUI 入口；图片、声音、Data 及资源描述使用选中的资源包。存在 `IFhd` 时按 Glulx 的前 128 字节校验；不存在时允许加载，错误身份/损坏包不能替换现有资源。
-- [ ] Blorb 身份及参数冲突诊断：内嵌执行文件的 IFhd 与故事一致；显式独立故事加含 Exec 的资源包报告冲突；不混用 Z-machine 身份布局。
-- [ ] 同名资源自动发现（播放器策略）：在故事目录查找同名 Blorb，明确候选优先级和显式指定优先规则；缺失、损坏及不匹配的候选给出可理解的结果。
-- [ ] 独立资源的会话恢复：保留资源来源和内容，恢复后图片、声音、Data 仍可用；覆盖故事本身包含资源和外置资源两种情况。
-- [ ] `SONG` 旧音频格式：解析 `SND<number>` 外部 AIFF 样本引用及 sustain loop，接入现有播放、重复、暂停和恢复路径。此项是 Blorb 明确可选、已废弃的扩展。
-- [ ] 真实终端宿主：显示成功创建的 text-grid/status 窗口及多窗口布局，支持预填编辑、编辑中定时取消取回当前内容、无需 Enter 且无回显的单字符输入；保留管道自动化驱动模式，并准确区分其能力。
-- [ ] 实际 light 字重（可选显示增强）：存在可用字体时选择并渲染细字重，让 style_measure/style_distinguish 与实际呈现一致；缺失字体时继续如实报告回退值。
+- [ ] Separate Blorb resource attachment: specify an archive without an executable for raw `.ulx`, with public API, CLI arguments, and GUI entry points; images, sound, Data, and descriptions use the selected archive. Validate an existing `IFhd` against the first 128 Glulx bytes; allow absence; wrong identity/corrupt archives must not replace existing resources.
+- [ ] Blorb identity and argument-conflict diagnostics: embedded-executable IFhd matches the story; an explicit separate story plus an archive containing Exec reports a conflict; do not mix in the Z-machine identity layout.
+- [ ] Automatic same-name resource discovery (player policy): search the story directory for same-name Blorbs, document candidate priority and explicit-selection precedence, and provide understandable outcomes for absent, corrupt, or mismatched candidates.
+- [ ] Session restoration with separate resources: retain resource origin and content so images, sound, and Data remain available after restoration; cover both bundled and external resources.
+- [ ] Legacy `SONG` audio format: parse `SND<number>` external AIFF sample references and sustain loops, integrating existing playback, repetition, pause, and restoration paths. Blorb explicitly marks this extension optional and deprecated.
+- [ ] Real terminal host: display successfully created text-grid/status windows and multi-window layouts; support prefilled editing, timed cancellation returning current edits, and immediate unechoed character input without Enter; preserve pipe-driven automation and accurately distinguish its capabilities.
+- [ ] Actual light font weight (optional display enhancement): select and render a light face when available, aligning style_measure/style_distinguish with actual presentation; accurately report fallback values when no font is available.
 
-- [ ] 散装资源目录（可选播放器便利）：显式选择目录，按记录的 PIC/SND/DATA 命名和格式规则加载资源，覆盖编号解析、类型、路径边界和会话恢复；Glk 允许不提供此入口。
+- [ ] Loose resource directory (optional player convenience): explicit directory selection and documented PIC/SND/DATA names/formats, covering number parsing, types, path boundaries, and session restoration; Glk permits omitting this entry point.
 
-## 待完成验收
+## Validation Still Required
 
-- [ ] Windows 实机验收：窗口/字体/DPI、输入和特殊键、文件提示及路径、音频、正常退出和会话恢复；记录系统版本与构建版本。
-- [ ] macOS 实机验收：窗口/字体/Retina、输入和特殊键、文件提示及路径、音频、正常退出和会话恢复；记录系统版本与构建版本。
-- [ ] 长篇游戏完整流程：固定游戏版本并保存可复现路线，覆盖跨章节状态、游戏存档/读档、undo/restart，以及中途关闭播放器后继续。
-- [ ] 扩展媒体样本矩阵：增加 PNG/JPEG 编码变体、采样音频位深/采样率/声道及 tracker 历史变体，逐项记录支持结果和失败行为。
-- [ ] 实体音频输出验收：检查同步起播、暂停/恢复、渐变和结束通知与实际输出的对应关系，补充软件采样帧验证之外的证据。
+- [ ] Windows on-device validation: windows/fonts/DPI, input/special keys, file prompts/paths, audio, normal exit, and session restoration; record OS and build versions.
+- [ ] macOS on-device validation: windows/fonts/Retina, input/special keys, file prompts/paths, audio, normal exit, and session restoration; record OS and build versions.
+- [ ] Complete long-game walkthroughs: pin game versions and retain reproducible routes covering cross-chapter state, game save/load, undo/restart, and continuation after closing the player mid-game.
+- [ ] Expanded media fixture matrix: PNG/JPEG variants, sampled-audio bit depths/sample rates/channels, and historical tracker variants; record support and failure behavior individually.
+- [ ] Physical audio-output validation: relate synchronized starts, pause/resume, fades, and completion notifications to actual output, adding evidence beyond software sample-frame checks.
 
-独立资源挂载、真实终端宿主与跨平台验收优先。上述验收待办不代表对应功能已知缺失；现有通过记录仍保留。
+Prioritize separate resources, a real terminal host, and cross-platform validation. Validation tasks above do not imply known missing functionality; existing passing records remain valid.
 
-## 现有限制与规范范围
+## Current Limits and Specification Scope
 
-网格按规范保持统一格尺寸，忽略改变格布局的 hints 0–3/6；当前 light 请求回退常规字重并如实报告。缺少字形返回 CannotPrint，可加载备用字体。MOD/XM/S3M/IT 均支持，未宣称全部历史方言或与特定硬件位精确重放。Blorb 的 Rect/Reso/APal/Loop 属于 Z-machine 范围。VM 内存上限为 256 MiB，undo 最多 16 个状态且共用 64 MiB 估算预算。图片源超过 16 megapixels 或 decoder 128 MiB 分配预算时返回不可用；绘制目标尺寸不受此源图像限制。上述资源限额是当前实现策略；undo 估算包含内存/栈/故事映像，未计堆索引及分配器开销，未作为缺失功能勾选。容器读取仍容忍非零 padding 和未索引 GLUL 回退，详见复核文档，不宣称拒绝全部非法容器。
+Grids retain uniform cell sizes as specified, ignoring hints 0–3/6 that change cell layout; light requests currently fall back to regular and report that accurately. Missing glyphs return CannotPrint, and fallback fonts can be loaded. MOD/XM/S3M/IT are supported without claiming every historical dialect or bit-exact playback against specific hardware. Blorb Rect/Reso/APal/Loop are in Z-machine scope. VM memory is limited to 256 MiB; undo retains at most 16 states sharing a 64 MiB estimated budget. Image sources above 16 megapixels or the decoder's 128 MiB allocation budget are unavailable; draw destination dimensions are not subject to this source-image limit. These resource limits are current implementation policy; undo estimates include memory/stack/story image but exclude heap indexes and allocator overhead, and are not marked as missing features. Container reading still tolerates nonzero padding and unindexed GLUL fallback; see the audit. Rejection of every invalid container is not claimed.

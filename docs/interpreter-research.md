@@ -1,137 +1,139 @@
-# Glulx 解释器与 GUI 技术调研
+# Glulx Interpreter and GUI Technology Research
 
-调研日期：2026-09-08。范围限定为项目自己的仓库、README、规范站点和 crates.io 注册信息；维护状态以最后提交/发布记录为准。
+[English](interpreter-research.md) | [中文](interpreter-research.ZH.md)
 
-## 结论
+Research date: 2026-09-08. Sources are limited to projects' own repositories, READMEs, specification sites, and crates.io registry records. Maintenance status is based on the latest commit/release records.
 
-线上已有成熟的 Glulx 解释器，但没有发现一个同时满足“活跃维护、纯 Rust、完整 Glulx、可嵌入、原生跨平台 GUI”的现成项目。
+## Findings
 
-建议本项目实现自己的纯 Rust VM 和 Glk 抽象层，但不要从规范孤立开发：
+Mature Glulx interpreters exist, but no ready-made project was found that combines active maintenance, pure Rust, complete Glulx, embeddability, and a native cross-platform GUI.
 
-1. 以 **Glulxe** 作为行为正确性的参考实现和差分测试 oracle。
-2. 以 **Git** 参考解码、执行循环、缓存和加速策略，第一版不要照搬其动态编译复杂度。
-3. 以 **Gargoyle** 参考“解释器通过 Glk 接入 GUI”的组件边界，而不是把 Gargoyle 源码直接嵌入 Rust 应用。
-4. 以 **Quixe/GlkOte** 参考浏览器端窗口树、事件和存档交互；它适合 Web 目标，不适合作为原生 Rust VM 内核。
-5. 把 **RemGlk / remglk-rs** 用作无界面测试、远程前端或 Web 服务适配层；它们不是 VM，也不是 GUI。
-6. 不基于 `thefarwind/glulx-rs` 续写。该实现长期停更且明确未达到可运行 story file 的程度；选择性借鉴测试思路即可。
+This project should implement its own pure Rust VM and Glk abstraction, while using established implementations alongside the specification:
 
-短期若目标是“尽快跑起真实游戏”，可增加一个可选的 C Glulxe 后端作为开发期基准；产品主线仍应保持纯 Rust VM。crates.io 的 `glulxe`/`glulxe-sys` 能完成这种桥接，但版本停留在 2019 年，不宜成为长期架构核心。
+1. Use **Glulxe** as the behavioral correctness reference and differential-test oracle.
+2. Consult **Git** for decoding, execution loops, caching, and acceleration strategies; avoid copying its dynamic-compilation complexity into the first version.
+3. Consult **Gargoyle** for the interpreter-to-GUI boundary through Glk, rather than embedding Gargoyle source directly into the Rust application.
+4. Consult **Quixe/GlkOte** for browser window trees, events, and save interactions; it suits Web targets, not a native Rust VM core.
+5. Use **RemGlk / remglk-rs** as adapters for headless tests, remote frontends, or Web services; they are neither VMs nor GUIs.
+6. Do not build on `thefarwind/glulx-rs`. It has long been inactive and explicitly cannot yet run story files; selectively consult its testing ideas instead.
 
-## 候选项目对比
+If the short-term goal is to run real games quickly, an optional C Glulxe backend could serve as a development baseline, while the product remains centered on a pure Rust VM. The crates.io `glulxe`/`glulxe-sys` packages provide this bridge, but their versions date to 2019 and should not form the long-term architectural core.
 
-| 项目 | 定位与语言 | GUI / I/O | 维护信号 | 许可证 | 对本项目的价值 |
+## Candidate Comparison
+
+| Project | Role and language | GUI / I/O | Maintenance signals | License | Value to this project |
 | --- | --- | --- | --- | --- | --- |
-| [Git](https://github.com/DavidKinder/Git) | C 编写的高速 Glulx 解释器 | 自身无 GUI，必须链接 Glk；仓库带 Windows Glk 构建支持 | 2026-08-23 仍有提交；当前仓库未归档 | MIT | 性能与执行器设计参考；适合差分测试，不适合直接形成纯 Rust 核心 |
-| [Glulxe](https://github.com/erkyrath/glulxe) | C 编写的 Glulx 参考解释器 | 自身无 GUI，必须链接 Glk；可链接 RemGlk、CheapGlk 等 | 2026-05-05 仍有提交；README 已记录 3.1.3 双精度/undo 指令支持 | MIT | 最可信的兼容性基准；适合 oracle 或可选 FFI 后端 |
-| [Quixe](https://github.com/erkyrath/quixe) | JavaScript Glulx VM，完全在浏览器运行 | 内含 GlkOte 浏览器 UI；支持文本/网格、输入、定时器、链接和实验性图形，但 README 明确仍不支持声音和 style hints | 2.2.6 发布于 2025-06-02；最后提交 2025-09-01 | MIT（附带构建工具另有 Apache-2.0） | Web 版完整参考和 UI 行为样本；不是 Rust/native 复用核心 |
-| [RemGlk](https://github.com/erkyrath/remglk) | C 编写的 Glk RPC 实现，不是 VM | 没有 UI；stdout/stdin 交换 JSON，可与 GlkOte、bot、Web 服务或回归测试连接 | 0.3.2；最后提交 2025-06-12 | MIT；文档 CC BY-NC-SA 4.0 | 极适合自动化/远程前端协议参考，不可替代 GUI |
-| [Gargoyle](https://github.com/garglk/garglk) | C/C++ 跨平台 IF player 与 Glk 实现，捆绑多种解释器 | Qt 5/6 或 macOS Cocoa；图像、声音、字体、滚屏、文件对话框等完整桌面体验 | 2026-09-07 仍有提交和多平台 CI | 主项目 README 声明 GPL；捆绑解释器各自保留许可证 | 最完整的桌面集成参考；依赖和许可证面较大，不宜直接移植进轻量 Rust GUI |
-| [`glulxe` crate](https://crates.io/crates/glulxe) / [`glulxe-sys`](https://crates.io/crates/glulxe-sys) | Rust API + 内嵌 C Glulxe FFI | 调用方必须提供 Glk handlers；`main()` 会接管当前线程直到结束 | 最新 0.2.0，2019-11-04 发布 | 包装层 MIT OR Apache-2.0；内层 C/`-sys` MIT | 可做开发期 oracle/兼容后端；API、上游快照和维护状态偏旧 |
-| [`glk` crate](https://crates.io/crates/glk) | 用 Rust traits 实现供 C 解释器调用的 Glk provider | 不自带 GUI；示例只有单窗口 terminal ToyGlk | 最新 0.2.0，2019-11-04 发布，文档指向 Glk 0.7.5 | MIT OR Apache-2.0 | 可参考 traits/FFI 映射，不宜直接锁定长期 UI API |
-| [`thefarwind/glulx-rs`](https://github.com/thefarwind/glulx-rs) | 早期纯 Rust Glulx 实验 | 无 GUI/Glk 成品 | 最后 push 2018-02-10；仓库仅少量 VM/memory/stack 文件 | MIT | 不可作为基线；可阅读但不应 fork 续写 |
-| [`curiousdannii/remglk-rs`](https://github.com/curiousdannii/remglk-rs) | 活跃的 Rust RemGlk/GlkOte 协议实现，不是 Glulx VM | 通过 `GlkSystem` trait 发送 update、接收 event；含 Blorb 与 C API 层 | 最后提交 2026-08-24；工作区版本 0.1.0 | MIT | Rust 侧最值得借鉴/复用的 Glk 协议部件；原生 GUI 仍需自己实现 |
+| [Git](https://github.com/DavidKinder/Git) | High-speed Glulx interpreter in C | No GUI itself; must link Glk; repository includes Windows Glk build support | Commits as recent as 2026-08-23; repository not archived | MIT | Performance/executor design reference and differential testing; not directly a pure Rust core |
+| [Glulxe](https://github.com/erkyrath/glulxe) | Glulx reference interpreter in C | No GUI itself; must link Glk, such as RemGlk or CheapGlk | Commits as recent as 2026-05-05; README documents 3.1.3 double-precision/undo support | MIT | Most trustworthy compatibility baseline; oracle or optional FFI backend |
+| [Quixe](https://github.com/erkyrath/quixe) | JavaScript Glulx VM running entirely in a browser | Includes GlkOte browser UI; text/grids, input, timers, links, and experimental graphics; README explicitly lists sound and style hints as unsupported | 2.2.6 released 2025-06-02; latest commit 2025-09-01 | MIT (bundled build tools also include Apache-2.0) | Complete Web implementation reference and UI behavior examples; not a Rust/native reusable core |
+| [RemGlk](https://github.com/erkyrath/remglk) | C Glk RPC implementation, not a VM | No UI; JSON over stdout/stdin for GlkOte, bots, Web services, or regression tests | 0.3.2; latest commit 2025-06-12 | MIT; documentation CC BY-NC-SA 4.0 | Excellent automation/remote-frontend protocol reference; cannot replace a GUI |
+| [Gargoyle](https://github.com/garglk/garglk) | C/C++ cross-platform IF player and Glk implementation bundling multiple interpreters | Qt 5/6 or macOS Cocoa; full desktop images, sound, fonts, scrollback, file dialogs, and more | Commits and multi-platform CI as recent as 2026-09-07 | Main README declares GPL; bundled interpreters retain their own licenses | Most complete desktop integration reference; broad dependency/license scope makes direct transplantation into a lightweight Rust GUI unsuitable |
+| [`glulxe` crate](https://crates.io/crates/glulxe) / [`glulxe-sys`](https://crates.io/crates/glulxe-sys) | Rust API plus embedded C Glulxe FFI | Caller provides Glk handlers; `main()` takes over the current thread until completion | Latest 0.2.0, released 2019-11-04 | Wrapper MIT OR Apache-2.0; inner C/`-sys` MIT | Development oracle/compatibility backend; aging API, upstream snapshot, and maintenance |
+| [`glk` crate](https://crates.io/crates/glk) | Rust traits for a Glk provider called by C interpreters | No GUI; example is a single-window terminal ToyGlk | Latest 0.2.0, released 2019-11-04; docs target Glk 0.7.5 | MIT OR Apache-2.0 | Trait/FFI mapping reference; unsuitable for fixing the long-term UI API around it |
+| [`thefarwind/glulx-rs`](https://github.com/thefarwind/glulx-rs) | Early pure Rust Glulx experiment | No finished GUI/Glk | Last push 2018-02-10; only a few VM/memory/stack files | MIT | Not a baseline; readable reference, not a fork to continue |
+| [`curiousdannii/remglk-rs`](https://github.com/curiousdannii/remglk-rs) | Active Rust RemGlk/GlkOte protocol implementation, not a Glulx VM | `GlkSystem` trait sends updates and receives events; includes Blorb and C API layers | Latest commit 2026-08-24; workspace version 0.1.0 | MIT | Most promising Rust Glk protocol component to consult/reuse; native GUI still needs implementation |
 
-## 逐项分析
+## Individual Analysis
 
 ### Git
 
-Git 的目标就是速度。官方 README 声称它约为 Glulxe 的五倍，并通过可调缓存大小在速度和内存之间取舍；源树将 `compiler.c`、`peephole.c`、`opcodes.c`、`operands.c`、`memory.c`、`savefile.c` 和 `glkop.c` 分开，适合研究快速执行器的职责划分。[README](https://github.com/DavidKinder/Git/blob/master/README.md) [source tree](https://github.com/DavidKinder/Git)
+Git targets speed. Its official README claims roughly five times Glulxe's speed, with configurable cache sizes trading memory for speed. The source tree separates `compiler.c`, `peephole.c`, `opcodes.c`, `operands.c`, `memory.c`, `savefile.c`, and `glkop.c`, making it useful for studying executor responsibilities. [README](https://github.com/DavidKinder/Git/blob/master/README.md) [source tree](https://github.com/DavidKinder/Git)
 
-它并不是 GUI 程序。README 明确要求链接一个 Glk library，仓库中只额外包含 Windows Glk 的构建材料。MIT 许可证允许借鉴或移植，但复制代码时仍须保留版权与许可通知。[LICENSE](https://github.com/DavidKinder/Git/blob/master/LICENSE)
+It is not a GUI program. The README explicitly requires linking a Glk library, with only additional Windows Glk build materials in the repository. MIT permits adaptation or porting, while copied code still requires copyright and license notices. [LICENSE](https://github.com/DavidKinder/Git/blob/master/LICENSE)
 
-建议：先实现直接解释器并用测试建立正确性，再按 profile 引入 decoded-block cache。不要在 MVP 就移植 Git 的代码生成器，因为它会显著放大 unsafe、平台差异和调试成本。
+Recommendation: implement a direct interpreter and establish correctness through tests first; introduce a decoded-block cache based on profiling. Porting Git's code generator during the MVP would significantly increase unsafe code, platform differences, and debugging costs.
 
 ### Glulxe
 
-Glulxe 的仓库自称 “The Glulx VM reference interpreter”。README 说明它必须与 Glk library 链接，并可使用 CheapGlk、GlkTerm、RemGlk 等后端；这正好验证了 VM 与显示层解耦是 Glulx 生态的既有边界。[README](https://github.com/erkyrath/glulxe/blob/master/README.md)
+Glulxe describes itself as “The Glulx VM reference interpreter”. Its README says it must link a Glk library and can use CheapGlk, GlkTerm, RemGlk, and other backends. This confirms that separating VM and display is an established Glulx ecosystem boundary. [README](https://github.com/erkyrath/glulxe/blob/master/README.md)
 
-版本历史显示 0.6.0 已支持 Glulx 3.1.3 的 `hasundo`、`discardundo` 和双精度指令，后续主分支又增加 autosave/恢复能力；2026-05-05 的提交仍在处理扩展内存映射，说明它是活跃且覆盖边角行为的最佳 oracle。[latest commit](https://github.com/erkyrath/glulxe/commit/56ab8743bab565de307bd892c555d8d8897ed517) [LICENSE](https://github.com/erkyrath/glulxe/blob/master/LICENSE)
+Version history shows 0.6.0 already supported Glulx 3.1.3's `hasundo`, `discardundo`, and double-precision instructions. Later master added autosave/restoration; the 2026-05-05 commit still addresses extended-memory mapping, supporting its role as an active oracle covering edge behavior. [latest commit](https://github.com/erkyrath/glulxe/commit/56ab8743bab565de307bd892c555d8d8897ed517) [LICENSE](https://github.com/erkyrath/glulxe/blob/master/LICENSE)
 
-建议：测试中对同一 `.ulx` 输入序列同时运行 Rust VM 与 Glulxe/RemGlk，比较 JSON 输出、退出状态和保存文件。Glulxe 的 C 源只作为参考或隔离的 FFI feature，不能让 VM 核心依赖它。
+Recommendation: run identical `.ulx` input sequences in the Rust VM and Glulxe/RemGlk, comparing JSON output, exit status, and save files. Glulxe C source should remain a reference or isolated FFI feature, not a VM-core dependency.
 
-### Quixe 与 GlkOte
+### Quixe and GlkOte
 
-Quixe 是纯 JavaScript Glulx VM，可在无服务端的浏览器中运行 `.ulx` 或 `.gblorb`。其 VM 核心、Glk dispatcher、story/Blorb loader 与 GlkOte UI 分开，是 Web 端模块划分的重要参照。[Quixe README](https://github.com/erkyrath/quixe/blob/master/README.txt)
+Quixe is a pure JavaScript Glulx VM that runs `.ulx` or `.gblorb` in a browser without a server. It separates the VM core, Glk dispatcher, story/Blorb loader, and GlkOte UI, offering a useful Web module boundary reference. [Quixe README](https://github.com/erkyrath/quixe/blob/master/README.txt)
 
-不过，官方 README 仍明确列出声音和 style hints 未支持，因此不能把“能在浏览器玩大部分游戏”理解为完整 Glk 覆盖。若以后增加 Web/WASM 前端，可复用其交互模型或直接将 Rust VM 输出映射到 GlkOte；原生桌面 MVP 没有必要引入 JavaScript runtime。[Quixe LICENSE](https://github.com/erkyrath/quixe/blob/master/LICENSE) [GlkOte README](https://github.com/erkyrath/glkote/blob/master/README.txt)
+However, its official README still explicitly lists sound and style hints as unsupported; playing most games in a browser is not complete Glk coverage. A future Web/WASM frontend could reuse its interaction model or map Rust VM output to GlkOte. The native desktop MVP does not need a JavaScript runtime. [Quixe LICENSE](https://github.com/erkyrath/quixe/blob/master/LICENSE) [GlkOte README](https://github.com/erkyrath/glkote/blob/master/README.txt)
 
-### RemGlk 与 remglk-rs
+### RemGlk and remglk-rs
 
-RemGlk 是结构化 I/O 后端：解释器把窗口变化编码为 JSON 写到 stdout，再从 stdin 读取 JSON event。它支持多窗口和大多数 Glk I/O，但官方文档反复强调它“不提供用户界面”。[RemGlk README](https://github.com/erkyrath/remglk/blob/master/README.txt) [protocol documentation](https://github.com/erkyrath/remglk/blob/master/docs.html)
+RemGlk is a structured I/O backend: the interpreter encodes window changes as JSON on stdout and reads JSON events from stdin. It supports multiple windows and most Glk I/O, but its documentation repeatedly emphasizes that it “does not provide a user interface”. [RemGlk README](https://github.com/erkyrath/remglk/blob/master/README.txt) [protocol documentation](https://github.com/erkyrath/remglk/blob/master/docs.html)
 
-`remglk-rs` 是该思路的活跃 Rust 实现。其 `GlkSystem` trait 已抽象文件操作、GlkOte update/event、Unicode 和时间/目录服务，源树还包含 Blorb、协议对象、窗口/流/声道及 C API 层。[README](https://github.com/curiousdannii/remglk-rs/blob/master/README.md) [`GlkSystem`](https://github.com/curiousdannii/remglk-rs/blob/master/remglk/src/lib.rs) [Cargo manifest](https://github.com/curiousdannii/remglk-rs/blob/master/remglk/Cargo.toml)
+`remglk-rs` actively implements this approach in Rust. Its `GlkSystem` trait abstracts file operations, GlkOte updates/events, Unicode, and time/directory services; the source tree also includes Blorb, protocol objects, windows/streams/sound channels, and a C API. [README](https://github.com/curiousdannii/remglk-rs/blob/master/README.md) [`GlkSystem`](https://github.com/curiousdannii/remglk-rs/blob/master/remglk/src/lib.rs) [Cargo manifest](https://github.com/curiousdannii/remglk-rs/blob/master/remglk/Cargo.toml)
 
-建议：不要让 VM 直接依赖 RemGlk JSON。定义项目自己的小型 `GlkHost`/事件接口；RemGlk、GUI、headless recorder 都作为 adapter。可以从 git 依赖试用 `remglk-rs`，但在公开 API 尚未稳定且未见 crates.io 正式条目时，不要让核心类型泄漏到 VM API。
+Recommendation: define a small project-owned `GlkHost`/event interface rather than coupling the VM directly to RemGlk JSON; RemGlk, GUI, and headless recorder are adapters. A git dependency can trial `remglk-rs`, but while its public API is unsettled and no formal crates.io entry was found, its core types should not leak into the VM API.
 
 ### Gargoyle
 
-Gargoyle 是完整的跨平台 IF player，而不是单一 Glulx VM。官方 README 表明它同时打包 Git、Glulxe 等解释器；构建文件把每个解释器编译为独立 executable，并统一链接 `garglkmain` 和 `garglk`，这是一条重要设计证据：GUI/Glk 是平台层，Git/Glulxe 是可替换引擎。[README](https://github.com/garglk/garglk/blob/master/README.md) [interpreter build](https://github.com/garglk/garglk/blob/master/terps/CMakeLists.txt)
+Gargoyle is a complete cross-platform IF player, not a single Glulx VM. Its README lists bundled interpreters including Git and Glulxe. Build files compile each interpreter as a separate executable linked to `garglkmain` and `garglk`. This provides concrete design evidence: GUI/Glk forms the platform layer, while Git/Glulxe are replaceable engines. [README](https://github.com/garglk/garglk/blob/master/README.md) [interpreter build](https://github.com/garglk/garglk/blob/master/terps/CMakeLists.txt)
 
-当前 GUI 在非 macOS 平台使用 Qt Widgets，在 macOS 可使用 Cocoa；声音可选 Qt、SDL2、SDL3 或关闭，并另行处理 JPEG/PNG、字体、TTS 等。完整复制会引入庞大 native 依赖和多许可证义务，但其窗口树、排版、scrollback、输入历史、全屏、主题和无障碍体验都值得做验收基准。[GUI build](https://github.com/garglk/garglk/blob/master/garglk/CMakeLists.txt)
+The current GUI uses Qt Widgets outside macOS and can use Cocoa on macOS. Sound can use Qt, SDL2, SDL3, or be disabled; JPEG/PNG, fonts, TTS, and other facilities are handled separately. Copying it wholesale would add substantial native dependencies and multiple license obligations, but its window trees, layout, scrollback, input history, fullscreen, themes, and accessibility are valuable acceptance references. [GUI build](https://github.com/garglk/garglk/blob/master/garglk/CMakeLists.txt)
 
-本仓库是 `AGPL-3.0-only`。Git/Glulxe/remglk-rs 的 MIT 代码一般可以在保留通知后纳入，但 Gargoyle 自身及其捆绑组件的 GPL 版本差异需要逐文件审计；本节只是工程风险提示，不构成法律意见。[Gargoyle licensing statement](https://github.com/garglk/garglk/blob/master/README.md) [Gargoyle license inventory](https://github.com/garglk/garglk/tree/master/licenses)
+This repository is `AGPL-3.0-only`. MIT code from Git/Glulxe/remglk-rs can generally be incorporated with notices retained, but GPL version differences across Gargoyle and its bundled components require per-file auditing. This section records engineering risk, not legal advice. [Gargoyle licensing statement](https://github.com/garglk/garglk/blob/master/README.md) [Gargoyle license inventory](https://github.com/garglk/garglk/tree/master/licenses)
 
-### Rust 现成实现
+### Existing Rust Implementations
 
-crates.io 搜索目前主要返回两类条目：Glulxe C FFI (`glulxe`, `glulxe-sys`) 与 Glk provider (`glk`, `glk-sys`)，而不是完整纯 Rust VM。`glulxe` 的官方 crate README 也明确说它只是嵌入 C Glulxe，并且 `init()` 后由 `main()` 在同一线程接管执行；GUI 仍须提供所有 Glk handlers。[`glulxe` crate README](https://crates.io/crates/glulxe/0.2.0) [`glk` crate README](https://crates.io/crates/glk/0.2.0)
+crates.io search mainly returns two categories: Glulxe C FFI (`glulxe`, `glulxe-sys`) and Glk providers (`glk`, `glk-sys`), rather than a complete pure Rust VM. The official `glulxe` crate README explicitly says it embeds C Glulxe; after `init()`, `main()` takes over execution on the same thread. The GUI must still provide all Glk handlers. [`glulxe` crate README](https://crates.io/crates/glulxe/0.2.0) [`glk` crate README](https://crates.io/crates/glk/0.2.0)
 
-旧的 `thefarwind/glulx-rs` 在 2018 年停更。其源码包含多个 `unimplemented!()`，而 `glulxe` crate 的 README 也明确记录它在 2019 年底仍不足以运行 story files。因此不能把它当作能缩短交付时间的现成解释器。[repository](https://github.com/thefarwind/glulx-rs) [interpreter source](https://github.com/thefarwind/glulx-rs/blob/master/src/interpreter.rs)
+The old `thefarwind/glulx-rs` stopped receiving updates in 2018. Its source contains multiple `unimplemented!()` calls, and the `glulxe` crate README records that it was still insufficient to run story files in late 2019. It cannot be treated as an available interpreter that shortens delivery. [repository](https://github.com/thefarwind/glulx-rs) [interpreter source](https://github.com/thefarwind/glulx-rs/blob/master/src/interpreter.rs)
 
-crates.io 的关键词搜索还会返回并非 Glulx VM 的项目，例如 `glulx-asm`/`wasm2glulx`（生成 Glulx）和刚发布的 `rezrov`（其 workspace 当前只声明 `rezrov-zterp`，即 Z-machine）。这些不能满足本项目需求。[crates.io search](https://crates.io/search?q=glulx) [Rezrov manifest](https://github.com/jeffnyman/rezrov/blob/main/Cargo.toml)
+Keyword searches also return non-Glulx-VM projects, such as `glulx-asm`/`wasm2glulx` (which generate Glulx) and the recently released `rezrov` (whose workspace currently declares only `rezrov-zterp`, a Z-machine). These do not satisfy this project's needs. [crates.io search](https://crates.io/search?q=glulx) [Rezrov manifest](https://github.com/jeffnyman/rezrov/blob/main/Cargo.toml)
 
-## 对本仓库的具体架构建议
+## Concrete Architecture Recommendations
 
 ```text
-glulx-core (纯 Rust，无 GUI/文件对话框)
+glulx-core (pure Rust, no GUI/file dialogs)
   Story/Header -> Memory -> Decoder -> Executor -> Save/Undo
                                      |
                                      v
                                GlkHost trait
                               /      |       \
                     eframe adapter  headless  RemGlk adapter
-                         |           recorder     (可选)
+                         |           recorder     (optional)
                     desktop GUI       |
                                    differential tests
                                       |
                              Glulxe + RemGlk oracle
 ```
 
-边界应遵循以下规则：
+Boundaries should follow these rules:
 
-- VM 不认识 eframe、Qt、JSON、窗口控件或操作系统文件对话框，只认识 Glk selector、参数和异步事件。
-- GUI 维护 Glk window tree、文本/网格缓冲区、输入请求、图像/声音资源和菜单状态；VM 线程在等待 Glk event 时可暂停，不阻塞渲染线程。
-- story/header/memory/operand/opcode 分层应以 Glulx 官方规范为准，并逐步覆盖 3.1.3 特性；官方规范入口是 [Glulx home/specification](https://eblong.com/zarf/glulx/) 和 [Glk home/specification](https://eblong.com/zarf/glk/)。
-- MVP 优先支持：`.ulx`/`.gblorb` 加载、校验、整数执行、调用栈、字符串 I/O、核心 Glk 文本窗口与输入、quit/restart/save/restore/undo。之后再补浮点/双精度、heap、搜索、acceleration、图形、声音和完整 style hints。
-- 从第一天保留 deterministic RNG、step limit、checked address arithmetic 与结构化错误；Glulxe/Git 都持续修复边界行为，真实 story file 不能被当作可信输入。
+- The VM knows Glk selectors, arguments, and asynchronous events, not eframe, Qt, JSON, widgets, or operating-system file dialogs.
+- The GUI maintains the Glk window tree, text/grid buffers, input requests, image/sound resources, and menu state; the VM thread can pause while awaiting a Glk event without blocking rendering.
+- Story/header/memory/operand/opcode layers should follow the official Glulx specification and gradually cover 3.1.3 features. Official entry points: [Glulx home/specification](https://eblong.com/zarf/glulx/) and [Glk home/specification](https://eblong.com/zarf/glk/).
+- MVP priorities: `.ulx`/`.gblorb` loading, validation, integer execution, call stack, string I/O, core Glk text windows/input, and quit/restart/save/restore/undo. Add float/double, heap, search, acceleration, graphics, sound, and complete style hints afterward.
+- Keep deterministic RNG, step limits, checked address arithmetic, and structured errors from day one. Glulxe/Git continually fix edge behavior; real story files cannot be treated as trusted input.
 
-## 建议的复用清单
+## Recommended Reuse List
 
-**直接复用**
+**Reuse directly**
 
-- Glulx/Glk 规范作为唯一行为合同。
-- Glulxe、Git、Quixe 的测试 story 和公开行为作为差分验证材料（逐项核对其资源许可证）。
-- `remglk-rs` 的协议/Blorb 思路；是否作为依赖应在小型 spike 后决定。
+- Glulx/Glk specifications as the sole behavioral contract.
+- Glulxe, Git, and Quixe test stories and public behavior for differential validation, checking each resource's license.
+- `remglk-rs` protocol/Blorb ideas; decide whether to depend on it after a small spike.
 
-**仅作参考或开发工具**
+**Reference or development tools only**
 
-- Glulxe C / `glulxe` crate：oracle、兼容后端、故障定位。
-- Git：性能优化和模块职责参考。
-- Gargoyle：Glk 能力矩阵、桌面交互和发布矩阵参考。
-- Quixe/GlkOte：未来 Web/WASM 前端参考。
+- Glulxe C / `glulxe` crate: oracle, compatibility backend, fault isolation.
+- Git: performance optimization and module responsibilities.
+- Gargoyle: Glk capability matrix, desktop interactions, and release matrix.
+- Quixe/GlkOte: future Web/WASM frontend.
 
-**不采用为基础**
+**Do not use as the foundation**
 
-- `thefarwind/glulx-rs`：不完整且长期停更。
-- 直接 fork Gargoyle：会把 Rust VM 项目变成 C/C++/Qt 集成项目。
-- 把 RemGlk 当 GUI：它只定义结构化 I/O 通道。
-- MVP 即实现 Git 风格动态编译：在兼容性测试成熟前收益低、风险高。
+- `thefarwind/glulx-rs`: incomplete and long inactive.
+- A direct Gargoyle fork: this would turn the Rust VM project into C/C++/Qt integration.
+- RemGlk as a GUI: it defines only a structured I/O channel.
+- Git-style dynamic compilation in the MVP: low benefit and high risk before compatibility tests mature.
 
-## 一手来源索引
+## Primary Source Index
 
-- Glulx/Glk：[Glulx](https://eblong.com/zarf/glulx/)，[Glk](https://eblong.com/zarf/glk/)
-- Git：[repository](https://github.com/DavidKinder/Git)，[README](https://github.com/DavidKinder/Git/blob/master/README.md)，[LICENSE](https://github.com/DavidKinder/Git/blob/master/LICENSE)
-- Glulxe：[repository](https://github.com/erkyrath/glulxe)，[README](https://github.com/erkyrath/glulxe/blob/master/README.md)，[LICENSE](https://github.com/erkyrath/glulxe/blob/master/LICENSE)
-- Quixe/GlkOte：[Quixe](https://github.com/erkyrath/quixe)，[GlkOte](https://github.com/erkyrath/glkote)
-- RemGlk：[C implementation](https://github.com/erkyrath/remglk)，[Rust implementation](https://github.com/curiousdannii/remglk-rs)
-- Gargoyle：[repository](https://github.com/garglk/garglk)，[README](https://github.com/garglk/garglk/blob/master/README.md)
-- Rust registry：[glulxe](https://crates.io/crates/glulxe)，[glulxe-sys](https://crates.io/crates/glulxe-sys)，[glk](https://crates.io/crates/glk)，[glk-sys](https://crates.io/crates/glk-sys)
+- Glulx/Glk: [Glulx](https://eblong.com/zarf/glulx/), [Glk](https://eblong.com/zarf/glk/)
+- Git: [repository](https://github.com/DavidKinder/Git), [README](https://github.com/DavidKinder/Git/blob/master/README.md), [LICENSE](https://github.com/DavidKinder/Git/blob/master/LICENSE)
+- Glulxe: [repository](https://github.com/erkyrath/glulxe), [README](https://github.com/erkyrath/glulxe/blob/master/README.md), [LICENSE](https://github.com/erkyrath/glulxe/blob/master/LICENSE)
+- Quixe/GlkOte: [Quixe](https://github.com/erkyrath/quixe), [GlkOte](https://github.com/erkyrath/glkote)
+- RemGlk: [C implementation](https://github.com/erkyrath/remglk), [Rust implementation](https://github.com/curiousdannii/remglk-rs)
+- Gargoyle: [repository](https://github.com/garglk/garglk), [README](https://github.com/garglk/garglk/blob/master/README.md)
+- Rust registry: [glulxe](https://crates.io/crates/glulxe), [glulxe-sys](https://crates.io/crates/glulxe-sys), [glk](https://crates.io/crates/glk), [glk-sys](https://crates.io/crates/glk-sys)
