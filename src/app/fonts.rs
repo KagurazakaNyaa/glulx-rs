@@ -115,7 +115,7 @@ impl Fonts {
         let context = context.clone();
         let metrics: TextMetrics = Arc::new(move |style| {
             let font = egui::FontId::new(style.font_size, family(style));
-            context.fonts(|fonts| {
+            context.fonts_mut(|fonts| {
                 [
                     fonts.glyph_width(&font, '0').ceil() as u32,
                     fonts.row_height(&font).ceil() as u32,
@@ -214,8 +214,8 @@ fn add_light_faces(
         {
             continue;
         }
-        // Validate with egui's outline parser too; metadata alone is not proof
-        // that the face can be rendered by this host.
+        // Independently validate outlines at the same collection index;
+        // weight metadata alone is not evidence of a usable font face.
         let Ok(font) = FontVec::try_from_vec_and_index(bytes.clone(), index) else {
             continue;
         };
@@ -245,8 +245,8 @@ fn add_font(
         return Err("Font file exceeds 64 MiB".to_owned());
     }
     let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
-    // Use exactly the parser/index which egui will use. Reject unsupported or
-    // malformed font data here instead of allowing egui to panic on a repaint.
+    // Validate outline data at the collection index supplied to egui. Keep
+    // malformed or unsupported fonts out of the host's fallback definitions.
     let font = FontVec::try_from_vec_and_index(bytes, 0).map_err(|error| error.to_string())?;
     definitions.font_data.insert(
         name.to_owned(),
@@ -459,8 +459,8 @@ mod tests {
         assert!(support('文'));
         let context = egui::Context::default();
         context.set_fonts(definitions);
-        let _ = context.run(egui::RawInput::default(), |context| {
-            context.fonts(|fonts| {
+        let output = context.run_ui(egui::RawInput::default(), |ui| {
+            ui.fonts_mut(|fonts| {
                 for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
                     let font = egui::FontId::new(18.0, family);
                     assert!(fonts.has_glyph(&font, '中'));
@@ -469,6 +469,7 @@ mod tests {
                 }
             });
         });
+        output.drop_without_applying_deltas();
     }
 
     #[test]
@@ -500,16 +501,26 @@ mod tests {
         }
         let context = egui::Context::default();
         context.set_fonts(definitions);
-        let _ = context.run(egui::RawInput::default(), |context| {
-            context.fonts(|fonts| {
+        let output = context.run_ui(egui::RawInput::default(), |ui| {
+            ui.fonts_mut(|fonts| {
                 for family in &families {
                     let font = egui::FontId::new(18.0, family.clone());
-                    assert!(fonts.has_glyph(&font, 'A'));
-                    let text = fonts.layout_no_wrap("A".to_owned(), font, egui::Color32::BLACK);
+                    // Egui 0.36's has_glyph compares fallback face identities,
+                    // so a single-face family falsely rejects all its glyphs.
+                    // Compare rendered A with the actual replacement instead.
+                    let text =
+                        fonts.layout_no_wrap("A".to_owned(), font.clone(), egui::Color32::BLACK);
+                    let missing =
+                        fonts.layout_no_wrap("\u{10ffff}".to_owned(), font, egui::Color32::BLACK);
                     assert!(!text.rows[0].visuals.mesh.vertices.is_empty());
+                    assert_ne!(
+                        text.rows[0].visuals.mesh.vertices,
+                        missing.rows[0].visuals.mesh.vertices
+                    );
                 }
             });
         });
+        output.drop_without_applying_deltas();
     }
 
     #[test]

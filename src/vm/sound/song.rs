@@ -456,10 +456,14 @@ mod tests {
             let resumed: Vec<_> = source(3, offset).collect();
             assert_eq!(resumed, repeated[skipped.min(repeated.len())..]);
         }
-        let normalized: Vec<f32> =
-            rodio::source::UniformSourceIterator::new(source(3, 0), 2, 44100).collect();
+        let normalized: Vec<f32> = rodio::source::UniformSourceIterator::new(
+            source(3, 0),
+            rodio::ChannelCount::new(2).unwrap(),
+            rodio::SampleRate::new(44100).unwrap(),
+        )
+        .collect();
         assert_eq!(normalized, repeated);
-        assert_eq!(source(1, 0).channels(), 2);
+        assert_eq!(source(1, 0).channels().get(), 2);
     }
 
     #[test]
@@ -497,7 +501,7 @@ mod tests {
                 repeats,
             )
         };
-        let (sink, mut output) = Sink::new_idle();
+        let (sink, mut output) = Sink::new();
         sink.pause();
         sink.append(new_source(2));
         vm.channels.insert(
@@ -534,7 +538,7 @@ mod tests {
         assert_eq!(vm.events.pop_front(), Some([7, 0, 7, 99]));
         vm.poll_sound();
         assert!(vm.events.is_empty());
-        let (sink, mut output) = Sink::new_idle();
+        let (sink, mut output) = Sink::new();
         sink.append(new_source(u32::MAX));
         let channel = vm.channels.get_mut(&1).unwrap();
         channel.sink = Some(sink);

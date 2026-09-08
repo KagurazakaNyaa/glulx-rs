@@ -53,7 +53,7 @@ Evidence: [window tree](../src/vm/windows.rs), [streams](../src/vm/streams.rs), 
 
 ## Validation and Maintenance
 
-- [x] 180 Rust tests (178 library and 2 CLI) pass; domain-specific matrices and edge-case coverage are in the validation record.
+- [x] 181 Rust tests (179 library and 2 CLI) pass; domain-specific matrices and edge-case coverage are in the validation record.
 - [x] Final integrated Glulxercise general, single-precision, and double-precision runs yielded 92 passing sections, passing all three rounds; an earlier random-distribution threshold failure is also retained in the validation record.
 - [x] All 94 results for Inform acceleration functions 1–13 exactly match Glulxe; the synthetic media story verifies image reflow, clicks, MOD completion events, and session restoration.
 - [x] Pinned Glulxe/CheapGlk revisions, synthetic-story and Adventure bidirectional save validation, and exact normalized Unicode/resource-stream output comparison.

@@ -5,41 +5,340 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish the Cargo version after every platform passes"
+        type: boolean
+        required: true
+        default: false
 
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
 jobs:
+  metadata:
+    # Utility jobs use the current image; they do not establish the binary ABI baseline.
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      commit: ${{ steps.version.outputs.commit }}
+    steps:
+      # Official latest stable major, checked 2026-09-08 (v7.0.1).
+      # Follow compatible minor/patch updates rather than an immutable action pin.
+      - uses: actions/checkout@v7
+      # Official latest stable major, checked 2026-09-08 (v7.0.0).
+      # Follow compatible minor/patch updates rather than an immutable action pin.
+      - uses: actions/setup-python@v7
+        with:
+          # Resolve the latest stable Python 3, even when the runner caches an older one.
+          python-version: "3.x"
+          check-latest: true
+          allow-prereleases: false
+      - name: Validate version, tag and release notes
+        id: version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import os, pathlib, re, subprocess, tomllib
+          version = tomllib.loads(pathlib.Path("Cargo.toml").read_text())["package"]["version"]
+          if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?", version):
+              raise SystemExit(f"Invalid release version: {version!r}")
+          tag = f"v{version}"
+          if os.environ["REF_TYPE"] == "tag" and os.environ["REF_NAME"] != tag:
+              raise SystemExit(f"Tag {os.environ['REF_NAME']} does not match Cargo version {tag}")
+          for suffix in (".md", ".ZH.md"):
+              notes = pathlib.Path(f"docs/releases/{version}{suffix}")
+              if not notes.is_file():
+                  raise SystemExit(f"Missing release notes: {notes}")
+          commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              for key, value in (("version", version), ("tag", tag), ("commit", commit)):
+                  output.write(f"{key}={value}\n")
+          print(f"Checking {tag} at {commit}; no tag or release is created in this job.")
+          PY
+
   build:
+    needs: metadata
     strategy:
       fail-fast: false
       matrix:
+        # Runner labels/architectures: https://github.com/actions/runner-images#available-images
         include:
-          - os: ubuntu-latest
-            artifact: glulx-rs-linux-x86_64
-            binary: target/release/glulx-rs
+          # Compatibility exception: build/test the Linux package on glibc 2.35.
+          # The independent ubuntu-latest job also has to pass before publication.
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          # Latest available Intel image checked 2026-09-08; unqualified latest is ARM64.
+          - os: macos-26-intel
+            target: x86_64-apple-darwin
+          # Follow the newest stable macOS ARM64 runner image.
           - os: macos-latest
-            artifact: glulx-rs-macos-aarch64
-            binary: target/release/glulx-rs
+            target: aarch64-apple-darwin
+          # Follow the newest Windows image while retaining an x86-64 MSVC executable.
           - os: windows-latest
-            artifact: glulx-rs-windows-x86_64.exe
-            binary: target/release/glulx-rs.exe
+            target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
+    env:
+      CARGO_TERM_COLOR: always
+      BUILD_TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.metadata.outputs.version }}
+      # Set the binary deployment target while building with the current SDK.
+      # This does not select the runner OS or certify macOS 13 on-device behavior.
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
     steps:
-      - uses: actions/checkout@v4
+      # Official latest stable major, checked 2026-09-08 (v7.0.1).
+      # Follow compatible minor/patch updates rather than an immutable action pin.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.metadata.outputs.commit }}
+      # Use the latest stable Rust; Cargo enforces the rust-version 1.95 minimum.
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
-      - name: Install Linux window dependencies
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libasound2-dev
-      - run: cargo test --all-targets
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo build --release
-      - name: Stage single binary
-        shell: bash
-        run: cp "${{ matrix.binary }}" "${{ matrix.artifact }}"
-      - uses: actions/upload-artifact@v4
+          components: clippy, rustfmt
+          targets: ${{ matrix.target }}
+      # Official latest stable major, checked 2026-09-08 (v7.0.0).
+      # Follow compatible minor/patch updates rather than an immutable action pin.
+      - uses: actions/setup-python@v7
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}
+          # Resolve the latest stable Python 3, even when the runner caches an older one.
+          python-version: "3.x"
+          check-latest: true
+          allow-prereleases: false
+      - name: Install Linux window and audio dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libxkbcommon-dev libwayland-dev libasound2-dev libx11-dev libxrandr-dev libxi-dev libgl1-mesa-dev
+      - name: Link the Windows CRT statically
+        if: runner.os == 'Windows'
+        # Reduce the standalone executable's dependency on an installed VC Redistributable.
+        # Explicit --target below keeps this target flag off host proc-macros/build scripts.
+        run: printf '%s\n' 'RUSTFLAGS=-C target-feature=+crt-static' >> "$GITHUB_ENV"
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      # Manifests keep compatible version ranges; Cargo.lock records the latest tested resolution.
+      # --locked makes testing, linting and packaging use that same exact dependency set.
+      - name: Test
+        run: cargo test --locked --all-targets --target "$BUILD_TARGET"
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --target "$BUILD_TARGET" -- -D warnings
+      - name: Build release binary
+        run: cargo build --locked --release --target "$BUILD_TARGET"
+      - name: Smoke test the native release executable
+        # Run the same binary that is packaged, exercising main and platform console setup.
+        run: |
+          python - <<'PY'
+          import os, pathlib, subprocess
+          target = os.environ["BUILD_TARGET"]
+          name = "glulx-rs.exe" if target.endswith("windows-msvc") else "glulx-rs"
+          binary = (pathlib.Path("target") / target / "release" / name).resolve()
+          result = subprocess.run([str(binary), "--help"], stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT, text=True, timeout=30)
+          print(result.stdout, end="")
+          result.check_returncode()
+          if "Usage: glulx-rs" not in result.stdout:
+              raise SystemExit("The release executable did not print its CLI help.")
+          PY
+      - name: Package executable and license
+        # The preceding native checks exercise the executable users will download.
+        run: |
+          python - <<'PY'
+          import os, pathlib, shutil, tarfile, zipfile
+          target = os.environ["BUILD_TARGET"]
+          version = os.environ["VERSION"]
+          windows = target.endswith("windows-msvc")
+          binary = "glulx-rs.exe" if windows else "glulx-rs"
+          stem = f"glulx-rs-v{version}-{target}"
+          directory = pathlib.Path("package") / stem
+          directory.mkdir(parents=True, exist_ok=True)
+          shutil.copy2(pathlib.Path("target") / target / "release" / binary, directory / binary)
+          shutil.copy2("LICENSE", directory / "LICENSE")
+          (directory / binary).chmod(0o755)
+          (directory / "LICENSE").chmod(0o644)
+          output = pathlib.Path("dist")
+          output.mkdir(exist_ok=True)
+          if windows:
+              archive = output / f"{stem}.zip"
+              with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as package:
+                  for path in sorted(directory.iterdir()):
+                      package.write(path, f"{stem}/{path.name}")
+          else:
+              archive = output / f"{stem}.tar.gz"
+              with tarfile.open(archive, "w:gz") as package:
+                  package.add(directory, arcname=stem)
+          print(archive)
+          PY
+      - name: Exercise native terminal input and cleanup
+        if: runner.os != 'Windows'
+        # Python PTYs let Linux/macOS validate the actual terminal host without a GUI.
+        # Windows uses a different console API; its GUI/console on-device checks remain separate.
+        run: python tools/check-terminal.py --candidate "target/$BUILD_TARGET/release/glulx-rs" --output terminal-validation
+      - name: Preserve terminal validation output
+        if: always() && runner.os != 'Windows'
+        # Use the same current stable upload action as the binary artifacts below.
+        uses: actions/upload-artifact@v7
+        with:
+          name: terminal-validation-${{ matrix.target }}
+          path: terminal-validation/
+          if-no-files-found: ignore
+      # Official latest stable major, checked 2026-09-08 (v7.0.1).
+      # Follow compatible minor/patch updates rather than an immutable action pin.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: glulx-rs-${{ needs.metadata.outputs.tag }}-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          overwrite: true
+
+  # Check the current Linux environment as well as the older release ABI baseline.
+  # This job must pass before publication.
+  linux-latest:
+    needs: metadata
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      # Official latest stable major, checked 2026-09-08 (v7.0.1).
+      # Follow compatible minor/patch updates rather than an immutable action pin.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.metadata.outputs.commit }}
+      # Use the latest stable Rust; Cargo enforces the rust-version 1.95 minimum.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Install Linux window and audio dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libxkbcommon-dev libwayland-dev libasound2-dev libx11-dev libxrandr-dev libxi-dev libgl1-mesa-dev
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      # Keep Cargo.toml version ranges and the tested Cargo.lock resolution distinct.
+      # --locked prevents this current-OS check from silently selecting other dependencies.
+      - name: Test on current Ubuntu
+        run: cargo test --locked --all-targets
+      - name: Clippy on current Ubuntu
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+  publish:
+    needs: [metadata, build, linux-latest]
+    if: ${{ success() && (github.event_name == 'push' || inputs.publish) }}
+    # Publication only assembles checked artifacts, so use the current Linux image.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: release-publish-${{ needs.metadata.outputs.tag }}
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.metadata.outputs.version }}
+      RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
+      RELEASE_COMMIT: ${{ needs.metadata.outputs.commit }}
+    steps:
+      # Official latest stable major, checked 2026-09-08 (v7.0.1).
+      # Follow compatible minor/patch updates rather than an immutable action pin.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.metadata.outputs.commit }}
+      # Official latest stable major, checked 2026-09-08 (v7.0.0).
+      # Follow compatible minor/patch updates rather than an immutable action pin.
+      - uses: actions/setup-python@v7
+        with:
+          # Resolve the latest stable Python 3, even when the runner caches an older one.
+          python-version: "3.x"
+          check-latest: true
+          allow-prereleases: false
+      # Official latest stable major, checked 2026-09-08 (v8.0.1).
+      # Follow compatible minor/patch updates rather than an immutable action pin.
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: glulx-rs-${{ needs.metadata.outputs.tag }}-*
+          merge-multiple: true
+          path: dist
+      - name: Check archives, generate checksums and resolve notes links
+        run: |
+          python - <<'PY'
+          import hashlib, os, pathlib, posixpath, re, urllib.parse
+          version, tag = os.environ["VERSION"], os.environ["RELEASE_TAG"]
+          targets = {
+              "x86_64-unknown-linux-gnu": ".tar.gz",
+              "x86_64-apple-darwin": ".tar.gz",
+              "aarch64-apple-darwin": ".tar.gz",
+              "x86_64-pc-windows-msvc": ".zip",
+          }
+          expected = {f"glulx-rs-v{version}-{target}{suffix}" for target, suffix in targets.items()}
+          files = {path.name: path for path in pathlib.Path("dist").iterdir() if path.is_file()}
+          if set(files) != expected or any(path.stat().st_size == 0 for path in files.values()):
+              raise SystemExit(f"Expected all four release archives; received {sorted(files)}")
+          checksums = "".join(f"{hashlib.file_digest(files[name].open('rb'), 'sha256').hexdigest()}  {name}\n" for name in sorted(files))
+          pathlib.Path("dist/SHA256SUMS").write_text(checksums, encoding="utf-8")
+          notes_path = pathlib.Path(f"docs/releases/{version}.md")
+          notes = notes_path.read_text(encoding="utf-8")
+          def resolve(match):
+              target = match.group(1)
+              if urllib.parse.urlsplit(target).scheme or target.startswith(("#", "/")):
+                  return match.group(0)
+              path = posixpath.normpath(posixpath.join(notes_path.parent.as_posix(), target))
+              url = f"https://github.com/{os.environ['GH_REPO']}/blob/{urllib.parse.quote(tag, safe='')}/{urllib.parse.quote(path, safe='/#')}"
+              return f"]({url})"
+          notes = re.sub(r"\]\(([^\s)]+)\)", resolve, notes)
+          pathlib.Path("release-body.md").write_text(notes, encoding="utf-8")
+          PY
+      - name: Verify existing tag and upload draft release
+        run: |
+          remote_tag="$(git ls-remote --tags origin "refs/tags/$RELEASE_TAG")"
+          if [[ -n "$remote_tag" ]]; then
+            git fetch --no-tags origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+            if [[ "$(git rev-parse "$RELEASE_TAG^{commit}")" != "$RELEASE_COMMIT" ]]; then
+              echo "Existing tag points at another commit; refusing to publish." >&2
+              exit 1
+            fi
+          fi
+          if gh release view "$RELEASE_TAG" --json isDraft,targetCommitish > existing-release.json; then
+            python - <<'PY'
+          import json, os
+          release = json.load(open("existing-release.json", encoding="utf-8"))
+          if not release["isDraft"] or release["targetCommitish"] != os.environ["RELEASE_COMMIT"]:
+              raise SystemExit("Only an unfinished draft for this exact commit can be resumed.")
+          PY
+            gh release edit "$RELEASE_TAG" --title "glulx-rs $VERSION" --notes-file release-body.md
+            gh release upload "$RELEASE_TAG" dist/* --clobber
+          else
+            args=(--draft --target "$RELEASE_COMMIT" --title "glulx-rs $VERSION" --notes-file release-body.md)
+            if [[ "$VERSION" == *-* ]]; then args+=(--prerelease); fi
+            gh release create "$RELEASE_TAG" dist/* "${args[@]}"
+          fi
+      - name: Verify every uploaded asset and publish
+        run: |
+          release_id="$(gh release view "$RELEASE_TAG" --json databaseId --jq .databaseId)"
+          gh api "repos/$GH_REPO/releases/$release_id" > uploaded-release.json
+          python - <<'PY'
+          import hashlib, json, pathlib
+          release = json.load(open("uploaded-release.json", encoding="utf-8"))
+          files = {path.name: path for path in pathlib.Path("dist").iterdir() if path.is_file()}
+          assets = {asset["name"]: asset for asset in release["assets"]}
+          if not release["draft"] or set(assets) != set(files):
+              raise SystemExit("Draft release assets do not match the complete build output.")
+          for name, path in files.items():
+              asset = assets[name]
+              if asset["state"] != "uploaded" or asset["size"] != path.stat().st_size:
+                  raise SystemExit(f"Incomplete asset upload: {name}")
+              digest = asset.get("digest")
+              if digest and digest != "sha256:" + hashlib.file_digest(path.open("rb"), "sha256").hexdigest():
+                  raise SystemExit(f"Uploaded checksum mismatch: {name}")
+          PY
+          gh release edit "$RELEASE_TAG" --draft=false
+          gh release view "$RELEASE_TAG" --json url --jq '.url' >> "$GITHUB_STEP_SUMMARY"

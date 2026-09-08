@@ -40,7 +40,7 @@ fn main() {
         let millis: u64 = arguments[1].parse().unwrap();
         let bytes = std::fs::read(path).unwrap();
         let source = sampled::SampledSource::new(&bytes, 1, 0).unwrap();
-        let (rate, channels) = (source.sample_rate(), source.channels());
+        let (rate, channels) = (source.sample_rate().get(), source.channels().get());
         assert_eq!((rate, channels), (44100, 2), "format: {path}");
         let duration = source.total_duration().expect("known generated duration");
         assert!(duration.abs_diff(std::time::Duration::from_millis(millis)) <= std::time::Duration::from_millis(1), "duration: {path}: {duration:?}");
@@ -54,7 +54,7 @@ fn main() {
         assert_eq!(resumed, twice[skipped..], "resume: {path}");
         let infinite: Vec<_> = sampled::SampledSource::new(&bytes, u32::MAX, 0).unwrap().take(twice.len()).collect();
         assert_eq!(infinite, twice, "infinite: {path}");
-        let converted: Vec<f32> = rodio::source::UniformSourceIterator::new(sampled::SampledSource::new(&bytes, 2, 0).unwrap(), channels, rate).collect();
+        let converted: Vec<f32> = rodio::source::UniformSourceIterator::new(sampled::SampledSource::new(&bytes, 2, 0).unwrap(), rodio::ChannelCount::new(channels).unwrap(), rodio::SampleRate::new(rate).unwrap()).collect();
         assert_eq!(converted, twice, "playback conversion: {path}");
         println!("{}: {} samples, {} Hz, {} channels; duration/repeats/resume/conversion passed", std::path::Path::new(path).file_name().unwrap().to_string_lossy(), once.len(), rate, channels);
     }

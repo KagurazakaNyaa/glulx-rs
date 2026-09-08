@@ -52,6 +52,8 @@ File → Choose resources 通过重启故事应用资源选择。交互终端中
 
 ## 构建与测试
 
+源码构建需要 Rust 1.95 或更新版本。CI 使用最新稳定 Rust；Cargo.toml 保留兼容的主／小版本范围，Cargo.lock 记录实际验证的精确版本。Runner 和 GitHub Action 的选择理由写在 [发布 workflow](.github/workflows/release.yml) 的对应注释中。
+
 除常规图形界面构建依赖外，Linux 构建还需要 ALSA 开发头文件（Debian/Ubuntu 上为 `libasound2-dev`）。
 
 ```sh

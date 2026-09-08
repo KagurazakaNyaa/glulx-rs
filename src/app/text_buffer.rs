@@ -365,7 +365,7 @@ fn measure_width(ui: &egui::Ui, rich: RichText, width: f32) -> (Arc<egui::Galley
         egui::Align::BOTTOM,
     );
     job.wrap.max_width = width;
-    let galley = ui.fonts(|fonts| fonts.layout_job(job));
+    let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
     let ascent = galley
         .rows
         .first()
@@ -813,7 +813,7 @@ mod tests {
     #[test]
     fn font_layout_keeps_style_fragments_in_one_word_and_wraps_long_words() {
         let context = egui::Context::default();
-        let _ = context.run(egui::RawInput::default(), |context| {
+        let output = context.run_ui(egui::RawInput::default(), |context| {
             egui::CentralPanel::default().show(context, |ui| {
                 let mut view = WindowView {
                     id: 1,
@@ -848,12 +848,13 @@ mod tests {
                 assert_eq!(reconstructed, view.runs[0].text);
             });
         });
+        output.drop_without_applying_deltas();
     }
 
     #[test]
     fn image_rules_recompute_on_resize_and_unlimited_images_can_be_clipped() {
         let context = egui::Context::default();
-        let _ = context.run(egui::RawInput::default(), |context| {
+        let output = context.run_ui(egui::RawInput::default(), |context| {
             egui::CentralPanel::default().show(context, |ui| {
                 let mut image = run("", 0);
                 image.image = Some(crate::vm::BufferImage {
@@ -894,5 +895,6 @@ mod tests {
                 assert_eq!(items[0].rect.intersect(clip).width(), 100.0);
             });
         });
+        output.drop_without_applying_deltas();
     }
 }

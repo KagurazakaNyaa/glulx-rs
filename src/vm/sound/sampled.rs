@@ -4,20 +4,18 @@ use std::{io::Cursor, sync::Arc, time::Duration};
 
 use rodio::Source;
 use symphonia::core::{
-    audio::SampleBuffer,
-    codecs::{Decoder, DecoderOptions},
+    codecs::audio::{AudioDecoder, AudioDecoderOptions},
     errors::Error,
-    formats::{FormatOptions, FormatReader},
+    formats::{FormatOptions, FormatReader, TrackType, probe::Hint},
     io::MediaSourceStream,
     meta::MetadataOptions,
-    probe::Hint,
 };
 
 struct PacketDecoder {
     format: Box<dyn FormatReader>,
-    decoder: Box<dyn Decoder>,
+    decoder: Box<dyn AudioDecoder>,
     track_id: u32,
-    samples: Option<SampleBuffer<i16>>,
+    samples: Vec<i16>,
     offset: usize,
     channels: u16,
     sample_rate: u32,
@@ -27,44 +25,41 @@ struct PacketDecoder {
 
 impl PacketDecoder {
     fn new(bytes: Arc<[u8]>) -> Option<Self> {
-        // Cursor exposes the encoded byte length. Rodio 0.20's adapter hides
-        // it, preventing Ogg from inspecting the final granule and trimming
-        // codec padding. The payload remains shared between repetitions.
+        // Expose the encoded length so containers can find their final frame
+        // count and trim padding. Repetitions share the encoded payload.
         let input = MediaSourceStream::new(Box::new(Cursor::new(bytes)), Default::default());
-        let options = FormatOptions {
-            enable_gapless: true,
-            ..Default::default()
-        };
+        let options = FormatOptions::default();
         let format = symphonia::default::get_probe()
-            .format(&Hint::new(), input, &options, &MetadataOptions::default())
-            .ok()?
-            .format;
-        let track = format.default_track()?;
-        let decoder = symphonia::default::get_codecs()
-            .make(&track.codec_params, &DecoderOptions::default())
+            .probe(&Hint::new(), input, options, MetadataOptions::default())
             .ok()?;
-        let duration = track
-            .codec_params
-            .time_base
-            .zip(track.codec_params.n_frames)
-            .map(|(base, frames)| {
-                let time = base.calc_time(frames);
-                Duration::from_secs(time.seconds) + Duration::from_secs_f64(time.frac)
-            });
+        let track = format.default_track(TrackType::Audio)?;
+        let decoder = symphonia::default::get_codecs()
+            .make_audio_decoder(
+                track.codec_params.as_ref()?.audio()?,
+                &AudioDecoderOptions::default(),
+            )
+            .ok()?;
         let track_id = track.id;
-        let frames = track.codec_params.n_frames;
+        let frames = track.num_frames;
         let mut result = Self {
             format,
             decoder,
             track_id,
-            samples: None,
+            samples: Vec::new(),
             offset: 0,
             channels: 0,
             sample_rate: 0,
-            duration,
+            duration: None,
             remaining_samples: None,
         };
         result.refill()?;
+        if result.sample_rate != 0 {
+            result.duration = frames.map(|frames| {
+                let rate = u64::from(result.sample_rate);
+                Duration::from_secs(frames / rate)
+                    + Duration::from_nanos(frames % rate * 1_000_000_000 / rate)
+            });
+        }
         // The container's integral frame count excludes codec padding. Ogg
         // streams whose audio fits on one page can have their packets queued
         // before Symphonia has discovered the final granule's trim boundary.
@@ -76,8 +71,8 @@ impl PacketDecoder {
     fn refill(&mut self) -> Option<()> {
         let mut errors = 0;
         loop {
-            let packet = self.format.next_packet().ok()?;
-            if packet.track_id() != self.track_id {
+            let packet = self.format.next_packet().ok()??;
+            if packet.track_id != self.track_id {
                 continue;
             }
             let decoded = match self.decoder.decode(&packet) {
@@ -93,13 +88,17 @@ impl PacketDecoder {
             if decoded.frames() == 0 {
                 continue;
             }
-            let spec = *decoded.spec();
-            let mut samples = SampleBuffer::new(decoded.capacity() as u64, spec);
-            samples.copy_interleaved_ref(decoded);
-            self.samples = Some(samples);
+            let spec = decoded.spec();
+            let channels = u16::try_from(spec.channels().count()).ok()?;
+            let sample_rate = spec.rate();
+            if channels == 0 || sample_rate == 0 {
+                return None;
+            }
+            self.samples.resize(decoded.samples_interleaved(), 0);
+            decoded.copy_to_slice_interleaved(&mut self.samples);
             self.offset = 0;
-            self.channels = spec.channels.count().try_into().ok()?;
-            self.sample_rate = spec.rate;
+            self.channels = channels;
+            self.sample_rate = sample_rate;
             return Some(());
         }
     }
@@ -108,10 +107,10 @@ impl PacketDecoder {
         if self.remaining_samples == Some(0) {
             return None;
         }
-        if self.offset >= self.samples.as_ref()?.len() {
+        if self.offset >= self.samples.len() {
             self.refill()?;
         }
-        let sample = self.samples.as_ref()?.samples()[self.offset];
+        let sample = self.samples[self.offset];
         self.offset += 1;
         if let Some(remaining) = &mut self.remaining_samples {
             *remaining -= 1;
@@ -210,17 +209,17 @@ impl Iterator for SampledSource {
 }
 
 impl Source for SampledSource {
-    fn current_frame_len(&self) -> Option<usize> {
+    fn current_span_len(&self) -> Option<usize> {
         // Decoder packets and resource repetitions keep the same sample
         // format. Reporting them as separate Source frames would restart
         // Rodio's resampler and accumulate fractional-sample drift.
         None
     }
-    fn channels(&self) -> u16 {
-        self.decoder.channels
+    fn channels(&self) -> rodio::ChannelCount {
+        rodio::ChannelCount::new(self.decoder.channels).unwrap()
     }
-    fn sample_rate(&self) -> u32 {
-        self.decoder.sample_rate
+    fn sample_rate(&self) -> rodio::SampleRate {
+        rodio::SampleRate::new(self.decoder.sample_rate).unwrap()
     }
     fn total_duration(&self) -> Option<Duration> {
         self.duration
@@ -319,8 +318,12 @@ mod tests {
             .collect();
         let bytes = wave(44100, 2, &samples);
         let source = SampledSource::new(&bytes, 3, 0).unwrap();
-        let converted: Vec<f32> =
-            rodio::source::UniformSourceIterator::new(source, 2, 44100).collect();
+        let converted: Vec<f32> = rodio::source::UniformSourceIterator::new(
+            source,
+            rodio::ChannelCount::new(2).unwrap(),
+            rodio::SampleRate::new(44100).unwrap(),
+        )
+        .collect();
         let expected: Vec<_> = samples
             .iter()
             .map(|sample| *sample as f32 / 32768.0)
@@ -336,16 +339,27 @@ mod tests {
                 .collect();
             let bytes = wave(rate, 2, &samples);
             let source = SampledSource::new(&bytes, 3, 0).unwrap();
-            let actual: Vec<f32> =
-                rodio::source::UniformSourceIterator::new(source, 2, 44100).collect();
+            let actual: Vec<f32> = rodio::source::UniformSourceIterator::new(
+                source,
+                rodio::ChannelCount::new(2).unwrap(),
+                rodio::SampleRate::new(44100).unwrap(),
+            )
+            .collect();
             let expected_pcm: Vec<f32> = samples
                 .iter()
                 .map(|sample| *sample as f32 / 32768.0)
                 .collect::<Vec<_>>()
                 .repeat(3);
-            let baseline = rodio::buffer::SamplesBuffer::new(2, rate, expected_pcm);
-            let expected: Vec<f32> =
-                rodio::source::UniformSourceIterator::new(baseline, 2, 44100).collect();
+            // Use one uninterrupted PCM iterator as the oracle. Rodio 0.22's
+            // SamplesBuffer exposes a finite span that UniformSourceIterator
+            // splits at 32768 samples, resetting the resampler at that cut.
+            let expected: Vec<f32> = rodio::conversions::SampleRateConverter::new(
+                expected_pcm.into_iter(),
+                rodio::SampleRate::new(rate).unwrap(),
+                rodio::SampleRate::new(44100).unwrap(),
+                rodio::ChannelCount::new(2).unwrap(),
+            )
+            .collect();
             assert_eq!(actual.len(), expected.len(), "{rate} Hz sample count");
             assert!(actual == expected, "{rate} Hz resampling phase");
         }

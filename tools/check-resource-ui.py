@@ -127,29 +127,29 @@ class Desktop:
         time.sleep(.2)
 
     def choose_resources(self, choice, path=None, browse=False, directory=False):
-        # Fresh XDG settings and a fixed 1100x760 viewport keep egui controls
-        # at these positions. This exercises the same visible UI as a player.
+        # Fresh XDG settings and a fixed 1100x760 viewport keep egui 0.36
+        # controls at these positions, including its updated dialog origin.
         self.click(18, 12)
         self.click(100, 58)
-        self.click(30, [127, 147, 168][choice])
+        self.click(30, [84, 105, 126][choice])
         if choice == 2:
             if browse:
-                self.click(340, 190)
-                self.type_path(180, 319, path)
+                self.click(340, 147)
+                self.type_path(180, 278, path)
                 self.keys('key', 'Return')
                 time.sleep(.35)
                 if directory:
-                    self.click(80, 340)
+                    self.click(80, 299)
             else:
-                self.type_path(170, 190, path)
+                self.type_path(170, 147, path)
         self.screenshot('selection')
-        self.click(100, 237 if choice == 2 else 216)
+        self.click(100, 197 if choice == 2 else 176)
         time.sleep(.7)
 
     def open_story(self, path):
         self.click(18, 12)
         self.click(70, 37)
-        self.type_path(180, 110, path)
+        self.type_path(180, 65, path)
         self.keys('key', 'Return')
         time.sleep(.7)
 

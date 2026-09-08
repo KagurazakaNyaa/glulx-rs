@@ -902,11 +902,13 @@ impl Vm {
                 let sum = self
                     .story
                     .image
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .enumerate()
                     .filter(|(index, _)| *index != 8)
                     .fold(0u32, |sum, (_, bytes)| {
-                        sum.wrapping_add(u32::from_be_bytes(bytes.try_into().unwrap()))
+                        sum.wrapping_add(u32::from_be_bytes(*bytes))
                     });
                 store!(0, u32::from(sum != self.story.header.checksum));
             }
@@ -2685,8 +2687,10 @@ mod tests {
     fn update_checksum(image: &mut [u8]) {
         image[32..36].fill(0);
         let checksum = image
-            .chunks_exact(4)
-            .map(|word| u32::from_be_bytes(word.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|word| u32::from_be_bytes(*word))
             .fold(0u32, u32::wrapping_add);
         image[32..36].copy_from_slice(&checksum.to_be_bytes());
     }

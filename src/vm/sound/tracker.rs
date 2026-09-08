@@ -117,14 +117,14 @@ impl Iterator for ModSource {
 }
 
 impl Source for ModSource {
-    fn current_frame_len(&self) -> Option<usize> {
+    fn current_span_len(&self) -> Option<usize> {
         None
     }
-    fn channels(&self) -> u16 {
-        2
+    fn channels(&self) -> rodio::ChannelCount {
+        rodio::ChannelCount::new(2).unwrap()
     }
-    fn sample_rate(&self) -> u32 {
-        SAMPLE_RATE
+    fn sample_rate(&self) -> rodio::SampleRate {
+        rodio::SampleRate::new(SAMPLE_RATE).unwrap()
     }
     fn total_duration(&self) -> Option<Duration> {
         None
@@ -158,8 +158,8 @@ mod tests {
     #[test]
     fn mod_renders_pcm_speed_volume_and_song_end() {
         let source = ModSource::new(&module(), 1).unwrap();
-        assert_eq!(source.channels(), 2);
-        assert_eq!(source.sample_rate(), SAMPLE_RATE);
+        assert_eq!(source.channels().get(), 2);
+        assert_eq!(source.sample_rate().get(), SAMPLE_RATE);
         let samples: Vec<_> = source.collect();
         // Default 125 BPM: 20 ms/tick, three 3-tick rows = 180 ms.
         assert_eq!(samples.len(), 15_876);
@@ -252,8 +252,8 @@ mod tests {
             assert_eq!(twice, once.repeat(2), "{name} repeated playback");
             let converted: Vec<f32> = rodio::source::UniformSourceIterator::new(
                 ModSource::new(&bytes, 2).unwrap(),
-                2,
-                SAMPLE_RATE,
+                rodio::ChannelCount::new(2).unwrap(),
+                rodio::SampleRate::new(SAMPLE_RATE).unwrap(),
             )
             .collect();
             assert_eq!(converted, twice, "{name} playback conversion");

@@ -82,6 +82,11 @@ settings and are never embedded in release artifacts.
 
 ## Build And Test
 
+Building from source requires Rust 1.95 or newer. CI uses the latest stable Rust;
+Cargo.toml declares compatible major/minor ranges and Cargo.lock records the exact
+validated versions. Runner and GitHub Action choices are explained inline in
+[the release workflow](.github/workflows/release.yml).
+
 Linux builds require ALSA development headers (`libasound2-dev` on Debian/Ubuntu),
 in addition to the usual graphical build dependencies.
 

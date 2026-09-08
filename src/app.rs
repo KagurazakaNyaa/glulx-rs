@@ -614,11 +614,11 @@ impl PlayerApp {
         self.status = "Error".to_owned();
     }
 
-    fn menu_bar(&mut self, context: &egui::Context) {
+    fn menu_bar(&mut self, root: &mut egui::Ui) {
         if !self.settings.show_chrome {
             return;
         }
-        egui::TopBottomPanel::top("menu").show(context, |ui| {
+        egui::Panel::top("menu").show(root, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("Open story...").clicked() {
@@ -682,7 +682,7 @@ impl PlayerApp {
                 });
             });
         });
-        egui::TopBottomPanel::top("toolbar").show(context, |ui| {
+        egui::Panel::top("toolbar").show(root, |ui| {
             ui.horizontal(|ui| {
                 if ui
                     .button("Open")
@@ -722,19 +722,20 @@ impl PlayerApp {
         });
     }
 
-    fn story_view(&mut self, context: &egui::Context) {
-        let accept_input = !self.dialog_open(context);
+    fn story_view(&mut self, root: &mut egui::Ui) {
+        let context = root.ctx().clone();
+        let accept_input = !self.dialog_open(&context);
         let background = rgb(self.settings.background_color);
         if self.settings.translation.enabled {
-            egui::SidePanel::right("translation")
-                .default_width(360.0)
-                .width_range(240.0..=640.0)
+            egui::Panel::right("translation")
+                .default_size(360.0)
+                .size_range(240.0..=640.0)
                 .frame(
                     egui::Frame::new()
                         .fill(Color32::from_rgb(242, 245, 247))
                         .inner_margin(16.0),
                 )
-                .show(context, |ui| {
+                .show(root, |ui| {
                     ui.heading("Translation");
                     ui.separator();
                     egui::ScrollArea::vertical()
@@ -768,7 +769,7 @@ impl PlayerApp {
                     .fill(background)
                     .inner_margin(egui::Margin::symmetric(28, 22)),
             )
-            .show(context, |ui| {
+            .show(root, |ui| {
                 if self.vm.is_none() {
                     ui.vertical_centered(|ui| {
                         ui.add_space((ui.available_height() * 0.28).max(40.0));
@@ -792,7 +793,7 @@ impl PlayerApp {
                 } else {
                     Vec::new()
                 };
-                self.poll_graphics(context);
+                self.poll_graphics(&context);
                 let mut click = None;
                 let mut hyperlink = None;
                 let mut grid_submitted = false;
@@ -958,19 +959,19 @@ impl PlayerApp {
         }
     }
 
-    fn input_bar(&mut self, context: &egui::Context) {
-        let accept_input = !self.dialog_open(context);
+    fn input_bar(&mut self, root: &mut egui::Ui) {
+        let accept_input = !self.dialog_open(root.ctx());
         let request = self.vm.as_ref().and_then(Vm::input_request);
         if request.is_none() {
             return;
         }
-        egui::TopBottomPanel::bottom("input")
+        egui::Panel::bottom("input")
             .frame(
                 egui::Frame::new()
                     .fill(Color32::from_rgb(235, 237, 238))
                     .inner_margin(10.0),
             )
-            .show(context, |ui| {
+            .show(root, |ui| {
                 if !accept_input {
                     ui.disable();
                 }
@@ -1038,7 +1039,9 @@ impl PlayerApp {
                         enter = accept_input
                             && (response.has_focus() || response.lost_focus())
                             && ui.input(|input| input.key_pressed(egui::Key::Enter));
-                        if accept_input {
+                        // Re-requesting an existing focus interrupts IME in
+                        // egui 0.36 and can create a native IME/repaint loop.
+                        if accept_input && !ui.memory(|memory| memory.has_focus(response.id)) {
                             response.request_focus();
                         }
                     } else {
@@ -1064,11 +1067,11 @@ impl PlayerApp {
             });
     }
 
-    fn status_bar(&mut self, context: &egui::Context) {
+    fn status_bar(&mut self, root: &mut egui::Ui) {
         if !self.settings.show_chrome {
             return;
         }
-        egui::TopBottomPanel::bottom("status").show(context, |ui| {
+        egui::Panel::bottom("status").show(root, |ui| {
             ui.horizontal(|ui| {
                 ui.small(&self.status);
                 if let Some(path) = &self.story_path {
@@ -1322,7 +1325,24 @@ impl eframe::App for PlayerApp {
         std::time::Duration::from_secs(30)
     }
 
-    fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+        // Eframe also runs logic while the window is hidden. Keep timers,
+        // sound notifications and translation results progressing there.
+        self.run_vm();
+        self.poll_translations();
+        if self
+            .vm
+            .as_ref()
+            .is_some_and(|vm| vm.state() == RunState::Running)
+        {
+            context.request_repaint();
+        } else {
+            context.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+    }
+
+    fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let context = root.ctx().clone();
         if context.input(|input| {
             input.modifiers.ctrl && input.modifiers.alt && input.key_pressed(egui::Key::L)
         }) {
@@ -1333,7 +1353,7 @@ impl eframe::App for PlayerApp {
                 .raw
                 .dropped_files
                 .iter()
-                .filter_map(|file| file.path.clone())
+                .map(|file| file.path().to_owned())
                 .collect::<Vec<_>>()
         }) {
             if is_story_path(&path) {
@@ -1341,17 +1361,15 @@ impl eframe::App for PlayerApp {
                 break;
             }
         }
-        self.run_vm();
-        self.character_input(context);
-        self.poll_graphics(context);
-        self.poll_translations();
-        self.menu_bar(context);
+        self.character_input(&context);
+        self.poll_graphics(&context);
+        self.menu_bar(root);
 
-        self.status_bar(context);
-        self.input_bar(context);
-        self.story_view(context);
-        self.dialogs(context);
-        if let Some(path) = self.file_browser.show(context) {
+        self.status_bar(root);
+        self.input_bar(root);
+        self.story_view(root);
+        self.dialogs(&context);
+        if let Some(path) = self.file_browser.show(&context) {
             if self.file_browser.resources {
                 self.resource_path = path.display().to_string();
                 self.resource_choice = 2;
@@ -1366,8 +1384,6 @@ impl eframe::App for PlayerApp {
             .is_some_and(|vm| vm.state() == RunState::Running)
         {
             context.request_repaint();
-        } else {
-            context.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
 }

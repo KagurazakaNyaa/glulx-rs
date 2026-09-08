@@ -17,7 +17,7 @@ python3 tools/check-opcodes.py --spec /path/to/Glulx-Spec.md --output /tmp/glulx
 python3 tools/check-reference.py --reference /path/to/glulxe --candidate target/debug/glulx-rs --fixtures /path/to/fixtures
 ```
 
-Rust 测试 180 passed / 0 failed（178 个库测试、2 个 CLI 测试）；Clippy（warnings 视为错误）及 release 构建通过。
+Rust 测试 181 passed / 0 failed（179 个库测试、2 个 CLI 测试）；Clippy（warnings 视为错误）及 release 构建通过。
 脚本不下载样本、不修改仓库游戏资源；合成故事及存档使用临时目录。
 不传 `--fixtures` 仍可运行合成 IFZS 双向互操作、double stack 顺序、Inform 加速函数、零长度内存及深层字符串差分检查。
 官方 opcode 表 150/150 条分发和操作数数量匹配；官方 Glk dispatch 注册表 124/124 selectors 均有分发。这两项只证明表完整，执行语义仍需运行测试。
@@ -186,3 +186,12 @@ python3 tools/check-song-ui.py --candidate target/debug/glulx-rs --output /tmp/s
 - light 字重：元数据校验拒绝伪装成 light 的普通/损坏字体，实际安装的细字形通过命名字体族渲染，序列化后重新安装宿主可用性。Linux 桌面输出中文本缓冲区和网格的字重均为 -1，链接、原位编辑和会话恢复仍正常；缺少字体时保留普通回退。
 
 参考回归仍通过全部 10 项，包含 Glulxercise 92 个段落及 Adventure 双向存档。资源、终端和 SONG 工具生成临时原创内容，不下载游戏。
+
+
+## 依赖升级与发布准备
+
+2026-09-08 通过 crates.io 官方 API 核对全部 21 个直接依赖，锁文件均解析为最新稳定版。Cargo.toml 保留兼容的主／小版本范围，Cargo.lock 记录实际验证集合。主要适配包括 eframe/egui 0.36.1、Rodio 0.22.2、Symphonia 0.6.1 和 reqwest 0.13.4。GUI 迁移新增回归，防止重复请求焦点打断输入法；音频保留精确编码长度和连续重采样测试，以连续 PCM 迭代器作为转换基准。
+
+新版 reqwest 已用实际 HTTP/HTTPS 翻译适配器检查成功响应、认证头、限流、无效响应和缓存。发布 workflow 的就地注释记录最新稳定 Actions/工具链和最新 OS runner 的选择理由，以及 Ubuntu 22.04 构建 Linux 发行包的兼容性例外。
+
+最终本地检查使用稳定 Rust 1.98.1；优化后的 release 可执行文件也通过终端套件和全部 10 项参考检查。

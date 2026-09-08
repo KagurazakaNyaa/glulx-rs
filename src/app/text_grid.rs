@@ -95,7 +95,7 @@ fn paint_cell(
         egui::FontSelection::Default,
         egui::Align::BOTTOM,
     );
-    let galley = fit_galley(ui.fonts(|fonts| fonts.layout_job(job)), rect.width());
+    let galley = fit_galley(ui.fonts_mut(|fonts| fonts.layout_job(job)), rect.width());
     let origin = rect.min + (rect.size() - galley.size()) * 0.5;
     if style.weight > 0 {
         // Egui's `RichText::strong` only changes the text color. A second
@@ -174,14 +174,16 @@ pub(super) fn show(
                 .font(egui::FontId::monospace(input_style.font_size))
                 .text_color(color_word(input_style.foreground))
                 .char_limit(editor.maximum_length as usize)
-                .frame(false)
+                .frame(egui::Frame::NONE)
                 .margin(egui::Vec2::ZERO)
                 .desired_width(input_rect.width()),
         );
         result.changed |= response.changed();
         result.submitted = (response.has_focus() || response.lost_focus())
             && ui.input(|input| input.key_pressed(egui::Key::Enter));
-        response.request_focus();
+        if !ui.memory(|memory| memory.has_focus(response.id)) {
+            response.request_focus();
+        }
     }
     result
 }
@@ -228,7 +230,7 @@ mod tests {
     ) -> (egui::FullOutput, GridResponse) {
         let mut editor = editor;
         let mut response = GridResponse::default();
-        let output = context.run(
+        let mut output = context.run_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -245,6 +247,7 @@ mod tests {
                 });
             },
         );
+        output.textures_delta.clear();
         (output, response)
     }
 
@@ -318,6 +321,38 @@ mod tests {
     }
 
     #[test]
+    fn focused_grid_editor_does_not_repeatedly_interrupt_native_ime() {
+        let context = egui::Context::default();
+        let view = view();
+        let mut text = "xy".to_owned();
+        frame(
+            &context,
+            &view,
+            Vec::new(),
+            Some(GridEditor {
+                text: &mut text,
+                maximum_length: 8,
+            }),
+        );
+        for _ in 0..3 {
+            let (output, _) = frame(
+                &context,
+                &view,
+                Vec::new(),
+                Some(GridEditor {
+                    text: &mut text,
+                    maximum_length: 8,
+                }),
+            );
+            let ime = output
+                .platform_output
+                .ime
+                .expect("focused editor has IME state");
+            assert!(!ime.should_interrupt_composition);
+        }
+    }
+
+    #[test]
     fn grid_hit_coordinates_match_all_rendered_cells_and_exclude_margins() {
         let rect = egui::Rect::from_min_size(egui::pos2(28.0, 22.0), egui::vec2(83.0, 51.0));
         let size = [10, 3];
@@ -338,9 +373,9 @@ mod tests {
     #[test]
     fn wide_glyph_geometry_fits_exactly_inside_one_grid_cell() {
         let context = egui::Context::default();
-        let _ = context.run(egui::RawInput::default(), |ctx| {
+        let output = context.run_ui(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                let original = ui.fonts(|fonts| {
+                let original = ui.fonts_mut(|fonts| {
                     fonts.layout_no_wrap(
                         "W".to_owned(),
                         egui::FontId::monospace(32.0),
@@ -357,5 +392,6 @@ mod tests {
                 );
             });
         });
+        output.drop_without_applying_deltas();
     }
 }

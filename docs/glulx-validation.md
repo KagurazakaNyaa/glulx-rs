@@ -17,7 +17,7 @@ python3 tools/check-opcodes.py --spec /path/to/Glulx-Spec.md --output /tmp/glulx
 python3 tools/check-reference.py --reference /path/to/glulxe --candidate target/debug/glulx-rs --fixtures /path/to/fixtures
 ```
 
-Rust tests: 180 passed / 0 failed (178 library, 2 CLI); Clippy with warnings as errors and the release build passed. Scripts do not download fixtures or modify repository game resources; synthetic stories and saves use temporary directories. Without `--fixtures`, synthetic IFZS bidirectional interoperability, double stack order, Inform acceleration, zero-length memory, and deep-string differential checks still run. Dispatch and operand counts match 150/150 official opcodes; all 124/124 official Glk dispatch selectors are present. These two checks establish table completeness only; execution semantics still require runtime tests.
+Rust tests: 181 passed / 0 failed (179 library, 2 CLI); Clippy with warnings as errors and the release build passed. Scripts do not download fixtures or modify repository game resources; synthetic stories and saves use temporary directories. Without `--fixtures`, synthetic IFZS bidirectional interoperability, double stack order, Inform acceleration, zero-length memory, and deep-string differential checks still run. Dispatch and operand counts match 150/150 official opcodes; all 124/124 official Glk dispatch selectors are present. These two checks establish table completeness only; execution semantics still require runtime tests.
 
 The final integrated full script passed with:
 
@@ -160,3 +160,21 @@ python3 tools/check-song-ui.py --candidate target/debug/glulx-rs --output /tmp/s
 - Light weight: metadata checks reject falsely named regular/invalid fonts; actual installed light glyphs render in named font families, and host availability is reinstalled after serialization. Linux desktop output reports both buffer and grid weights as -1, with links, inline editing and session restoration still working. Missing faces retain regular fallback.
 
 The reference regression still passes all ten checks, including 92 Glulxercise sections and both Adventure save directions. Resource, terminal and SONG tools generate their own temporary content and do not download games.
+
+
+## Dependency and Release Preparation
+
+On 2026-09-08, all 21 direct dependencies were checked against the crates.io official
+API and resolved to their latest stable releases. Cargo.toml retains compatible
+major/minor ranges; Cargo.lock records the exact tested set. Major adaptations
+include eframe/egui 0.36.1, Rodio 0.22.2, Symphonia 0.6.1 and reqwest 0.13.4.
+The GUI migration includes a regression preventing repeated focus requests from
+interrupting the IME. Audio tests retain exact codec lengths and continuous
+resampling using one uninterrupted PCM iterator as the conversion reference.
+
+The native HTTP/HTTPS translation adapter was tested with the upgraded reqwest,
+including success, authorization headers, rate limits, invalid responses and cache.
+Release workflow comments record why current stable Actions/toolchains and latest
+OS runners are used, including the Ubuntu 22.04 Linux artifact compatibility exception.
+
+Final local verification used stable Rust 1.98.1. The optimized release executable also passed the terminal suite and all ten reference checks.

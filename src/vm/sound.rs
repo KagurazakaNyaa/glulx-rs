@@ -1,12 +1,12 @@
 use super::*;
-use rodio::{OutputStream, OutputStreamHandle, Sink, Source};
+use rodio::{DeviceSinkBuilder, MixerDeviceSink, Player as Sink, Source};
 use std::time::{Duration, Instant};
 
 mod sampled;
 mod song;
 mod tracker;
 
-type SoundOutput = rodio::queue::SourcesQueueOutput<f32>;
+type SoundOutput = rodio::queue::SourcesQueueOutput;
 
 /// One source submitted to the device for a whole play_multi call. Each idle
 /// sink supplies exactly one sample at every mixer step, so decoding/setup time
@@ -33,14 +33,14 @@ impl Iterator for AlignedSounds {
 }
 
 impl Source for AlignedSounds {
-    fn current_frame_len(&self) -> Option<usize> {
+    fn current_span_len(&self) -> Option<usize> {
         None
     }
-    fn channels(&self) -> u16 {
-        2
+    fn channels(&self) -> rodio::ChannelCount {
+        rodio::ChannelCount::new(2).unwrap()
     }
-    fn sample_rate(&self) -> u32 {
-        tracker::SAMPLE_RATE
+    fn sample_rate(&self) -> rodio::SampleRate {
+        rodio::SampleRate::new(tracker::SAMPLE_RATE).unwrap()
     }
     fn total_duration(&self) -> Option<Duration> {
         None
@@ -70,8 +70,7 @@ fn decode_sound<'a>(
 
 #[derive(Default)]
 pub(super) struct AudioDevice {
-    stream: Option<OutputStream>,
-    handle: Option<OutputStreamHandle>,
+    stream: Option<MixerDeviceSink>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct Channel {
@@ -93,9 +92,9 @@ pub(super) struct Channel {
 }
 impl Vm {
     pub fn enable_audio(&mut self) {
-        if let Ok((stream, handle)) = OutputStream::try_default() {
+        if let Ok(mut stream) = DeviceSinkBuilder::open_default_sink() {
+            stream.log_on_drop(false);
             self.audio.stream = Some(stream);
-            self.audio.handle = Some(handle);
         }
         let resumable: Vec<_> = self
             .channels
@@ -121,7 +120,7 @@ impl Vm {
         }
     }
     pub(super) fn sound_available(&self) -> bool {
-        self.audio.handle.is_some()
+        self.audio.stream.is_some()
     }
     pub(super) fn poll_sound(&mut self) {
         for channel in self.channels.values_mut() {
@@ -181,13 +180,10 @@ impl Vm {
         let Some(output) = output else {
             return true;
         };
-        if self.audio.handle.as_ref().is_some_and(|handle| {
-            handle
-                .play_raw(AlignedSounds {
-                    outputs: vec![output],
-                })
-                .is_ok()
-        }) {
+        if let Some(stream) = &self.audio.stream {
+            stream.mixer().add(AlignedSounds {
+                outputs: vec![output],
+            });
             true
         } else {
             self.stop_sound(id);
@@ -222,7 +218,7 @@ impl Vm {
         if repeats == 0 {
             return Ok(None);
         }
-        if self.audio.handle.is_none() {
+        if self.audio.stream.is_none() {
             return Err(());
         }
         let bytes = self.story.sound_resource(resource).ok_or(())?;
@@ -234,15 +230,15 @@ impl Vm {
             self.story.sound_resource(number)
         })
         .ok_or(())?;
-        let (sink, output) = Sink::new_idle();
+        let (sink, output) = Sink::new();
         sink.set_volume(channel.volume as f32 / 65536.0);
         if channel.paused {
             sink.pause();
         }
-        sink.append(rodio::source::UniformSourceIterator::<_, f32>::new(
+        sink.append(rodio::source::UniformSourceIterator::new(
             source,
-            2,
-            tracker::SAMPLE_RATE,
+            rodio::ChannelCount::new(2).unwrap(),
+            rodio::SampleRate::new(tracker::SAMPLE_RATE).unwrap(),
         ));
         channel.repeats = repeats;
         channel.position_ms = offset_ms;
@@ -332,11 +328,10 @@ impl Vm {
                     }
                 }
                 if !outputs.is_empty()
-                    && self
-                        .audio
-                        .handle
-                        .as_ref()
-                        .is_some_and(|handle| handle.play_raw(AlignedSounds { outputs }).is_ok())
+                    && self.audio.stream.as_ref().is_some_and(|stream| {
+                        stream.mixer().add(AlignedSounds { outputs });
+                        true
+                    })
                 {
                     started.len() as u32
                 } else {
@@ -436,16 +431,16 @@ mod tests {
 
     #[test]
     fn multi_sounds_begin_on_the_same_stereo_frame() {
-        let (left_sink, left) = Sink::new_idle();
-        let (right_sink, right) = Sink::new_idle();
+        let (left_sink, left) = Sink::new();
+        let (right_sink, right) = Sink::new();
         left_sink.append(rodio::buffer::SamplesBuffer::new(
-            2,
-            tracker::SAMPLE_RATE,
+            rodio::ChannelCount::new(2).unwrap(),
+            rodio::SampleRate::new(tracker::SAMPLE_RATE).unwrap(),
             vec![0.25f32, 0.0, 0.0, 0.0],
         ));
         right_sink.append(rodio::buffer::SamplesBuffer::new(
-            2,
-            tracker::SAMPLE_RATE,
+            rodio::ChannelCount::new(2).unwrap(),
+            rodio::SampleRate::new(tracker::SAMPLE_RATE).unwrap(),
             vec![0.0f32, 0.5, 0.0, 0.0],
         ));
         let mut mixed = AlignedSounds {
@@ -464,14 +459,14 @@ mod tests {
 
     #[test]
     fn multi_sounds_keep_independent_pause_and_volume_controls() {
-        let (quiet_sink, quiet) = Sink::new_idle();
-        let (paused_sink, paused) = Sink::new_idle();
+        let (quiet_sink, quiet) = Sink::new();
+        let (paused_sink, paused) = Sink::new();
         quiet_sink.set_volume(0.5);
         paused_sink.pause();
         for sink in [&quiet_sink, &paused_sink] {
             sink.append(rodio::buffer::SamplesBuffer::new(
-                2,
-                tracker::SAMPLE_RATE,
+                rodio::ChannelCount::new(2).unwrap(),
+                rodio::SampleRate::new(tracker::SAMPLE_RATE).unwrap(),
                 vec![0.5f32; 2048],
             ));
         }
@@ -488,8 +483,12 @@ mod tests {
     #[test]
     fn completion_stop_and_volume_notifications() {
         let mut vm = vm();
-        let (sink, mut output) = Sink::new_idle();
-        sink.append(rodio::buffer::SamplesBuffer::new(1, 8000, vec![0.0f32; 8]));
+        let (sink, mut output) = Sink::new();
+        sink.append(rodio::buffer::SamplesBuffer::new(
+            rodio::ChannelCount::new(1).unwrap(),
+            rodio::SampleRate::new(8000).unwrap(),
+            vec![0.0f32; 8],
+        ));
         let mut channel = channel();
         channel.sink = Some(sink);
         vm.channels.insert(1, channel);

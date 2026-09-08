@@ -612,6 +612,9 @@ fn session_serialization_preserves_glk_objects_and_pending_input() {
         fn set_string(&mut self, key: &str, value: String) {
             self.0.insert(key.to_owned(), value);
         }
+        fn remove_string(&mut self, key: &str) {
+            self.0.remove(key);
+        }
         fn flush(&mut self) {}
     }
     let mut vm = vm();
