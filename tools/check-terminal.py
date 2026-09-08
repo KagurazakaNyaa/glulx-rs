@@ -17,6 +17,7 @@ import select
 import signal
 import struct
 import subprocess
+import sys
 import tempfile
 import termios
 import time
@@ -80,16 +81,46 @@ class Terminal:
         self.raw = bytearray()
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self.log = directory / f"{story.stem}.pty"
+        self.result_reader, result_writer = os.pipe()
+        ack_reader, self.ack_writer = os.pipe()
+        self.returncode = None
+
+        # Keep the PTY session leader alive until the parent has inspected the
+        # application's restored terminal state. macOS revokes the slave when
+        # its session leader exits, even if another process still holds it open.
+        supervisor = r'''
+import os, signal, subprocess, sys
+result_fd, ack_fd = map(int, sys.argv[1:3])
+child = subprocess.Popen(sys.argv[3:])
+signal.signal(signal.SIGWINCH, lambda signum, frame: child.send_signal(signum))
+code = child.wait()
+os.write(result_fd, (str(code) + "\n").encode())
+os.close(result_fd)
+os.read(ack_fd, 1)
+os.close(ack_fd)
+sys.exit(code)
+'''
 
         def controlling_terminal():
             os.setsid()
             fcntl.ioctl(self.slave, termios.TIOCSCTTY, 0)
 
         self.process = subprocess.Popen(
-            [str(candidate), "--headless", "--no-auto-resources", str(story)],
+            [sys.executable, "-c", supervisor, str(result_writer), str(ack_reader),
+             str(candidate), "--headless", "--no-auto-resources", str(story)],
             stdin=self.slave, stdout=self.slave, stderr=self.slave,
+            pass_fds=(result_writer, ack_reader),
             preexec_fn=controlling_terminal, env={**os.environ, "TERM": "xterm-256color"},
         )
+        os.close(result_writer)
+        os.close(ack_reader)
+
+    def poll_returncode(self):
+        if self.returncode is None and select.select([self.result_reader], [], [], 0)[0]:
+            result = os.read(self.result_reader, 100)
+            if result:
+                self.returncode = int(result)
+        return self.returncode if self.returncode is not None else self.process.poll()
 
     def resize(self, columns, rows):
         fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
@@ -109,7 +140,7 @@ class Terminal:
             self.pump()
             if text in self.screen.text():
                 return
-            assert self.process.poll() is None, self.raw.decode(errors="replace")
+            assert self.poll_returncode() is None, self.raw.decode(errors="replace")
         raise AssertionError(f"Did not display {text!r}:\n{self.screen.text()}")
 
     def send(self, data):
@@ -117,21 +148,25 @@ class Terminal:
 
     def finish(self, expected=0):
         deadline = time.monotonic() + 10
-        while self.process.poll() is None and time.monotonic() < deadline:
+        while self.poll_returncode() is None and time.monotonic() < deadline:
             self.pump()
-        assert self.process.poll() == expected, (self.process.poll(), self.screen.text())
+        assert self.poll_returncode() == expected, (self.poll_returncode(), self.screen.text())
         self.pump(.05)
         assert termios.tcgetattr(self.slave) == self.original, "TTY attributes were not restored"
         assert b"\x1b[?1049l" in self.raw, "Alternate screen was not restored"
         assert b"\x1b[?25h" in self.raw, "Cursor was not restored"
+        os.write(self.ack_writer, b"1")
+        assert self.process.wait(timeout=5) == expected
 
     def close(self):
         if self.process.poll() is None:
-            self.process.kill()
+            os.killpg(self.process.pid, signal.SIGKILL)
             self.process.wait()
         self.log.write_bytes(self.raw)
         os.close(self.master)
         os.close(self.slave)
+        os.close(self.result_reader)
+        os.close(self.ack_writer)
 
 
 def builder():

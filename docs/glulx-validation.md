@@ -178,3 +178,12 @@ Release workflow comments record why current stable Actions/toolchains and lates
 OS runners are used, including the Ubuntu 22.04 Linux artifact compatibility exception.
 
 Final local verification used stable Rust 1.98.1. The optimized release executable also passed the terminal suite and all ten reference checks.
+
+
+The first native release CI run passed all platform Rust tests, Clippy, release
+builds and `--help` smoke checks. macOS exposed a PTY harness issue: exiting the
+session leader revokes the slave, so a post-exit `tcgetattr` returns ENOTTY. The
+harness now keeps a supervisor session alive until terminal attributes, cursor
+and screen restoration are checked. The Linux suite passes, and a deliberately
+broken raw-mode program is still rejected. macOS confirmation is required by the
+subsequent release CI run; these checks have not been waived.

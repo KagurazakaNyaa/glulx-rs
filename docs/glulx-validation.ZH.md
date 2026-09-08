@@ -195,3 +195,6 @@ python3 tools/check-song-ui.py --candidate target/debug/glulx-rs --output /tmp/s
 新版 reqwest 已用实际 HTTP/HTTPS 翻译适配器检查成功响应、认证头、限流、无效响应和缓存。发布 workflow 的就地注释记录最新稳定 Actions/工具链和最新 OS runner 的选择理由，以及 Ubuntu 22.04 构建 Linux 发行包的兼容性例外。
 
 最终本地检查使用稳定 Rust 1.98.1；优化后的 release 可执行文件也通过终端套件和全部 10 项参考检查。
+
+
+首次原生发布 CI 中，各平台 Rust 测试、Clippy、release 构建及 `--help` 启动检查通过。macOS 暴露了 PTY 验收脚本问题：会话首进程退出会撤销 slave，退出后 `tcgetattr` 返回 ENOTTY。脚本现用监督进程保留会话，直到完成终端属性、光标和屏幕恢复检查；Linux 套件通过，故意不恢复 raw mode 的程序仍被正确拒绝。macOS 修复确认继续由后续发布 CI 强制执行，没有跳过这些检查。
