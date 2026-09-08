@@ -4,11 +4,10 @@ impl Vm {
     /// Validate a desktop session before resuming it. This is a versioned player
     /// snapshot, separate from portable IFZS saves (which exclude Glk state).
     pub fn validate_session(mut self) -> Result<Self, VmError> {
-        let original = Story::from_bytes(
-            self.story.container.as_deref().unwrap_or(&self.story.image),
-            Some(&self.story.title),
-        )
-        .map_err(|_| VmError::InvalidSave)?;
+        let original = self
+            .story
+            .validated_session_story()
+            .map_err(|_| VmError::InvalidSave)?;
         if original.image != self.story.image
             || original.header.ram_start != self.story.header.ram_start
             || original.header.ext_start != self.story.header.ext_start
@@ -80,6 +79,9 @@ impl Vm {
     pub fn story_path(&self) -> Option<&std::path::Path> {
         self.story.path.as_deref()
     }
+    pub fn resource_path(&self) -> Option<&std::path::Path> {
+        self.story.resource_path()
+    }
     pub fn timer_interval(&self) -> Option<u32> {
         self.timer
             .map(|(duration, _)| duration.as_millis().min(u32::MAX as u128) as u32)
@@ -87,6 +89,172 @@ impl Vm {
     pub fn resume_timer(&mut self, interval: Option<u32>) {
         if let Some(interval) = interval {
             self.request_timer(interval);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        ResourceSelection,
+        story::tests::{ResourceDirectory, resource_blorb},
+    };
+
+    #[derive(Default)]
+    struct SessionStorage(BTreeMap<String, String>);
+
+    impl eframe::Storage for SessionStorage {
+        fn get_string(&self, key: &str) -> Option<String> {
+            self.0.get(key).cloned()
+        }
+        fn set_string(&mut self, key: &str, value: String) {
+            self.0.insert(key.to_owned(), value);
+        }
+        fn flush(&mut self) {}
+    }
+
+    #[test]
+    fn sessions_retain_external_archives_and_directories_after_files_are_removed() {
+        for (bundled_story, loose) in [(false, false), (false, true), (true, false)] {
+            let directory = ResourceDirectory::new();
+            let image = super::super::tests::image_with_program(&[0x81, 0x20]);
+            let story_path = directory.0.join(if bundled_story {
+                "game.gblorb"
+            } else {
+                "game.ulx"
+            });
+            let story_bytes = if bundled_story {
+                resource_blorb(&[
+                    ((*b"GLUL", Some((*b"Exec", 0))), &image),
+                    ((*b"TEXT", Some((*b"Data", 99))), b"old bundled resource"),
+                ])
+            } else {
+                image.clone()
+            };
+            std::fs::write(&story_path, &story_bytes).unwrap();
+            let metadata = b"<ifindex><title>External title</title></ifindex>";
+            let resource_path = directory
+                .0
+                .join(if loose { "assets" } else { "assets.blorb" });
+            if loose {
+                std::fs::create_dir(&resource_path).unwrap();
+                for (name, data) in [
+                    ("DATA1.txt", "é\n".as_bytes()),
+                    ("PIC2.png", &b"picture"[..]),
+                    ("SND3.aiff", &b"FORM\0\0\0\x04AIFF"[..]),
+                    ("METADATA.xml", &metadata[..]),
+                    ("IDENT", &image[..128]),
+                ] {
+                    std::fs::write(resource_path.join(name), data).unwrap();
+                }
+            } else {
+                std::fs::write(
+                    &resource_path,
+                    resource_blorb(&[
+                        ((*b"TEXT", Some((*b"Data", 1))), "é\n".as_bytes()),
+                        ((*b"PNG ", Some((*b"Pict", 2))), b"picture"),
+                        ((*b"FORM", Some((*b"Snd ", 3))), b"AIFF"),
+                        ((*b"IFmd", None), metadata),
+                        ((*b"IFhd", None), &image[..128]),
+                    ]),
+                )
+                .unwrap();
+            }
+            let story = Story::open_with_resources(
+                &story_path,
+                ResourceSelection::Path(resource_path.clone()),
+            )
+            .unwrap();
+            let mut vm = Vm::new(story).unwrap();
+            let stream = vm.open_resource_stream(&[1, 17], true);
+            assert_ne!(stream, 0);
+            assert_eq!(vm.read_stream_value(stream).unwrap(), Some('é' as u32));
+            vm.memory.write32(0x100, 0x12345678).unwrap();
+            let mut snapshot = SessionStorage::default();
+            eframe::set_value(&mut snapshot, "vm", &vm);
+            std::fs::remove_dir_all(&directory.0).unwrap();
+            let restored: Vm = eframe::get_value(&snapshot, "vm").unwrap();
+            let mut restored = restored.validate_session().unwrap();
+            assert_eq!(restored.story_path(), Some(story_path.as_path()));
+            assert_eq!(restored.resource_path(), Some(resource_path.as_path()));
+            assert_eq!(restored.story_title(), "External title");
+            assert_eq!(restored.story.image, image);
+            assert_eq!(restored.story.container.is_some(), bundled_story);
+            assert_eq!(restored.memory.read32(0x100).unwrap(), 0x12345678);
+            assert_eq!(restored.image_resource(2), Some(&b"picture"[..]));
+            assert_eq!(
+                restored.story.sound_resource(3),
+                Some(&b"FORM\0\0\0\x04AIFF"[..])
+            );
+            assert_eq!(restored.read_stream_value(stream).unwrap(), Some(10));
+            assert_eq!(restored.read_stream_value(stream).unwrap(), None);
+            let new_stream = restored.open_resource_stream(&[1, 0], true);
+            assert_eq!(
+                restored.read_stream_value(new_stream).unwrap(),
+                Some('é' as u32)
+            );
+            assert_eq!(restored.open_resource_stream(&[99, 0], false), 0);
+        }
+    }
+
+    #[test]
+    fn legacy_sessions_without_external_fields_restore_original_resource_maps() {
+        let image = super::super::tests::image_with_program(&[0x81, 0x20]);
+        for bundled in [false, true] {
+            let bytes = if bundled {
+                resource_blorb(&[
+                    ((*b"GLUL", Some((*b"Exec", 0))), &image),
+                    ((*b"TEXT", Some((*b"Data", 1))), b"legacy"),
+                ])
+            } else {
+                image.clone()
+            };
+            let vm = Vm::new(Story::from_bytes(&bytes, Some("Legacy")).unwrap()).unwrap();
+            let mut serialized = serde_json::to_value(&vm).unwrap();
+            serialized["story"]
+                .as_object_mut()
+                .unwrap()
+                .remove("external_resources");
+            let restored: Vm = serde_json::from_value(serialized).unwrap();
+            let restored = restored.validate_session().unwrap();
+            assert_eq!(restored.story.image, image);
+            assert_eq!(restored.story_title(), "Legacy");
+            assert_eq!(
+                restored.story.resource(*b"Data", 1),
+                bundled.then_some(&b"legacy"[..])
+            );
+        }
+    }
+
+    #[test]
+    fn sessions_validate_saved_external_blorb_identity_and_index() {
+        let image = super::super::tests::image_with_program(&[0x81, 0x20]);
+        let mut story = Story::from_bytes(&image, None).unwrap();
+        story
+            .attach_blorb(&resource_blorb(&[
+                ((*b"TEXT", Some((*b"Data", 1))), b"data"),
+                ((*b"IFhd", None), &image[..128]),
+            ]))
+            .unwrap();
+        let vm = Vm::new(story).unwrap();
+        let original = serde_json::to_value(&vm).unwrap();
+        for byte in [
+            35,
+            original["story"]["external_resources"]["bytes"]
+                .as_array()
+                .unwrap()
+                .len()
+                - 1,
+        ] {
+            let mut corrupted = original.clone();
+            let value = &mut corrupted["story"]["external_resources"]["bytes"][byte];
+            *value = serde_json::Value::from(value.as_u64().unwrap() ^ 1);
+            let restored: Vm = serde_json::from_value(corrupted).unwrap();
+            assert!(matches!(
+                restored.validate_session(),
+                Err(VmError::InvalidSave)
+            ));
         }
     }
 }

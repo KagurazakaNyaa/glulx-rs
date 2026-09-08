@@ -345,9 +345,7 @@ fn rich_text(
     if style.oblique {
         rich = rich.italics();
     }
-    if !style.proportional {
-        rich = rich.monospace();
-    }
+    rich = rich.family(super::fonts::family(style));
     if run.hyperlink != 0 {
         rich = rich.color(rgb(settings.hyperlink_color)).underline();
     }

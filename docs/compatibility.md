@@ -17,27 +17,37 @@ for coverage and reproducible evidence. This is not a claim of exhaustive confor
 - Text styles, inline/margin images, date/time APIs and audio channels with repeat, pause, fades and notifications.
 - Desktop file prompts, open/restart/stop, scrollback, settings, translation and automatic session restoration.
 
-## Not yet implemented
+## Resource Selection and Terminal Playback
 
-Raw `.ulx` files cannot attach a separate Blorb resource archive through the GUI,
-CLI or public API, and the player does not discover same-name archives. Resources
-are currently read only from the story's own Blorb container. Separate archive
-selection and session restoration are tracked in the specification checklist. Blorb
-IFhd identity checks and conflicting executable/resource arguments also need
-coverage. Loose PIC/SND/DATA resource-directory loading is an optional missing
-player feature. Container validation currently tolerates nonzero padding and an
-unindexed GLUL fallback; it does not reject every malformed archive.
+Raw `.ulx` stories accept separate resource-only Blorbs or loose resource directories
+through `Story::open_with_resources`, `--resources PATH`, and File → Choose resources.
+An archive with `IFhd` must match the first 128 bytes of the Glulx story; absence is
+allowed. Conflicting executables, corrupt archives and wrong identities fail before
+replacing state. The GUI applies a new selection by restarting the story, clearing
+image/cover caches and active audio; a failed selection preserves the current game.
 
-The deprecated, optional Blorb `SONG` format, which references AIFF samples stored
-as separate resources, is not implemented.
+Automatic discovery beside raw stories uses `.blorb`, `.blb`, `.gblorb`, then `.glb`.
+The stem must match exactly; extensions ignore ASCII case, and multiple candidates
+at the same priority are an error. `--resources` overrides discovery; `--no-auto-resources`
+disables it. Resources fully replace the selected resource map. Desktop sessions
+embed resource content and retain the origin, so restoration works after the original
+archive/directory is removed. Portable IFZS retains its existing VM-only scope.
 
-The current headless loop is a line-oriented automation adapter. It does not render
-text-grid/status windows or provide terminal editing of prefilled text, live input
-cancellation, or immediate character input without Enter. A real terminal host is
-pending; its capability reporting must match its supported windows and input.
+Loose directories are explicit and non-recursive. Numbered `PIC` files support PNG/JPEG,
+`SND` supports AIFF/OGG/MP3/MOD/XM/S3M/IT/SONG, and `DATA` supports TEXT/BINA/FORM.
+Names and numeric prefixes ignore ASCII case; duplicate resource numbers and invalid
+numbered resources fail. Metadata names include IDENT, FRONTIS, RESDESC and METADATA.
+Unrelated files are ignored; a STORY resource is rejected as a conflicting executable.
+See the resource-map validation tool for exact suffixes and examples.
 
-Light font-weight requests currently
-render as regular weight; selecting a real light face is also pending.
+With `--headless`, an interactive TTY displays text buffers, grids and status windows,
+with prefilled editing, timed cancellation and immediate unechoed character input.
+Ctrl+N selects the next pending input window; Ctrl+C exits, and Ctrl+D exits from an
+empty editor. Terminal modes and the original screen are restored on normal/error exit.
+When either stdin or stdout is piped, a stable text/file protocol is used instead;
+unsupported grid and graphics windows fail creation. The terminal advertises no
+image, mouse, hyperlink-input or sound support. Characters that do not occupy one
+terminal column display as `?` and report CannotPrint; Unicode input/file data is retained.
 
 ## Limits
 
@@ -60,7 +70,9 @@ alternatives are available in Story information. Text-buffer style hints 0–9 a
 indentation/hanging indents and all four justification modes are implemented. Grid
 cells retain style and hyperlinks; grid layout hints 0–3/6 are ignored to keep equal
 cell dimensions, while weight/oblique/color hints apply. Measurements reflect actual
-rendering; light-weight requests currently fall back to regular. System outline
+rendering; light requests select actual light faces for proportional/monospace fonts
+when available, and otherwise report regular fallback. Font metadata is checked rather
+than trusting filenames; host face availability is reinstalled after session restoration. System outline
 fonts are loaded automatically, and Options accepts an extra TTF/OTF/TTC fallback.
 CharOutput reports missing glyphs accurately. Text-buffer window sizing uses the
 normal style’s actual font metrics; grids keep uniform 8×16 cells.
@@ -72,8 +84,13 @@ every PCM sample and stereo frame. Container frame counts remove encoder padding
 and resampling remains continuous across packet and repetition boundaries. Bit-exact reproduction of every historic tracker
 variant is not claimed. `play_multi` submits a single combined output source, aligning
 channels to the same stereo sample frame; physical sound-card output is not measured.
-AIFF and generated MOD resources have GUI coverage, while not every codec/encoding
-combination has a fixture.
+AIFF, generated MOD and SONG resources have GUI coverage, while not every
+codec/encoding combination has a fixture. The optional legacy SONG format resolves
+shared `SND<number>` AIFF samples, including SSND offsets and MARK/INST sustain loops
+(no loop, forward and ping-pong). Samples become 16-bit mono (channels averaged,
+low bits discarded for higher bit depths); pitch follows MOD period/finetune.
+SONG structure is limited to 1 MiB and distinct decoded samples to 32 MiB total.
+Missing/invalid references fail; repeat, pause, notification and restore use the common audio path.
 
 File streams preserve encoded-byte positions and Unicode overwrite semantics, with
 shared contents and independent positions for concurrent streams of the same file. File

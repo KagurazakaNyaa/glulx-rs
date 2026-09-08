@@ -25,6 +25,8 @@ impl Vm {
         let arg = |n: usize| args.get(n).copied().unwrap_or(0);
         let (split, method, size, kind, rock) = (arg(0), arg(1), arg(2), arg(3), arg(4));
         if !matches!(kind, 2..=5)
+            || (!self.graphical_host
+                && (kind == WINTYPE_GRAPHICS || (kind == WINTYPE_TEXT_GRID && !self.terminal_host)))
             || (split == 0 && self.glk_root != 0)
             || (split != 0 && (!self.glk_windows.contains_key(&split) || !valid_method(method)))
         {

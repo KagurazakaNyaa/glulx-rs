@@ -2,6 +2,8 @@
 
 [English](glulx-remaining-spec-audit.md) | [中文](glulx-remaining-spec-audit.ZH.md)
 
+本文件保留基于 `5816d37`、提交于 `0a6d5b4` 的实现前复核；下文未勾选框是原始验收建议，不是当前任务状态。后续实现及实际验收见 [清单](glulx-spec-checklist.ZH.md) 和 [验收记录](glulx-validation.ZH.md)。
+
 日期：2026-09-08。代码基线 `5816d37`；本轮先复核规范、补文档，再实现。这里记录已读一手正文与当前代码的差异；待办不是实现完成记录。本轮覆盖 Glulx 3.1.3 核心、Blorb 2.0.5 资源与声音格式、Glk 0.7.6 宿主输入/呈现；以下同时记录已确认缺口及没有发现新缺口的边界。
 
 ## 一手来源与判定口径

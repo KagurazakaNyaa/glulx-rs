@@ -4,7 +4,7 @@
 
 The interpreter is Rust, with no runtime dependency on a C interpreter. Eframe/egui
 provides the Windows, Linux and macOS GUI; the same binary also has a line-oriented headless automation adapter. A full
-terminal display/input host is tracked in the specification checklist.
+terminal display/input host is selected for interactive TTYs.
 
 ## Modules
 
@@ -31,9 +31,16 @@ serialization and reinstalled by the GUI. This keeps egui out of the VM.
 
 `PlayerApp` executes short slices, renders each window, and supplies keyboard,
 mouse, hyperlink and file-selection results. Waiting states distinguish line,
-character, file (including overwrite confirmation) and general events. The terminal adapter reads stdin on a worker
+character, file (including overwrite confirmation) and general events. The pipe adapter reads stdin on a worker
 so waiting for a line does not prevent timer delivery. Streams share file contents across handles, retain independent cursors and flush only
 dirty content at stop/save.
+
+`Story` keeps the executable container separate from an optional external resource
+map. Archive/directory selection validates identity before replacing resource state;
+loose directories become self-contained resource Blorbs for desktop serialization.
+The GUI applies selections through a fresh VM. `terminal` chooses a full TTY screen
+and editor or the pipe protocol using stdin/stdout terminal detection. The SONG
+assembler resolves AIFF references before handing a module to the existing tracker.
 
 ## Persistence
 

@@ -4,7 +4,7 @@
 
 日期：2026-09-08，Linux x86_64，核心实现提交 `4c16443`，加速与媒体提交 `c5fcc20`，输入/字体/窗口提交 `4870bcf`。随后继续完成媒体格式、共享文件、宽范围日期、IFZS 及图片边界修复。
 
-以下通过记录对应已实现能力。独立资源挂载、`SONG`、真实终端宿主和实际 light 字重尚未实现，其验收不能视为已通过；后续待办见 [规范清单](glulx-spec-checklist.ZH.md)。
+缺口复核文档已先提交为 `0a6d5b4`，双语文档独立提交为 `af210ba`。随后实现的独立资源、SONG、交互终端和真实 light 字重已有下述本地验收；尚未执行的平台及更广场景继续保留在 [规范清单](glulx-spec-checklist.ZH.md) 中。
 
 ## 可复现命令与结果
 
@@ -17,7 +17,7 @@ python3 tools/check-opcodes.py --spec /path/to/Glulx-Spec.md --output /tmp/glulx
 python3 tools/check-reference.py --reference /path/to/glulxe --candidate target/debug/glulx-rs --fixtures /path/to/fixtures
 ```
 
-Rust 测试 158 passed / 0 failed；Clippy（warnings 视为错误）及 release 构建通过。
+Rust 测试 180 passed / 0 failed（178 个库测试、2 个 CLI 测试）；Clippy（warnings 视为错误）及 release 构建通过。
 脚本不下载样本、不修改仓库游戏资源；合成故事及存档使用临时目录。
 不传 `--fixtures` 仍可运行合成 IFZS 双向互操作、double stack 顺序、Inform 加速函数、零长度内存及深层字符串差分检查。
 官方 opcode 表 150/150 条分发和操作数数量匹配；官方 Glk dispatch 注册表 124/124 selectors 均有分发。这两项只证明表完整，执行语义仍需运行测试。
@@ -167,3 +167,22 @@ Blorb RIdx 必须位于首块且唯一；RDes 解析验证 UTF-8、无条目间 
 音频 codec 工具用 ffmpeg 生成原创 44.1 kHz 立体声音调，再测试项目当前构建的解码器：AIFF/OGG/MP3 各 250 ms（22,050 个样本）和 1250 ms（110,250 个样本），共六组精确样本数、时长、有限/无限重复、5 ms 恢复及播放转换均通过。所用 Rodio/Symphonia 构建由 Cargo 的 JSON artifact 输出定位，避免选择旧 feature 组合。工具需要 cargo/rustc/ffmpeg；运行时播放器不依赖 ffmpeg。
 
 18 项音频专项还验证 8/22.05/48 kHz 输入转 44.1 kHz 时逐样本等于完整缓冲区基准，解码分包及重复边界不重置重采样相位。
+
+
+## 独立资源、终端输入、SONG 与真实 light 字重
+
+```sh
+python3 tools/check-resource-maps.py --fixture /path/to/resstreamtest.gblorb --candidate target/debug/glulx-rs --reference /path/to/glulxe --output /tmp/resource-maps
+python3 tools/check-resource-ui.py --candidate target/debug/glulx-rs --output /tmp/resource-ui
+python3 tools/check-terminal.py --candidate target/debug/glulx-rs
+python3 tools/make-song-fixture.py /tmp/glulx-song.gblorb
+python3 tools/check-song-ui.py --candidate target/debug/glulx-rs --output /tmp/song-ui
+```
+
+- 资源模型：新增 8 个 Rust 测试覆盖无执行文件的包、128 字节 IFhd、冲突、原子失败、发现优先级/歧义、散装类型和新旧桌面快照。官方资源流故事在原始包、raw 加显式包、自动发现和散装目录四种方式下逐字输出一致，并与归一化解释器版本后的 Glulxe 输出一致。
+- 资源 GUI：CLI 选择、GUI 三种选项、Browse 包和 Use this directory、图片缓存切换、错误 IFhd 保留旧状态、资源路径输入焦点及切换故事无资源泄漏均通过。删除原包/目录和原始故事后，恢复会话仍能重新读取 Data 并重绘图片，验证的是资源内容恢复而非仅保存画布。
+- TTY：真实 PTY 验收通过 25 个即时特殊键、预填编辑、定时取消取回当前组成、替换预填、网格编辑、多窗口选择、resize/Arrange、回显/终止键、文件写入/取消，以及正常退出、Ctrl+C/Ctrl+D 和 VM 错误后的终端恢复。管道输出仍精确匹配。已加入 Windows 控制台连接代码，但没有 Windows 实机验收。
+- SONG：9 个专项覆盖 15/31 样本头、共享/完整 22 字节引用、AIFF 1–32 位 PCM、SSND offset、MARK/INST 无/正向/往返循环、损坏引用和边界、等价模块 PCM、重复、恢复偏移、暂停/停止及通知。原创桌面故事通过活动且暂停的会话恢复、继续播放/渐变完成、最后一次有限重复通知、双声道同步和停止。
+- light 字重：元数据校验拒绝伪装成 light 的普通/损坏字体，实际安装的细字形通过命名字体族渲染，序列化后重新安装宿主可用性。Linux 桌面输出中文本缓冲区和网格的字重均为 -1，链接、原位编辑和会话恢复仍正常；缺少字体时保留普通回退。
+
+参考回归仍通过全部 10 项，包含 Glulxercise 92 个段落及 Adventure 双向存档。资源、终端和 SONG 工具生成临时原创内容，不下载游戏。

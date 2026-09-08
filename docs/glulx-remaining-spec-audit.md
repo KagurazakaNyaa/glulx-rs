@@ -2,6 +2,8 @@
 
 [English](glulx-remaining-spec-audit.md) | [中文](glulx-remaining-spec-audit.ZH.md)
 
+This document preserves the pre-implementation audit at `5816d37`, committed in `0a6d5b4`. Its unchecked boxes are original acceptance proposals, not the current task status. The implemented follow-up and actual validation are tracked in the [checklist](glulx-spec-checklist.md) and [validation record](glulx-validation.md).
+
 Date: 2026-09-08. Code baseline: `5816d37`. This round reviews specifications and updates documentation before implementation. It records differences between primary sources read and current code; tasks are not completion records. Coverage includes the Glulx 3.1.3 core, Blorb 2.0.5 resources and sound formats, and Glk 0.7.6 host input/presentation. Both confirmed gaps and boundaries with no newly identified gaps are recorded below.
 
 ## Primary Sources and Classification

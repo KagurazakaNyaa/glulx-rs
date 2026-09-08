@@ -10,6 +10,9 @@ documentation = "https://docs.rs/glulx-rs"
 
 [dependencies]
 ab_glyph = "0.2"
+ttf-parser = "0.25"
+crossterm = "0.29"
+unicode-width = "0.2"
 eframe = { version = "0.32", default-features = false, features = ["default_fonts", "glow", "persistence", "wayland", "x11"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
@@ -27,6 +30,9 @@ roxmltree = "0.20"
 unicode-normalization = "0.1"
 unicode-case-mapping = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
 
 [profile.release]
 lto = "thin"

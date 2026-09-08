@@ -54,6 +54,8 @@ pub struct TextAppearance {
     pub font_size: f32,
     pub foreground: u32,
     pub background: u32,
+    #[serde(skip)]
+    pub light_fonts: [bool; 2],
 }
 impl Default for TextAppearance {
     fn default() -> Self {
@@ -61,6 +63,7 @@ impl Default for TextAppearance {
             font_size: 18.0,
             foreground: 0x202225,
             background: 0xf8f8f6,
+            light_fonts: [false; 2],
         }
     }
 }
@@ -88,6 +91,7 @@ impl ResolvedStyle {
     ) -> Self {
         let hint = |id| hints.get(&(style, id)).copied();
         let grid = kind == WINTYPE_TEXT_GRID;
+        let proportional = !grid && hint(6).map_or(style != 2, |v| v != 0);
         let reverse = hint(9) == Some(1);
         let mut foreground = hint(7).unwrap_or(appearance.foreground) & 0xffffff;
         let mut background = hint(8).unwrap_or(appearance.background) & 0xffffff;
@@ -100,13 +104,15 @@ impl ResolvedStyle {
             } else {
                 (appearance.font_size + hint(3).unwrap_or(0) as i32 as f32 * 2.0).clamp(8.0, 64.0)
             },
-            // The default font supports regular/bold; a light hint falls back
-            // to regular, and measurements report that actual result.
             weight: hint(4).map_or(i32::from(matches!(style, 3 | 4 | 5 | 8)), |v| {
-                i32::from(v as i32 > 0)
+                if v as i32 == -1 && appearance.light_fonts[usize::from(!proportional)] {
+                    -1
+                } else {
+                    i32::from(v as i32 > 0)
+                }
             }),
             oblique: hint(5).map_or(matches!(style, 1 | 5), |v| v != 0),
-            proportional: !grid && hint(6).map_or(style != 2, |v| v != 0),
+            proportional,
             foreground,
             background,
             reverse,
@@ -165,6 +171,16 @@ impl WindowView {
 }
 
 impl Vm {
+    pub fn set_light_fonts(&mut self, available: [bool; 2]) {
+        if self.text_appearance.light_fonts != available {
+            self.text_appearance.light_fonts = available;
+            self.layout_windows();
+            if self.glk_root != 0 && !self.events.iter().any(|event| event[0] == 5) {
+                self.events.push_back([5, 0, 0, 0]);
+            }
+        }
+    }
+
     pub fn set_text_appearance(&mut self, font_size: f32, foreground: u32, background: u32) {
         let font_size = if font_size.is_finite() {
             font_size.clamp(8.0, 64.0)
@@ -179,6 +195,7 @@ impl Vm {
             font_size,
             foreground: foreground & 0xffffff,
             background: background & 0xffffff,
+            ..self.text_appearance
         };
         if resized {
             self.layout_windows();
@@ -298,6 +315,14 @@ impl Vm {
 
     pub fn set_graphical_host(&mut self, enabled: bool) {
         self.graphical_host = enabled;
+        self.terminal_host = false;
+    }
+
+    /// Enable text windows and direct keyboard input for an interactive TTY.
+    /// Graphics, mouse, hyperlinks, audio and font measurements stay disabled.
+    pub fn set_terminal_host(&mut self, enabled: bool) {
+        self.graphical_host = false;
+        self.terminal_host = enabled;
     }
 
     pub fn window_views(&self) -> Vec<WindowView> {
@@ -577,6 +602,30 @@ mod tests {
         vm.set_graphical_host(false);
         assert_eq!(vm.style_call(0xb2, &[buffer, 0, 3]).unwrap(), 0);
         assert_eq!(vm.style_call(0xb3, &[buffer, 0, 3, 0]).unwrap(), 0);
+    }
+
+    #[test]
+    fn light_style_queries_follow_host_faces_and_reinstall_after_sessions() {
+        let mut vm = pictured_vm();
+        vm.style_call(0xb0, &[0, 9, 4, u32::MAX]).unwrap();
+        let buffer = vm.open_window(&[0, 0, 0, 3, 0]);
+        let grid = vm.open_window(&[buffer, 0x12, 3, 4, 0]);
+        assert_eq!(measured(&mut vm, buffer, 9, 4), 0);
+        vm.set_light_fonts([true, false]);
+        assert_eq!(measured(&mut vm, buffer, 9, 4), u32::MAX);
+        assert_eq!(measured(&mut vm, grid, 9, 4), 0);
+        assert_eq!(vm.style_call(0xb2, &[buffer, 0, 9]).unwrap(), 1);
+        vm.set_light_fonts([true, true]);
+        vm.set_text_appearance(20.0, 0, 0xffffff);
+        assert_eq!(measured(&mut vm, grid, 9, 4), u32::MAX);
+        vm.text_appearance =
+            serde_json::from_str(&serde_json::to_string(&vm.text_appearance).unwrap()).unwrap();
+        assert_eq!(measured(&mut vm, buffer, 9, 4), 0);
+        vm.set_light_fonts([true, true]);
+        assert_eq!(measured(&mut vm, buffer, 9, 4), u32::MAX);
+        assert_eq!(measured(&mut vm, grid, 9, 4), u32::MAX);
+        vm.set_light_fonts([false, false]);
+        assert_eq!(measured(&mut vm, buffer, 9, 4), 0);
     }
 
     #[test]

@@ -6,6 +6,7 @@ use std::{
 use eframe::egui::{self, Color32, RichText};
 use serde::{Deserialize, Serialize};
 
+use crate::story::ResourceSelection;
 use crate::{
     GraphicsRequest, InputRequest, RunState, Story, Vm,
     translation::{Submission, TranslationSettings, Translator},
@@ -107,6 +108,7 @@ struct FileBrowser {
     directory: PathBuf,
     typed_path: String,
     error: Option<String>,
+    resources: bool,
 }
 
 impl FileBrowser {
@@ -117,6 +119,7 @@ impl FileBrowser {
             typed_path: directory.display().to_string(),
             directory,
             error: None,
+            resources: false,
         }
     }
 
@@ -126,67 +129,72 @@ impl FileBrowser {
         }
         let mut selected = None;
         let mut keep_open = self.open;
-        egui::Window::new("Open Glulx story")
-            .collapsible(false)
-            .resizable(true)
-            .default_size([660.0, 440.0])
-            .open(&mut keep_open)
-            .show(context, |ui| {
-                ui.horizontal(|ui| {
-                    if ui.button("Up").clicked()
-                        && let Some(parent) = self.directory.parent()
-                    {
-                        self.directory = parent.to_path_buf();
-                        self.typed_path = self.directory.display().to_string();
+        egui::Window::new(if self.resources {
+            "Choose resource archive or directory"
+        } else {
+            "Open Glulx story"
+        })
+        .collapsible(false)
+        .resizable(true)
+        .default_size([660.0, 440.0])
+        .open(&mut keep_open)
+        .show(context, |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("Up").clicked()
+                    && let Some(parent) = self.directory.parent()
+                {
+                    self.directory = parent.to_path_buf();
+                    self.typed_path = self.directory.display().to_string();
+                }
+                let response = ui.text_edit_singleline(&mut self.typed_path);
+                if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+                    let path = PathBuf::from(&self.typed_path);
+                    if path.is_dir() {
+                        self.directory = path;
+                    } else if path.is_file() {
+                        selected = Some(path);
                     }
-                    let response = ui.text_edit_singleline(&mut self.typed_path);
-                    if response.lost_focus()
-                        && ui.input(|input| input.key_pressed(egui::Key::Enter))
-                    {
-                        let path = PathBuf::from(&self.typed_path);
+                }
+            });
+            if self.resources && ui.button("Use this directory").clicked() {
+                selected = Some(self.directory.clone());
+            }
+            ui.separator();
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                let mut entries = std::fs::read_dir(&self.directory)
+                    .map(|entries| entries.filter_map(Result::ok).collect::<Vec<_>>())
+                    .unwrap_or_default();
+                entries.sort_by_key(|entry| {
+                    (
+                        !entry.path().is_dir(),
+                        entry.file_name().to_string_lossy().to_lowercase(),
+                    )
+                });
+                for entry in entries {
+                    let path = entry.path();
+                    if !path.is_dir() && !is_story_path(&path) {
+                        continue;
+                    }
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    let label = if path.is_dir() {
+                        format!("[DIR] {name}")
+                    } else {
+                        name
+                    };
+                    if ui.selectable_label(false, label).double_clicked() {
                         if path.is_dir() {
                             self.directory = path;
-                        } else if path.is_file() {
+                            self.typed_path = self.directory.display().to_string();
+                        } else {
                             selected = Some(path);
                         }
                     }
-                });
-                ui.separator();
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    let mut entries = std::fs::read_dir(&self.directory)
-                        .map(|entries| entries.filter_map(Result::ok).collect::<Vec<_>>())
-                        .unwrap_or_default();
-                    entries.sort_by_key(|entry| {
-                        (
-                            !entry.path().is_dir(),
-                            entry.file_name().to_string_lossy().to_lowercase(),
-                        )
-                    });
-                    for entry in entries {
-                        let path = entry.path();
-                        if !path.is_dir() && !is_story_path(&path) {
-                            continue;
-                        }
-                        let name = entry.file_name().to_string_lossy().into_owned();
-                        let label = if path.is_dir() {
-                            format!("[DIR] {name}")
-                        } else {
-                            name
-                        };
-                        if ui.selectable_label(false, label).double_clicked() {
-                            if path.is_dir() {
-                                self.directory = path;
-                                self.typed_path = self.directory.display().to_string();
-                            } else {
-                                selected = Some(path);
-                            }
-                        }
-                    }
-                });
-                if let Some(error) = &self.error {
-                    ui.colored_label(Color32::from_rgb(180, 40, 40), error);
                 }
             });
+            if let Some(error) = &self.error {
+                ui.colored_label(Color32::from_rgb(180, 40, 40), error);
+            }
+        });
         self.open = keep_open && selected.is_none();
         selected
     }
@@ -217,10 +225,21 @@ pub struct PlayerApp {
     pending_translations: HashMap<u64, usize>,
     last_state: RunState,
     fonts: fonts::Fonts,
+    show_resources: bool,
+    resource_choice: u8,
+    resource_path: String,
 }
 
 impl PlayerApp {
     pub fn new(creation: &eframe::CreationContext<'_>, initial_story: Option<PathBuf>) -> Self {
+        Self::new_with_resources(creation, initial_story, ResourceSelection::Auto)
+    }
+
+    pub fn new_with_resources(
+        creation: &eframe::CreationContext<'_>,
+        initial_story: Option<PathBuf>,
+        selection: ResourceSelection,
+    ) -> Self {
         let settings: PlayerSettings = creation
             .storage
             .and_then(|storage| eframe::get_value(storage, STORAGE_KEY))
@@ -251,9 +270,12 @@ impl PlayerApp {
             pending_translations: HashMap::new(),
             last_state: RunState::Halted,
             fonts,
+            show_resources: false,
+            resource_choice: 0,
+            resource_path: String::new(),
         };
         if let Some(path) = initial_story {
-            app.load_story(path);
+            app.load_story_with_resources(path, selection);
         } else if let Some(session) = creation
             .storage
             .and_then(|storage| eframe::get_value::<Session>(storage, "glulx-session-v1"))
@@ -293,15 +315,22 @@ impl PlayerApp {
     }
 
     fn load_story(&mut self, path: PathBuf) {
-        let loaded = Story::open(&path)
+        self.load_story_with_resources(path, ResourceSelection::Auto);
+    }
+
+    fn load_story_with_resources(&mut self, path: PathBuf, selection: ResourceSelection) {
+        let loaded = Story::open_with_resources(&path, selection)
             .map_err(|error| error.to_string())
-            .and_then(|story| {
-                self.story_title = story.title.clone();
-                Vm::new(story).map_err(|error| error.to_string())
-            });
+            .and_then(|story| Vm::new(story).map_err(|error| error.to_string()));
         match loaded {
             Ok(mut vm) => {
                 vm.enable_audio();
+                self.story_title = vm.story_title().to_owned();
+                self.show_resources = false;
+                self.resource_choice = 0;
+                self.resource_path.clear();
+                self.file_browser.open = false;
+                self.file_browser.resources = false;
                 self.vm = Some(vm);
                 self.story_path = Some(path.clone());
                 self.transcript.clear();
@@ -350,6 +379,7 @@ impl PlayerApp {
             return;
         };
         let word = |c: [u8; 3]| u32::from_be_bytes([0, c[0], c[1], c[2]]);
+        vm.set_light_fonts(self.fonts.light_fonts);
         vm.set_glyph_support(self.fonts.support.clone());
         vm.set_text_metrics(self.fonts.metrics.clone());
         vm.set_text_appearance(
@@ -592,7 +622,24 @@ impl PlayerApp {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("Open story...").clicked() {
+                        self.file_browser.resources = false;
                         self.file_browser.open = true;
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(
+                            self.story_path.is_some(),
+                            egui::Button::new("Choose resources..."),
+                        )
+                        .clicked()
+                    {
+                        self.show_resources = true;
+                        self.resource_choice = 0;
+                        self.resource_path = self
+                            .vm
+                            .as_ref()
+                            .and_then(Vm::resource_path)
+                            .map_or_else(String::new, |path| path.display().to_string());
                         ui.close();
                     }
                     if ui
@@ -642,6 +689,7 @@ impl PlayerApp {
                     .on_hover_text("Open a Glulx story")
                     .clicked()
                 {
+                    self.file_browser.resources = false;
                     self.file_browser.open = true;
                 }
                 if ui
@@ -675,6 +723,7 @@ impl PlayerApp {
     }
 
     fn story_view(&mut self, context: &egui::Context) {
+        let accept_input = !self.dialog_open(context);
         let background = rgb(self.settings.background_color);
         if self.settings.translation.enabled {
             egui::SidePanel::right("translation")
@@ -788,7 +837,9 @@ impl PlayerApp {
                                 }
                                 4 => {
                                     let editor = self.vm.as_ref().and_then(|vm| {
-                                        (vm.is_grid_line_input() && vm.input_window() == view.id)
+                                        (accept_input
+                                            && vm.is_grid_line_input()
+                                            && vm.input_window() == view.id)
                                             .then_some(text_grid::GridEditor {
                                                 text: &mut self.input,
                                                 maximum_length: vm.line_input_max_len(),
@@ -858,7 +909,21 @@ impl PlayerApp {
             });
     }
 
+    fn dialog_open(&self, context: &egui::Context) -> bool {
+        self.show_resources
+            || self.show_options
+            || self.show_about
+            || self.show_story_info
+            || self.show_scrollback
+            || self.file_browser.open
+            || self.error.is_some()
+            || egui::Popup::is_any_open(context)
+    }
+
     fn character_input(&mut self, context: &egui::Context) {
+        if self.dialog_open(context) {
+            return;
+        }
         if !matches!(
             self.vm.as_ref().and_then(Vm::input_request),
             Some(InputRequest::Character)
@@ -894,6 +959,7 @@ impl PlayerApp {
     }
 
     fn input_bar(&mut self, context: &egui::Context) {
+        let accept_input = !self.dialog_open(context);
         let request = self.vm.as_ref().and_then(Vm::input_request);
         if request.is_none() {
             return;
@@ -905,6 +971,9 @@ impl PlayerApp {
                     .inner_margin(10.0),
             )
             .show(context, |ui| {
+                if !accept_input {
+                    ui.disable();
+                }
                 if matches!(request, Some(InputRequest::File { .. }))
                     && let Some(vm) = &self.vm
                 {
@@ -966,22 +1035,26 @@ impl PlayerApp {
                         {
                             let _ = vm.update_line_input(&self.input);
                         }
-                        enter = (response.has_focus() || response.lost_focus())
+                        enter = accept_input
+                            && (response.has_focus() || response.lost_focus())
                             && ui.input(|input| input.key_pressed(egui::Key::Enter));
-                        response.request_focus();
+                        if accept_input {
+                            response.request_focus();
+                        }
                     } else {
                         ui.label("Type in the highlighted field");
                     }
-                    let terminator = if matches!(request, Some(InputRequest::Line { .. })) {
-                        self.vm.as_ref().and_then(|vm| {
-                            vm.line_terminators().iter().copied().find(|code| {
-                                glk_terminator_key(*code)
-                                    .is_some_and(|key| ui.input(|input| input.key_pressed(key)))
+                    let terminator =
+                        if accept_input && matches!(request, Some(InputRequest::Line { .. })) {
+                            self.vm.as_ref().and_then(|vm| {
+                                vm.line_terminators().iter().copied().find(|code| {
+                                    glk_terminator_key(*code)
+                                        .is_some_and(|key| ui.input(|input| input.key_pressed(key)))
+                                })
                             })
-                        })
-                    } else {
-                        None
-                    };
+                        } else {
+                            None
+                        };
                     if let Some(terminator) = terminator {
                         self.submit_terminated_input(terminator);
                     } else if ui.button("Send").clicked() || enter {
@@ -1008,6 +1081,59 @@ impl PlayerApp {
     }
 
     fn dialogs(&mut self, context: &egui::Context) {
+        let mut resource_selection = None;
+        egui::Window::new("Story resources")
+            .open(&mut self.show_resources)
+            .collapsible(false)
+            .default_width(540.0)
+            .show(context, |ui| {
+                ui.label("Choose the pictures, sounds and data for this story.");
+                ui.radio_value(
+                    &mut self.resource_choice,
+                    0,
+                    "Find a same-name archive automatically",
+                );
+                ui.radio_value(
+                    &mut self.resource_choice,
+                    1,
+                    "Use only resources embedded in the story",
+                );
+                ui.radio_value(
+                    &mut self.resource_choice,
+                    2,
+                    "Use an archive or resource directory",
+                );
+                if self.resource_choice == 2 {
+                    ui.horizontal(|ui| {
+                        ui.text_edit_singleline(&mut self.resource_path);
+                        if ui.button("Browse...").clicked() {
+                            self.file_browser.resources = true;
+                            self.file_browser.open = true;
+                        }
+                    });
+                }
+                ui.separator();
+                ui.label(
+                    "Applying resources restarts the story. Save your game before continuing.",
+                );
+                let valid = self.resource_choice != 2 || !self.resource_path.trim().is_empty();
+                if ui
+                    .add_enabled(valid, egui::Button::new("Restart with selected resources"))
+                    .clicked()
+                {
+                    resource_selection = Some(match self.resource_choice {
+                        1 => ResourceSelection::None,
+                        2 => ResourceSelection::Path(PathBuf::from(self.resource_path.trim())),
+                        _ => ResourceSelection::Auto,
+                    });
+                }
+            });
+        if let Some(selection) = resource_selection
+            && let Some(path) = self.story_path.clone()
+        {
+            self.load_story_with_resources(path, selection);
+            self.show_resources = self.error.is_some();
+        }
         if self.show_story_info
             && let Some(vm) = &self.vm
         {
@@ -1040,6 +1166,9 @@ impl PlayerApp {
                     }
                     if !metadata.ifid.is_empty() {
                         ui.small(format!("IFID: {}", metadata.ifid));
+                    }
+                    if let Some(path) = vm.resource_path() {
+                        ui.label(format!("Resources: {}", path.display()));
                     }
                     let descriptions = vm.resource_descriptions();
                     if !descriptions.is_empty() {
@@ -1223,7 +1352,13 @@ impl eframe::App for PlayerApp {
         self.story_view(context);
         self.dialogs(context);
         if let Some(path) = self.file_browser.show(context) {
-            self.load_story(path);
+            if self.file_browser.resources {
+                self.resource_path = path.display().to_string();
+                self.resource_choice = 2;
+                self.show_resources = true;
+            } else {
+                self.load_story(path);
+            }
         }
         if self
             .vm

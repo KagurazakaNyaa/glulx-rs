@@ -79,7 +79,7 @@ fn paint_cell(
         color_word(style.foreground)
     };
     let mut rich = RichText::new(cell.character)
-        .monospace()
+        .family(super::fonts::family(style))
         .size(style.font_size)
         .color(foreground);
     if style.oblique {

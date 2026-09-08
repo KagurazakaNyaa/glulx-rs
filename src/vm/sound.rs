@@ -3,6 +3,7 @@ use rodio::{OutputStream, OutputStreamHandle, Sink, Source};
 use std::time::{Duration, Instant};
 
 mod sampled;
+mod song;
 mod tracker;
 
 type SoundOutput = rodio::queue::SourcesQueueOutput<f32>;
@@ -46,14 +47,19 @@ impl Source for AlignedSounds {
     }
 }
 
-fn decode_sound(
+fn decode_sound<'a>(
     bytes: &[u8],
     format: [u8; 4],
     repeats: u32,
     offset_ms: u64,
+    resource: impl FnMut(u32) -> Option<&'a [u8]>,
 ) -> Option<Box<dyn Source<Item = f32> + Send>> {
-    if format == *b"MOD " {
-        let mut source = tracker::ModSource::new(bytes, repeats)?;
+    if matches!(&format, b"MOD " | b"SONG") {
+        let mut source = if format == *b"SONG" {
+            tracker::ModSource::from_module(song::assemble(bytes, resource)?, repeats)
+        } else {
+            tracker::ModSource::new(bytes, repeats)?
+        };
         source.skip_millis(offset_ms);
         return Some(Box::new(source));
     }
@@ -221,7 +227,13 @@ impl Vm {
         }
         let bytes = self.story.sound_resource(resource).ok_or(())?;
         let format = self.story.resource_type(*b"Snd ", resource).ok_or(())?;
-        let source = decode_sound(bytes, format, repeats, offset_ms).ok_or(())?;
+        let source = decode_sound(bytes, format, repeats, offset_ms, |number| {
+            if self.story.resource_type(*b"Snd ", number)? != *b"FORM" {
+                return None;
+            }
+            self.story.sound_resource(number)
+        })
+        .ok_or(())?;
         let (sink, output) = Sink::new_idle();
         sink.set_volume(channel.volume as f32 / 65536.0);
         if channel.paused {

@@ -5,6 +5,13 @@ use std::{
 
 use thiserror::Error;
 
+mod resources;
+#[cfg(test)]
+use resources::LooseKind;
+use resources::{
+    directory_resources, discover_resources, read_resource_file, validate_blorb_identity,
+};
+
 const GLUL_MAGIC: u32 = 0x476c_756c;
 const FORM_MAGIC: &[u8; 4] = b"FORM";
 const IFRS_MAGIC: &[u8; 4] = b"IFRS";
@@ -120,23 +127,64 @@ pub struct ResourceDescription {
     pub text: String,
 }
 
+/// Select an external resource archive or directory before starting the VM.
+/// `None` disables discovery; a story's own bundled resources remain available.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ResourceSelection {
+    #[default]
+    Auto,
+    None,
+    Path(PathBuf),
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+struct ExternalResources {
+    path: Option<PathBuf>,
+    // Directories are stored as an equivalent resource-only Blorb. Sessions
+    // retain every byte and never consult the directory or archive again.
+    bytes: Vec<u8>,
+    original_title: String,
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct Story {
     pub path: Option<PathBuf>,
     pub title: String,
     pub header: StoryHeader,
     pub image: Vec<u8>,
+    /// The original story container, separate from any selected resources.
     pub container: Option<Vec<u8>>,
+    #[serde(default)]
+    external_resources: Option<ExternalResources>,
     #[serde(skip)]
     resources: HashMap<(u32, u32), (usize, usize)>,
 }
 
 impl Story {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoryError> {
+        Self::open_with_resources(path, ResourceSelection::Auto)
+    }
+
+    /// Auto discovers resources only beside a raw executable, in this order:
+    /// `.blorb`, `.blb`, `.gblorb`, `.glb`. Stems match exactly; suffixes ignore
+    /// ASCII case. Multiple candidates at one priority are an error. An explicit
+    /// path bypasses discovery, including errors in unused sibling archives.
+    pub fn open_with_resources(
+        path: impl AsRef<Path>,
+        selection: ResourceSelection,
+    ) -> Result<Self, StoryError> {
         let path = path.as_ref();
         let bytes = std::fs::read(path)?;
         let mut story = Self::from_bytes(&bytes, path.file_stem().and_then(|s| s.to_str()))?;
         story.path = Some(path.to_path_buf());
+        let resource_path = match selection {
+            ResourceSelection::Path(path) => Some(path),
+            ResourceSelection::Auto if story.container.is_none() => discover_resources(path)?,
+            _ => None,
+        };
+        if let Some(path) = resource_path {
+            story.attach_resource_path(path)?;
+        }
         Ok(story)
     }
 
@@ -152,12 +200,16 @@ impl Story {
         };
         let header = StoryHeader::parse(&image)?;
         let image = image[..header.ext_start as usize].to_vec();
+        if let Some(bytes) = &container {
+            validate_blorb_identity(bytes, &image, false)?;
+        }
         let mut story = Self {
             path: None,
             title: title.unwrap_or("Untitled Glulx story").to_owned(),
             header,
             image,
             container,
+            external_resources: None,
             resources,
         };
         let metadata = story.metadata();
@@ -165,6 +217,78 @@ impl Story {
             story.title = metadata.title;
         }
         Ok(story)
+    }
+
+    /// Atomically attach an archive without an executable. An optional Glulx
+    /// IFhd must match the first 128 bytes of the original executable.
+    pub fn attach_blorb(&mut self, bytes: &[u8]) -> Result<(), StoryError> {
+        let resources = parse_resource_index(bytes)?;
+        validate_blorb_identity(bytes, &self.image, true)?;
+        let original_title = self
+            .external_resources
+            .as_ref()
+            .map_or(&self.title, |external| &external.original_title)
+            .clone();
+        self.external_resources = Some(ExternalResources {
+            path: None,
+            bytes: bytes.to_vec(),
+            original_title: original_title.clone(),
+        });
+        self.resources = resources;
+        let metadata = self.metadata();
+        self.title = if metadata.title.is_empty() {
+            original_title
+        } else {
+            metadata.title
+        };
+        Ok(())
+    }
+
+    /// Attach a resource-only Blorb or an explicitly selected loose-resource
+    /// directory. Files are read now; subsequent resource calls and session
+    /// restoration do not depend on their continued existence.
+    pub fn attach_resource_path(&mut self, path: impl AsRef<Path>) -> Result<(), StoryError> {
+        let path = path.as_ref();
+        let bytes = if path.is_dir() {
+            directory_resources(path)?
+        } else {
+            read_resource_file(path)?
+        };
+        self.attach_blorb(&bytes)?;
+        self.external_resources.as_mut().unwrap().path = Some(path.to_path_buf());
+        Ok(())
+    }
+
+    pub fn resource_path(&self) -> Option<&Path> {
+        match &self.external_resources {
+            Some(external) => external.path.as_deref(),
+            None if self.container.is_some() => self.path.as_deref(),
+            None => None,
+        }
+    }
+
+    pub(crate) fn validated_session_story(&self) -> Result<Self, StoryError> {
+        let title = self
+            .external_resources
+            .as_ref()
+            .map_or(&self.title, |external| &external.original_title);
+        let mut story = Self::from_bytes(
+            self.container.as_deref().unwrap_or(&self.image),
+            Some(title),
+        )?;
+        if let Some(external) = &self.external_resources {
+            story.attach_blorb(&external.bytes)?;
+            story.external_resources.as_mut().unwrap().path = external.path.clone();
+        }
+        story.path = self.path.clone();
+        Ok(story)
+    }
+
+    fn active_container(&self) -> Option<&[u8]> {
+        self.external_resources
+            .as_ref()
+            .map(|external| external.bytes.as_slice())
+            .or(self.container.as_deref())
     }
 
     pub fn metadata(&self) -> Metadata {
@@ -232,7 +356,7 @@ impl Story {
         parse().unwrap_or_default()
     }
     pub fn container_chunk(&self, tag: [u8; 4]) -> Option<&[u8]> {
-        let bytes = self.container.as_ref()?;
+        let bytes = self.active_container()?;
         blorb_chunks(bytes)
             .ok()?
             .into_iter()
@@ -244,7 +368,7 @@ impl Story {
     }
     pub fn resource_file(&self, usage: [u8; 4], number: u32) -> Option<&[u8]> {
         let &(start, end) = self.resources.get(&(u32::from_be_bytes(usage), number))?;
-        let bytes = self.container.as_ref()?;
+        let bytes = self.active_container()?;
         if &bytes[start - 8..start - 4] == b"FORM" {
             bytes.get(start - 8..end)
         } else {
@@ -253,8 +377,7 @@ impl Story {
     }
     pub fn resource_type(&self, usage: [u8; 4], number: u32) -> Option<[u8; 4]> {
         let &(start, _) = self.resources.get(&(u32::from_be_bytes(usage), number))?;
-        self.container
-            .as_ref()?
+        self.active_container()?
             .get(start - 8..start - 4)?
             .try_into()
             .ok()
@@ -262,7 +385,7 @@ impl Story {
 
     pub fn resource(&self, usage: [u8; 4], number: u32) -> Option<&[u8]> {
         let (start, end) = self.resources.get(&(u32::from_be_bytes(usage), number))?;
-        self.container.as_ref()?.get(*start..*end)
+        self.active_container()?.get(*start..*end)
     }
 }
 
@@ -369,6 +492,19 @@ fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, StoryError> {
 
 #[derive(Debug, Error)]
 pub enum StoryError {
+    #[error("cannot read resource path {path}: {source}")]
+    ResourceIo {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("ambiguous resource archives: {first} and {second}; select one explicitly")]
+    AmbiguousResources { first: PathBuf, second: PathBuf },
+    #[error("separate resources contain an executable; open that story by itself instead")]
+    ResourcesContainExecutable,
+    #[error("resource IFhd does not match the first 128 bytes of this Glulx story")]
+    ResourceIdentityMismatch,
+    #[error("unsupported loose resource filename or format: {0}")]
+    UnsupportedResourceFile(PathBuf),
     #[error("story requests {0} bytes, exceeding the 256 MiB VM memory limit")]
     MemoryLimit(u32),
     #[error("cannot read story file: {0}")]
@@ -396,8 +532,63 @@ pub enum StoryError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    pub(crate) struct ResourceDirectory(pub PathBuf);
+
+    impl ResourceDirectory {
+        pub(crate) fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "glulx-resource-test-{}-{nanos}-{id}",
+                std::process::id()
+            ));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for ResourceDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    pub(crate) fn resource_blorb(chunks: &[(LooseKind, &[u8])]) -> Vec<u8> {
+        let count = chunks
+            .iter()
+            .filter(|((_, usage), _)| usage.is_some())
+            .count();
+        let mut bytes = b"FORM\0\0\0\0IFRSRIdx".to_vec();
+        bytes.extend_from_slice(&(4 + count as u32 * 12).to_be_bytes());
+        bytes.extend_from_slice(&(count as u32).to_be_bytes());
+        bytes.resize(24 + count * 12, 0);
+        let mut index = 24;
+        for ((tag, usage), data) in chunks {
+            if let Some((usage, number)) = usage {
+                let start = bytes.len() as u32;
+                bytes[index..index + 4].copy_from_slice(usage);
+                bytes[index + 4..index + 8].copy_from_slice(&number.to_be_bytes());
+                bytes[index + 8..index + 12].copy_from_slice(&start.to_be_bytes());
+                index += 12;
+            }
+            bytes.extend_from_slice(tag);
+            bytes.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            bytes.extend_from_slice(data);
+            if data.len() % 2 != 0 {
+                bytes.push(0);
+            }
+        }
+        let length = bytes.len() as u32 - 8;
+        bytes[4..8].copy_from_slice(&length.to_be_bytes());
+        bytes
+    }
 
     fn minimal_image() -> Vec<u8> {
         let mut bytes = vec![0; 0x100];
@@ -605,5 +796,242 @@ mod tests {
         let story =
             Story::from_bytes(&build(&[tags[0], tags[1], (*b"RDes", broken)]), None).unwrap();
         assert!(story.resource_descriptions().is_empty());
+    }
+
+    #[test]
+    fn resource_only_blorb_serves_all_resources_without_changing_executable() {
+        let image = minimal_image();
+        let xml = b"<ifindex><story><bibliographic><title>Resources</title><author>Artist</author></bibliographic></story></ifindex>";
+        let description = b"\0\0\0\x01Pict\0\0\0\x01\0\0\0\x03Fox";
+        let chunks = [
+            ((*b"PNG ", Some((*b"Pict", 1))), &b"picture"[..]),
+            ((*b"FORM", Some((*b"Snd ", 2))), &b"AIFF"[..]),
+            ((*b"TEXT", Some((*b"Data", 3))), &b"text\n"[..]),
+            ((*b"BINA", Some((*b"Data", 4))), &b"\0\0\0A"[..]),
+            ((*b"FORM", Some((*b"Data", 5))), &b"TEST"[..]),
+            ((*b"Fspc", None), &b"\0\0\0\x01"[..]),
+            ((*b"RDes", None), &description[..]),
+            ((*b"IFmd", None), &xml[..]),
+            ((*b"IFhd", None), &image[..128]),
+        ];
+        let resources = resource_blorb(&chunks);
+        assert!(matches!(
+            Story::from_bytes(&resources, None),
+            Err(StoryError::MissingExecutable)
+        ));
+        let mut story = Story::from_bytes(&image, Some("Executable")).unwrap();
+        let header = story.header;
+        story.attach_blorb(&resources).unwrap();
+        assert_eq!(story.image, image);
+        assert_eq!(story.header, header);
+        assert!(story.container.is_none());
+        assert_eq!(story.title, "Resources");
+        assert_eq!(story.metadata().author, "Artist");
+        assert_eq!(story.cover(), Some(&b"picture"[..]));
+        assert_eq!(story.resource_descriptions()[0].text, "Fox");
+        assert_eq!(story.sound_resource(2), Some(&b"FORM\0\0\0\x04AIFF"[..]));
+        assert_eq!(
+            story.resource_file(*b"Data", 5),
+            Some(&b"FORM\0\0\0\x04TEST"[..])
+        );
+        let mut bundled_chunks = chunks.to_vec();
+        bundled_chunks.push(((*b"GLUL", Some((*b"Exec", 0))), &image));
+        let bundled = Story::from_bytes(&resource_blorb(&bundled_chunks), None).unwrap();
+        for (usage, number) in [
+            (*b"Pict", 1),
+            (*b"Snd ", 2),
+            (*b"Data", 3),
+            (*b"Data", 4),
+            (*b"Data", 5),
+        ] {
+            assert_eq!(
+                story.resource_type(usage, number),
+                bundled.resource_type(usage, number)
+            );
+            assert_eq!(
+                story.resource_file(usage, number),
+                bundled.resource_file(usage, number)
+            );
+        }
+        story.attach_blorb(&resource_blorb(&[])).unwrap();
+        assert_eq!(story.title, "Executable");
+        assert!(story.cover().is_none());
+    }
+
+    #[test]
+    fn identity_and_executable_conflicts_fail_atomically() {
+        let image = minimal_image();
+        let valid = resource_blorb(&[((*b"TEXT", Some((*b"Data", 1))), b"retained")]);
+        let mut story = Story::from_bytes(&image, Some("Original")).unwrap();
+        story.attach_blorb(&valid).unwrap();
+        let original = serde_json::to_string(&story).unwrap();
+        let mut wrong_identity = image[..128].to_vec();
+        wrong_identity[127] ^= 1;
+        for invalid in [
+            resource_blorb(&[((*b"IFhd", None), &wrong_identity)]),
+            resource_blorb(&[((*b"IFhd", None), &image[..13])]),
+            resource_blorb(&[
+                ((*b"IFhd", None), &image[..128]),
+                ((*b"IFhd", None), &image[..128]),
+            ]),
+            resource_blorb(&[((*b"GLUL", Some((*b"Exec", 0))), &image)]),
+            resource_blorb(&[((*b"GLUL", None), &image)]),
+            resource_blorb(&[((*b"TEXT", Some((*b"Exec", 1))), b"unknown")]),
+            resource_blorb(&[
+                ((*b"TEXT", Some((*b"Data", 1))), b"first"),
+                ((*b"TEXT", Some((*b"Data", 1))), b"duplicate"),
+            ]),
+            b"FORM\0\0\0\x04IFRS".to_vec(),
+        ] {
+            assert!(story.attach_blorb(&invalid).is_err());
+            assert_eq!(serde_json::to_string(&story).unwrap(), original);
+            assert_eq!(story.resource(*b"Data", 1), Some(&b"retained"[..]));
+        }
+        let bundled = resource_blorb(&[
+            ((*b"GLUL", Some((*b"Exec", 0))), &image),
+            ((*b"IFhd", None), &wrong_identity),
+        ]);
+        assert!(matches!(
+            Story::from_bytes(&bundled, None),
+            Err(StoryError::ResourceIdentityMismatch)
+        ));
+        assert!(matches!(
+            story.attach_blorb(&resource_blorb(&[((*b"IFhd", None), &wrong_identity)])),
+            Err(StoryError::ResourceIdentityMismatch)
+        ));
+    }
+
+    #[test]
+    fn discovery_has_deterministic_priority_explicit_override_and_opt_out() {
+        let directory = ResourceDirectory::new();
+        let path = directory.0.join("story.ulx");
+        std::fs::write(&path, minimal_image()).unwrap();
+        let first = directory.0.join("story.BLORB");
+        let second = directory.0.join("story.blb");
+        std::fs::write(
+            &first,
+            resource_blorb(&[((*b"TEXT", Some((*b"Data", 1))), b"first")]),
+        )
+        .unwrap();
+        std::fs::write(
+            &second,
+            resource_blorb(&[((*b"TEXT", Some((*b"Data", 1))), b"second")]),
+        )
+        .unwrap();
+        let auto = Story::open(&path).unwrap();
+        assert_eq!(auto.resource_path(), Some(first.as_path()));
+        assert_eq!(auto.resource(*b"Data", 1), Some(&b"first"[..]));
+        let explicit =
+            Story::open_with_resources(&path, ResourceSelection::Path(second.clone())).unwrap();
+        assert_eq!(explicit.resource(*b"Data", 1), Some(&b"second"[..]));
+        assert!(
+            Story::open_with_resources(&path, ResourceSelection::None)
+                .unwrap()
+                .resource(*b"Data", 1)
+                .is_none()
+        );
+        std::fs::write(&first, b"broken").unwrap();
+        assert!(Story::open(&path).is_err());
+        assert!(Story::open_with_resources(&path, ResourceSelection::Path(second)).is_ok());
+        assert!(Story::open_with_resources(&path, ResourceSelection::None).is_ok());
+        let bundled = directory.0.join("story.gblorb");
+        std::fs::write(
+            &bundled,
+            resource_blorb(&[((*b"GLUL", Some((*b"Exec", 0))), &minimal_image())]),
+        )
+        .unwrap();
+        assert!(Story::open(&bundled).is_ok());
+        let unusual_suffix = directory.0.join("lone.blorb");
+        std::fs::write(&unusual_suffix, minimal_image()).unwrap();
+        assert!(
+            Story::open(&unusual_suffix)
+                .unwrap()
+                .resource_path()
+                .is_none()
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn discovery_rejects_same_priority_case_aliases() {
+        let directory = ResourceDirectory::new();
+        let path = directory.0.join("story.ulx");
+        std::fs::write(&path, minimal_image()).unwrap();
+        for name in ["story.blorb", "story.BLORB"] {
+            std::fs::write(directory.0.join(name), resource_blorb(&[])).unwrap();
+        }
+        assert!(matches!(
+            Story::open(&path),
+            Err(StoryError::AmbiguousResources { .. })
+        ));
+        assert!(
+            Story::open_with_resources(
+                &path,
+                ResourceSelection::Path(directory.0.join("story.blorb"))
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn explicit_loose_directory_preserves_types_form_headers_and_metadata() {
+        let directory = ResourceDirectory::new();
+        let image = minimal_image();
+        for (name, bytes) in [
+            ("PIC1.png", &b"picture"[..]),
+            ("pic2.JPEG", &b"jpeg"[..]),
+            ("SND3.aiff", &b"FORM\0\0\0\x04AIFF"[..]),
+            ("SND4.it", &b"IMPM"[..]),
+            ("DATA5.txt", "é\n".as_bytes()),
+            ("DATA6.bin", &b"\0\0\0A"[..]),
+            ("DATA7.form", &b"FORM\0\0\0\x04TEST"[..]),
+            ("DATA8", &b"raw"[..]),
+            ("FRONTIS", &b"\0\0\0\x01"[..]),
+            ("IDENT", &image[..128]),
+            (
+                "METADATA.xml",
+                &b"<ifindex><title>Loose story</title></ifindex>"[..],
+            ),
+            ("README.md", &b"ignored"[..]),
+        ] {
+            std::fs::write(directory.0.join(name), bytes).unwrap();
+        }
+        let mut story = Story::from_bytes(&image, None).unwrap();
+        story.attach_resource_path(&directory.0).unwrap();
+        assert_eq!(story.resource_path(), Some(directory.0.as_path()));
+        assert_eq!(story.title, "Loose story");
+        assert_eq!(story.cover(), Some(&b"picture"[..]));
+        for (usage, number, tag) in [
+            (*b"Pict", 2, *b"JPEG"),
+            (*b"Snd ", 3, *b"FORM"),
+            (*b"Snd ", 4, *b"MOD "),
+            (*b"Data", 5, *b"TEXT"),
+            (*b"Data", 6, *b"BINA"),
+            (*b"Data", 7, *b"FORM"),
+            (*b"Data", 8, *b"BINA"),
+        ] {
+            assert_eq!(story.resource_type(usage, number), Some(tag));
+        }
+        assert_eq!(story.sound_resource(3), Some(&b"FORM\0\0\0\x04AIFF"[..]));
+        assert_eq!(
+            story.resource_file(*b"Data", 7),
+            Some(&b"FORM\0\0\0\x04TEST"[..])
+        );
+        let snapshot = serde_json::to_string(&story).unwrap();
+        for (name, bytes) in [
+            ("SND9.aiff", &b"FORM\0\0\0\x04WAVE"[..]),
+            ("DATA6.txt", &b"duplicate"[..]),
+            ("PIC4294967296.png", &b"overflow"[..]),
+            ("STORY.ulx", &image[..]),
+            ("SND9.wav", &b"unsupported"[..]),
+        ] {
+            let path = directory.0.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            assert!(story.attach_resource_path(&directory.0).is_err(), "{name}");
+            assert_eq!(serde_json::to_string(&story).unwrap(), snapshot);
+            std::fs::remove_file(path).unwrap();
+        }
+        std::fs::remove_dir_all(&directory.0).unwrap();
+        assert_eq!(story.resource(*b"Data", 5), Some("é\n".as_bytes()));
     }
 }

@@ -22,13 +22,20 @@ def story():
     buffer, grid = mem(0x2000), mem(0x2004)
     b.instruction(0x149, 2, 0)
     for kind, style, hint, value in [(3, 3, 2, 2), (3, 9, 0, 3), (3, 9, 1, -2), (3, 9, 2, 1),
-                                     (3, 10, 2, 3), (4, 9, 7, 0xffffff), (4, 9, 8, 0x204090)]:
+                                     (3, 10, 2, 3), (3, 9, 4, -1), (4, 9, 4, -1), (4, 9, 7, 0xffffff), (4, 9, 8, 0x204090)]:
         b.glk(0xb0, [kind, style, hint, value])
     b.glk(0x23, [0, 0, 0, 3, 0], buffer)
     b.glk(0x23, [buffer, 0x12, 5, 4, 0], grid)
     b.glk(0x2f, [buffer])
     b.glk(0x86, [3])
     text('Centered heading\n')
+    b.glk(0x86, [0])
+    text('Light font weights (buffer/grid): ')
+    for target in [buffer, grid]:
+        b.glk(0xb3, [target, 9, 4, 0x2020])
+        b.instruction(0x71, mem(0x2020))
+        b.instruction(0x70, 32)
+    text('\n')
     b.glk(0x86, [9])
     text(('This paragraph has a hanging first line, side indentation and full justification. '
           'Words should reach both edges on wrapped lines while the last line remains short. ')*4 + '\n')

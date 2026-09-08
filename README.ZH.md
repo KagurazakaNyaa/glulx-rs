@@ -32,6 +32,16 @@ cargo run --release -- --headless path/to/story.ulx
 
 桌面支持段落对齐和缩进、带样式及原位编辑的网格、可缩放的行内和边缘图像、图片超链接，以及 MOD/XM/S3M/IT 音乐和采样音频。支持 Inform 加速函数 1–13。系统字体提供 Unicode 回退；可在 `View -> Options` 中选择额外字体。已测试的媒体格式及限制见兼容性说明。
 
+启动前可指定外置资源：
+
+```sh
+cargo run --release -- --resources path/to/media.blorb path/to/story.ulx
+cargo run --release -- --resources path/to/media-directory path/to/story.ulx
+cargo run --release -- --no-auto-resources path/to/story.ulx
+```
+
+File → Choose resources 通过重启故事应用资源选择。交互终端中的 `--headless` 可显示网格、实时编辑行输入并接收单键；管道保留自动化协议。终端 Ctrl+N 切换待输入窗口，Ctrl+C 退出。已支持 SONG 音频和可用的真实 light 字体。
+
 ## 翻译
 
 回合翻译是可选功能，默认关闭。在 `View -> Translation panel` 中启用，然后在 `View -> Options` 中配置兼容 OpenAI 的服务端点、模型、目标语言和系统提示词。

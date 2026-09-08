@@ -4,7 +4,7 @@
 
 Date: 2026-09-08, Linux x86_64. Core implementation commit `4c16443`, acceleration/media commit `c5fcc20`, and input/font/window commit `4870bcf`. Subsequent work completed fixes for media formats, shared files, wide-range dates, IFZS, and image edge cases.
 
-Passing records below cover implemented capabilities. Separate resource attachment, `SONG`, a real terminal host, and actual light font weight are not implemented, so their validation must not be treated as passed. Further work is in the [specification checklist](glulx-spec-checklist.md).
+The remaining-feature audit was committed as `0a6d5b4` before implementation; bilingual documentation was committed separately as `af210ba`. Separate resources, SONG, interactive terminal input and actual light weight now have the local validation recorded below. Unexecuted platform and broader scenario checks remain open in the [specification checklist](glulx-spec-checklist.md).
 
 ## Reproduction Commands and Results
 
@@ -17,7 +17,7 @@ python3 tools/check-opcodes.py --spec /path/to/Glulx-Spec.md --output /tmp/glulx
 python3 tools/check-reference.py --reference /path/to/glulxe --candidate target/debug/glulx-rs --fixtures /path/to/fixtures
 ```
 
-Rust tests: 158 passed / 0 failed; Clippy with warnings as errors and the release build passed. Scripts do not download fixtures or modify repository game resources; synthetic stories and saves use temporary directories. Without `--fixtures`, synthetic IFZS bidirectional interoperability, double stack order, Inform acceleration, zero-length memory, and deep-string differential checks still run. Dispatch and operand counts match 150/150 official opcodes; all 124/124 official Glk dispatch selectors are present. These two checks establish table completeness only; execution semantics still require runtime tests.
+Rust tests: 180 passed / 0 failed (178 library, 2 CLI); Clippy with warnings as errors and the release build passed. Scripts do not download fixtures or modify repository game resources; synthetic stories and saves use temporary directories. Without `--fixtures`, synthetic IFZS bidirectional interoperability, double stack order, Inform acceleration, zero-length memory, and deep-string differential checks still run. Dispatch and operand counts match 150/150 official opcodes; all 124/124 official Glk dispatch selectors are present. These two checks establish table completeness only; execution semantics still require runtime tests.
 
 The final integrated full script passed with:
 
@@ -141,3 +141,22 @@ The four original generated tracker fixtures are in [fixtures.rs](../src/vm/soun
 The audio codec tool generates original 44.1 kHz stereo tones with ffmpeg, then tests the project's currently built decoder: AIFF/OGG/MP3 at 250 ms (22,050 samples) and 1250 ms (110,250 samples). All six groups pass exact sample counts, duration, finite/infinite repetition, 5 ms restoration, and playback conversion checks. Cargo JSON artifact output identifies the Rodio/Symphonia build, avoiding stale feature combinations. The tool requires cargo/rustc/ffmpeg; the runtime player does not depend on ffmpeg.
 
 A further 18 audio checks verify that 8/22.05/48 kHz input resampled to 44.1 kHz matches a fully buffered baseline sample for sample; decoder packet and repetition boundaries do not reset resampling phase.
+
+
+## Separate Resources, Terminal Input, SONG and Light Weight
+
+```sh
+python3 tools/check-resource-maps.py --fixture /path/to/resstreamtest.gblorb --candidate target/debug/glulx-rs --reference /path/to/glulxe --output /tmp/resource-maps
+python3 tools/check-resource-ui.py --candidate target/debug/glulx-rs --output /tmp/resource-ui
+python3 tools/check-terminal.py --candidate target/debug/glulx-rs
+python3 tools/make-song-fixture.py /tmp/glulx-song.gblorb
+python3 tools/check-song-ui.py --candidate target/debug/glulx-rs --output /tmp/song-ui
+```
+
+- Resource model: eight new Rust tests cover resource-only archives, 128-byte IFhd validation, conflicts, atomic failure, discovery precedence/ambiguity, loose file types and old/current desktop snapshots. The official resource-stream story produces identical output as a bundled story, raw story plus explicit archive, auto-discovered archive and loose directory; output also matches Glulxe after interpreter-version normalization.
+- Resource GUI: CLI selection and all three GUI choices, archive Browse and Use this directory, changing picture caches, bad IFhd retaining existing state, resource-path focus, and opening another story without resource leakage passed. After original archives/directories and the raw story are deleted, restored sessions read Data and redraw pictures again, proving resource content was restored rather than only a cached canvas.
+- TTY: actual PTY checks passed 25 immediate special-key events, prefill editing, timed cancellation/current composition, replacement prefill, grid editing, multi-window selection, resize/Arrange, echo/terminators, file writing/cancellation, and terminal restoration after normal exit, Ctrl+C/Ctrl+D and VM errors. Pipe output remains exact. Windows console attachment code is present but has not received Windows on-device validation.
+- SONG: nine focused tests cover 15/31-sample headers, shared/22-byte references, AIFF 1–32-bit PCM, SSND offsets, MARK/INST no/forward/ping-pong loops, malformed references and bounds, equivalent-module PCM, repeats, offsets, pause/stop and notifications. The original desktop fixture passes active paused-session restoration, resume/fade completion, the last finite-repeat event, two simultaneous channels and stop.
+- Light weight: metadata checks reject falsely named regular/invalid fonts; actual installed light glyphs render in named font families, and host availability is reinstalled after serialization. Linux desktop output reports both buffer and grid weights as -1, with links, inline editing and session restoration still working. Missing faces retain regular fallback.
+
+The reference regression still passes all ten checks, including 92 Glulxercise sections and both Adventure save directions. Resource, terminal and SONG tools generate their own temporary content and do not download games.

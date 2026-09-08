@@ -37,15 +37,19 @@ impl ModSource {
             Module::load_mod(bytes)
         }
         .ok()?;
+        Some(Self::from_module(module, repeats))
+    }
+
+    pub(super) fn from_module(module: Module, repeats: u32) -> Self {
         let mut player = OwnedPlayer::new(module, Self::player);
         let pending = player
             .with_dependent_mut(|_, player| player.next())
             .map(|sample| sample as f32 / 32768.0);
-        Some(Self {
+        Self {
             player,
             pending,
             remaining: repeats,
-        })
+        }
     }
 
     fn player(module: &Module) -> XmrsPlayer<'_> {
@@ -224,9 +228,9 @@ mod tests {
     #[test]
     fn blorb_mod_chunk_uses_the_tracker_decoder() {
         let bytes = module();
-        assert!(super::super::decode_sound(&bytes, *b"MOD ", 1, 0).is_some());
-        assert!(super::super::decode_sound(&bytes, *b"OGGV", 1, 0).is_none());
-        assert!(super::super::decode_sound(&bytes[..600], *b"MOD ", 1, 0).is_none());
+        assert!(super::super::decode_sound(&bytes, *b"MOD ", 1, 0, |_| None).is_some());
+        assert!(super::super::decode_sound(&bytes, *b"OGGV", 1, 0, |_| None).is_none());
+        assert!(super::super::decode_sound(&bytes[..600], *b"MOD ", 1, 0, |_| None).is_none());
     }
 
     #[test]
@@ -261,7 +265,7 @@ mod tests {
                 "{name} stereo resume at5ms"
             );
             assert!(
-                super::super::decode_sound(&bytes, *b"MOD ", 1, 0).is_some(),
+                super::super::decode_sound(&bytes, *b"MOD ", 1, 0, |_| None).is_some(),
                 "{name} inMOD chunk"
             );
         }

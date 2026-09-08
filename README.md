@@ -52,6 +52,19 @@ and MOD/XM/S3M/IT music alongside sampled audio. Inform acceleration functions 1
 available. System fonts supply Unicode fallback; an extra font can be selected
 in `View -> Options`. See the compatibility document for tested media formats and limits.
 
+External resources can be selected before startup:
+
+```sh
+cargo run --release -- --resources path/to/media.blorb path/to/story.ulx
+cargo run --release -- --resources path/to/media-directory path/to/story.ulx
+cargo run --release -- --no-auto-resources path/to/story.ulx
+```
+
+The File → Choose resources dialog applies a selection by restarting the story.
+Interactive `--headless` sessions display grids and support live line editing and
+single-key input; pipes retain the automation protocol. In a terminal, Ctrl+N changes
+input windows and Ctrl+C exits. SONG audio and available light font faces are supported.
+
 ## Translation
 
 Turn translation is optional and disabled by default. Enable it from

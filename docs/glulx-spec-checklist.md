@@ -53,7 +53,7 @@ Evidence: [window tree](../src/vm/windows.rs), [streams](../src/vm/streams.rs), 
 
 ## Validation and Maintenance
 
-- [x] 158 Rust tests pass; domain-specific matrices and edge-case coverage are in the validation record.
+- [x] 180 Rust tests (178 library and 2 CLI) pass; domain-specific matrices and edge-case coverage are in the validation record.
 - [x] Final integrated Glulxercise general, single-precision, and double-precision runs yielded 92 passing sections, passing all three rounds; an earlier random-distribution threshold failure is also retained in the validation record.
 - [x] All 94 results for Inform acceleration functions 1–13 exactly match Glulxe; the synthetic media story verifies image reflow, clicks, MOD completion events, and session restoration.
 - [x] Pinned Glulxe/CheapGlk revisions, synthetic-story and Adventure bidirectional save validation, and exact normalized Unicode/resource-stream output comparison.
@@ -68,17 +68,17 @@ Evidence: [window tree](../src/vm/windows.rs), [streams](../src/vm/streams.rs), 
 - [x] Failed draws for corrupt images, bounded clipped sampling for oversized destinations, and GPU texture-dimension adaptation.
 - [x] Blorb RIdx first-chunk rule and RDes text descriptions.
 
-## Features to Implement
+## Completed Player Additions
 
-- [ ] Separate Blorb resource attachment: specify an archive without an executable for raw `.ulx`, with public API, CLI arguments, and GUI entry points; images, sound, Data, and descriptions use the selected archive. Validate an existing `IFhd` against the first 128 Glulx bytes; allow absence; wrong identity/corrupt archives must not replace existing resources.
-- [ ] Blorb identity and argument-conflict diagnostics: embedded-executable IFhd matches the story; an explicit separate story plus an archive containing Exec reports a conflict; do not mix in the Z-machine identity layout.
-- [ ] Automatic same-name resource discovery (player policy): search the story directory for same-name Blorbs, document candidate priority and explicit-selection precedence, and provide understandable outcomes for absent, corrupt, or mismatched candidates.
-- [ ] Session restoration with separate resources: retain resource origin and content so images, sound, and Data remain available after restoration; cover both bundled and external resources.
-- [ ] Legacy `SONG` audio format: parse `SND<number>` external AIFF sample references and sustain loops, integrating existing playback, repetition, pause, and restoration paths. Blorb explicitly marks this extension optional and deprecated.
-- [ ] Real terminal host: display successfully created text-grid/status windows and multi-window layouts; support prefilled editing, timed cancellation returning current edits, and immediate unechoed character input without Enter; preserve pipe-driven automation and accurately distinguish its capabilities.
-- [ ] Actual light font weight (optional display enhancement): select and render a light face when available, aligning style_measure/style_distinguish with actual presentation; accurately report fallback values when no font is available.
+- [x] Separate Blorb resource attachment: specify an archive without an executable for raw `.ulx`, with public API, CLI arguments, and GUI entry points; images, sound, Data, and descriptions use the selected archive. Validate an existing `IFhd` against the first 128 Glulx bytes; allow absence; wrong identity/corrupt archives must not replace existing resources.
+- [x] Blorb identity and argument-conflict diagnostics: embedded-executable IFhd matches the story; an explicit separate story plus an archive containing Exec reports a conflict; do not mix in the Z-machine identity layout.
+- [x] Automatic same-name resource discovery (player policy): search the story directory for same-name Blorbs, document candidate priority and explicit-selection precedence, and provide understandable outcomes for absent, corrupt, or mismatched candidates.
+- [x] Session restoration with separate resources: retain resource origin and content so images, sound, and Data remain available after restoration; cover both bundled and external resources.
+- [x] Legacy `SONG` audio format: parse `SND<number>` external AIFF sample references and sustain loops, integrating existing playback, repetition, pause, and restoration paths. Blorb explicitly marks this extension optional and deprecated.
+- [x] Real terminal host: display successfully created text-grid/status windows and multi-window layouts; support prefilled editing, timed cancellation returning current edits, and immediate unechoed character input without Enter; preserve pipe-driven automation and accurately distinguish its capabilities.
+- [x] Actual light font weight (optional display enhancement): select and render a light face when available, aligning style_measure/style_distinguish with actual presentation; accurately report fallback values when no font is available.
 
-- [ ] Loose resource directory (optional player convenience): explicit directory selection and documented PIC/SND/DATA names/formats, covering number parsing, types, path boundaries, and session restoration; Glk permits omitting this entry point.
+- [x] Loose resource directory (optional player convenience): explicit directory selection and documented PIC/SND/DATA names/formats, covering number parsing, types, path boundaries, and session restoration; Glk permits omitting this entry point.
 
 ## Validation Still Required
 
@@ -88,8 +88,8 @@ Evidence: [window tree](../src/vm/windows.rs), [streams](../src/vm/streams.rs), 
 - [ ] Expanded media fixture matrix: PNG/JPEG variants, sampled-audio bit depths/sample rates/channels, and historical tracker variants; record support and failure behavior individually.
 - [ ] Physical audio-output validation: relate synchronized starts, pause/resume, fades, and completion notifications to actual output, adding evidence beyond software sample-frame checks.
 
-Prioritize separate resources, a real terminal host, and cross-platform validation. Validation tasks above do not imply known missing functionality; existing passing records remain valid.
+Separate resources, terminal input and the listed optional player additions are implemented and have local validation. Cross-platform validation remains pending. Validation tasks above do not imply known missing functionality; existing passing records remain valid.
 
 ## Current Limits and Specification Scope
 
-Grids retain uniform cell sizes as specified, ignoring hints 0–3/6 that change cell layout; light requests currently fall back to regular and report that accurately. Missing glyphs return CannotPrint, and fallback fonts can be loaded. MOD/XM/S3M/IT are supported without claiming every historical dialect or bit-exact playback against specific hardware. Blorb Rect/Reso/APal/Loop are in Z-machine scope. VM memory is limited to 256 MiB; undo retains at most 16 states sharing a 64 MiB estimated budget. Image sources above 16 megapixels or the decoder's 128 MiB allocation budget are unavailable; draw destination dimensions are not subject to this source-image limit. These resource limits are current implementation policy; undo estimates include memory/stack/story image but exclude heap indexes and allocator overhead, and are not marked as missing features. Container reading still tolerates nonzero padding and unindexed GLUL fallback; see the audit. Rejection of every invalid container is not claimed.
+Grids retain uniform cell sizes as specified, ignoring hints 0–3/6 that change cell layout; available light faces render at light weight; missing faces fall back to regular and report that accurately. Missing glyphs return CannotPrint, and fallback fonts can be loaded. MOD/XM/S3M/IT are supported without claiming every historical dialect or bit-exact playback against specific hardware. Blorb Rect/Reso/APal/Loop are in Z-machine scope. VM memory is limited to 256 MiB; undo retains at most 16 states sharing a 64 MiB estimated budget. Image sources above 16 megapixels or the decoder's 128 MiB allocation budget are unavailable; draw destination dimensions are not subject to this source-image limit. These resource limits are current implementation policy; undo estimates include memory/stack/story image but exclude heap indexes and allocator overhead, and are not marked as missing features. Container reading still tolerates nonzero padding and unindexed GLUL fallback; see the audit. Rejection of every invalid container is not claimed.

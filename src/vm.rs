@@ -409,6 +409,8 @@ pub struct Vm {
     image_info: BTreeMap<u32, Option<[u32; 2]>>,
     graphical_host: bool,
     #[serde(skip)]
+    terminal_host: bool,
+    #[serde(skip)]
     audio: sound::AudioDevice,
     channels: BTreeMap<u32, sound::Channel>,
     next_channel: u32,
@@ -462,6 +464,7 @@ impl Vm {
             text_appearance: TextAppearance::default(),
             image_info: BTreeMap::new(),
             graphical_host: true,
+            terminal_host: false,
             audio: sound::AudioDevice::default(),
             channels: BTreeMap::new(),
             next_channel: 1,
@@ -2249,19 +2252,18 @@ impl Vm {
             1 => u32::from(
                 printable
                     || argument == 0xffff_fffa
-                    || (self.graphical_host
+                    || ((self.graphical_host || self.terminal_host)
                         && events::is_special_key(argument)
                         && argument != u32::MAX),
             ),
             2 => u32::from(printable),
             3 => {
                 let visible = printable
-                    && (!self.graphical_host
-                        || char::from_u32(argument).is_some_and(|c| {
-                            self.glyph_support
-                                .as_ref()
-                                .map_or(c.is_ascii(), |support| support(c))
-                        }));
+                    && char::from_u32(argument).is_some_and(|c| {
+                        self.glyph_support
+                            .as_ref()
+                            .map_or(!self.graphical_host || c.is_ascii(), |support| support(c))
+                    });
                 if visible || argument == 10 { 2 } else { 0 }
             }
             4 => u32::from(self.graphical_host && matches!(argument, 4 | 5)), // MouseInput
@@ -2274,9 +2276,10 @@ impl Vm {
             11 => 1,                                          // Hyperlinks
             13 => u32::from(self.sound_available()),          // MOD tracker music
             12 => u32::from(self.graphical_host && matches!(argument, 3 | 4)), // HyperlinkInput
-            17..=18 => u32::from(self.graphical_host),        // Line input echo / terminators
+            17..=18 => u32::from(self.graphical_host || self.terminal_host), // Line input echo / terminators
             19 => u32::from(
-                self.graphical_host && matches!(argument, 0xffff_fff8 | 0xffff_ffe4..=0xffff_ffef),
+                (self.graphical_host || self.terminal_host)
+                    && matches!(argument, 0xffff_fff8 | 0xffff_ffe4..=0xffff_ffef),
             ),
             14 => u32::from(self.graphical_host), // GraphicsTransparency
             15..=16 => 1,                         // Unicode / UnicodeNorm
