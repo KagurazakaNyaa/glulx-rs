@@ -381,7 +381,7 @@ fn unicode_transform_expansion_titlecase_normalization_and_capability_arguments(
     assert_eq!(glk(&mut vm, 0x124, &[0x100, 4, 2]), 1);
     assert_eq!(vm.memory.read32(0x100).unwrap(), 0xe9);
     assert_eq!(vm.glk_gestalt(7, 5), 1);
-    assert_eq!(vm.glk_gestalt(7, 3), 0);
+    assert_eq!(vm.glk_gestalt(7, 3), 1);
     assert_eq!(vm.glk_gestalt(2, 0xd800), 0);
     assert_eq!(vm.glk_gestalt(3, 0x4e2d), 2);
     assert_eq!(vm.glk_gestalt(16, 0), 1);

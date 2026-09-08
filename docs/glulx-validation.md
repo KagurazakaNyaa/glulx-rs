@@ -1,6 +1,6 @@
 # Glulx 实现验收记录
 
-日期：2026-09-08，Linux x86_64，基线 `31bb75c` 加本轮实现。
+日期：2026-09-08，Linux x86_64，主实现已提交 `4c16443`，此轮继续实现可选加速与媒体能力。
 
 ## 可复现命令与结果
 
@@ -12,15 +12,16 @@ RUSTC_WRAPPER= cargo build --release
 python3 tools/check-reference.py --reference /path/to/glulxe --candidate target/debug/glulx-rs --fixtures /path/to/fixtures
 ```
 
-Rust 测试 56 passed / 0 failed；Clippy（warnings 视为错误）及 release 构建通过。
+Rust 测试 89 passed / 0 failed；Clippy（warnings 视为错误）及 release 构建通过。
 脚本不下载样本、不修改仓库游戏资源；合成故事及存档使用临时目录。
-不传 `--fixtures` 仍可运行合成 IFZS 双向互操作及 double stack 顺序检查。
+不传 `--fixtures` 仍可运行合成 IFZS 双向互操作、double stack 顺序以及 Inform 加速函数差分检查。
 
 完整脚本结果：
 
 ```text
 PASS Rust -> Glulxe: save continuation, heap chunk, double stack order
 PASS Glulxe -> Rust: save continuation, heap chunk, double stack order
+PASS acceleration: all 13 functions, 94 result checks, exact reference transcript
 PASS glulxercise.ulx: 92 passing sections
 PASS unicasetest.ulx: exact normalized reference transcript
 PASS resstreamtest.gblorb: exact normalized reference transcript
@@ -45,13 +46,15 @@ Adventure 的保存方执行 `north / save / 路径 / quit / y`，另一解释�
 | 单/双精度 | `double_*`、`floating_branches_*`、`float_nan_modulo_and_power_identities` | Glulxercise allfloat/alldouble；双栈结果参考测试 |
 | IFZS | round trip、损坏存档、文件提示、空 MAll | 合成故事及 Adventure 双向互读 |
 | undo/restart/protect/heap | `undo_*`、`allocation_limits_*`、原 heap 回归 | Glulxercise 综合 |
+| Inform 加速 1–13 | [acceleration.rs](../src/vm/acceleration.rs)：注册/取消、类/属性/私有权限、旧/新布局、call/callf/tailcall、压缩字符串和 20,000 次 filter 回调、恢复状态边界 | 13 函数共 94 项结果与 Glulxe 精确一致 |
 | random/verify/gestalt | `random_ranges_determinism_verify_and_capabilities` | Glulxercise 综合 |
 | 流/dispatch | read/seek/Unicode/count、echo cycles、原栈引用测试 | resstreamtest 与参考完全一致 |
 | 窗口/事件 | 嵌套树/关闭/resize、多窗口请求/初始行/取消/计时器 | twocol 启动及 Sensory GUI |
 | Unicode | 扩展转换、titlecase、NFC/NFD、能力参数 | unicasetest 与参考完全一致 |
+| 文本图像 | [presentation.rs](../src/vm/presentation.rs) 图片顺序、事件关联、动态尺寸、零尺寸及会话；[text_buffer.rs](../src/app/text_buffer.rs) 行内基线、双侧/重复边栏、flow-break、换行/单词、缩放与裁剪 | 合成故事 GUI 缩放/点击/恢复 |
 | 样式/鼠标/链接/终止键 | `style_hints_links_mouse_and_terminator_events` | 输入扩展样本启动；未穷举 GUI 按键 |
 | 日期/时间 | epoch、负时间、规范化、UTC 往返 | datetimetest 启动 |
-| 声音 | `completion_stop_and_volume_notifications`，无设备 idle sink 测试 | Sensory AIFF 播放路径 |
+| 声音 | 无设备 idle sink：同步采样起播、独立暂停/音量、停止/结束/渐变通知；[tracker.rs](../src/vm/sound/tracker.rs)：PCM、速度/BPM/音量/E6 循环、重复及恢复偏移 | Sensory AIFF；合成 MOD GUI 播放及完成通知 |
 | Blorb/产品 | 容器边界/资源索引/元数据测试、session serialization | Adventure/Sensory 关闭重开恢复 |
 
 矩阵是按领域覆盖，不意味着每个合法/非法输入组合均已穷举。
@@ -92,4 +95,24 @@ Linux Xvfb、软件 OpenGL，通过 X11 聚焦窗口后发送输入，使用正�
 
 声音验收确认设备/解码/播放路径及事件状态，未做人耳听音或采样波形比对。
 输入扩展、日期、多窗口样本另通过 headless 启动、指令及退出冒烟；这不代表这些样本所有交互项均自动验证。
-Windows/macOS 尚未运行本轮 GUI 测试。未完成任何长篇游戏全通关，也不声明所有媒体编码或 Sound2 采样级同步已验证。
+Windows/macOS 尚未运行本轮 GUI 测试。未完成任何长篇游戏全通关，也不声明所有媒体编码或实体声卡波形已验证。Sound2 的多声道同步已在软件输出层按立体声采样帧验证。
+
+
+## 新增合成媒体验收
+
+以下 fixture 完全由仓库脚本生成，包含原创 PNG 和四声道 MOD，不依赖下载游戏：
+
+```sh
+python3 tools/make-media-fixture.py /tmp/glulx-media.gblorb
+cargo run -- /tmp/glulx-media.gblorb
+```
+
+在 Linux Xvfb 中，窗口分别调整为 1100×820、700×820：三种行内图片对齐正确，
+左右边栏按窗口宽度缩小，文字在图片旁绕排并在图片下恢复全宽。
+图片点击产生 `Image hyperlink received.`，音频结束产生 `MOD playback completed.`；
+正常关闭后不指定故事启动，这些文字、图像和待输入状态保留。再次运行 Sensory Jam
+原有 AIFF/照片/恢复验收，确认媒体改动没有破坏既有路径。
+
+合成故事忽略 Arrange 等非输入事件，以便窗口缩放不会错误结束测试。
+零尺寸图片、无效 margin 放置、flow-break 失效、超宽图像和字体换行等边界由 Rust
+测试覆盖。音量渐变的回归覆盖未及时轮询时中途替换与已完成渐变通知，保证从当前音量继续。

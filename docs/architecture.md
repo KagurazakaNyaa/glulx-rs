@@ -13,8 +13,12 @@ address checks and a bounded allocation policy.
 bounded run interface keeps the GUI responsive. Unsupported instructions are typed
 errors carrying execution context. Host behavior is split into modules under
 `src/vm`: `windows`, `streams`, `events`, `presentation`, `unicode`, `datetime`,
-`sound`, `save` and `session`. The VM depends on neither egui nor HTTP; sound uses
-rodio, while presentation returns window rectangles, text runs and graphics commands.
+`sound`, `save`, `session` and `acceleration`. The VM depends on neither egui nor HTTP; sound uses
+rodio; MOD resources are generated incrementally by a Rust tracker player. Multi-play
+channels enter the device as one aligned source. Presentation returns window rectangles,
+text runs with image/flow markers, and graphics commands. The GUI text-buffer layout
+formats inline images and floating margins together with styled text, retaining image
+rules for resize and caching textures per story.
 
 `PlayerApp` executes short slices, renders each window, and supplies keyboard,
 mouse, hyperlink and file-selection results. Waiting states distinguish line,
@@ -27,6 +31,9 @@ so waiting for a line does not prevent timer delivery. Streams flush at stop/sav
 continuations before replacing execution state. RNG, Glk, I/O system, the string
 table and protection definition remain independent of restore/undo/restart.
 Undo stores bounded execution snapshots, sharing the same state boundary.
+Acceleration registrations/parameters are also outside portable snapshots. Accelerated
+calls use deferred completion so nested filter/string continuations do not recurse
+on the native stack; desktop snapshots retain pending completion.
 
 `session` validates a versioned desktop snapshot that also retains story resources,
 Glk objects, pending input and audio progress. The app adds graphics canvases and

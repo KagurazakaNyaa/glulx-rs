@@ -5,6 +5,83 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod tracker;
+
+type SoundOutput = rodio::queue::SourcesQueueOutput<f32>;
+
+/// One source submitted to the device for a whole play_multi call. Each idle
+/// sink supplies exactly one sample at every mixer step, so decoding/setup time
+/// cannot cause channels to start at different device positions.
+struct AlignedSounds {
+    outputs: Vec<SoundOutput>,
+}
+
+impl Iterator for AlignedSounds {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut mixed = 0.0;
+        self.outputs.retain_mut(|output| {
+            if let Some(sample) = output.next() {
+                mixed += sample;
+                true
+            } else {
+                false
+            }
+        });
+        (!self.outputs.is_empty()).then_some(mixed)
+    }
+}
+
+impl Source for AlignedSounds {
+    fn current_frame_len(&self) -> Option<usize> {
+        None
+    }
+    fn channels(&self) -> u16 {
+        2
+    }
+    fn sample_rate(&self) -> u32 {
+        tracker::SAMPLE_RATE
+    }
+    fn total_duration(&self) -> Option<Duration> {
+        None
+    }
+}
+
+fn decode_sound(
+    bytes: &[u8],
+    format: [u8; 4],
+    repeats: u32,
+    offset_ms: u64,
+) -> Option<Box<dyn Source<Item = f32> + Send>> {
+    let offset = Duration::from_millis(offset_ms);
+    if format == *b"MOD " {
+        return Some(Box::new(
+            tracker::ModSource::new(bytes, repeats)?.skip_duration(offset),
+        ));
+    }
+    let decoder = Decoder::new(Cursor::new(bytes.to_vec())).ok()?;
+    let sample_rate = decoder.sample_rate();
+    let channels = decoder.channels();
+    let samples: Vec<f32> = decoder.convert_samples().collect();
+    if samples.is_empty() || sample_rate == 0 || channels == 0 {
+        return None;
+    }
+    let duration =
+        Duration::from_secs_f64(samples.len() as f64 / sample_rate as f64 / channels as f64);
+    let source =
+        rodio::buffer::SamplesBuffer::new(channels, sample_rate, samples).repeat_infinite();
+    if repeats == u32::MAX {
+        Some(Box::new(source.skip_duration(offset)))
+    } else {
+        Some(Box::new(
+            source
+                .take_duration(duration.saturating_mul(repeats))
+                .skip_duration(offset),
+        ))
+    }
+}
+
 #[derive(Default)]
 pub(super) struct AudioDevice {
     stream: Option<OutputStream>,
@@ -112,8 +189,44 @@ impl Vm {
         notify: u32,
         offset_ms: u64,
     ) -> bool {
-        let Some(channel) = self.channels.get_mut(&id) else {
+        let Ok(output) = self.prepare_sound_at(id, resource, repeats, notify, offset_ms) else {
             return false;
+        };
+        let Some(output) = output else {
+            return true;
+        };
+        if self.audio.handle.as_ref().is_some_and(|handle| {
+            handle
+                .play_raw(AlignedSounds {
+                    outputs: vec![output],
+                })
+                .is_ok()
+        }) {
+            true
+        } else {
+            self.stop_sound(id);
+            false
+        }
+    }
+
+    fn stop_sound(&mut self, id: u32) {
+        if let Some(channel) = self.channels.get_mut(&id) {
+            channel.sink = None;
+            channel.active = false;
+            channel.notify = 0;
+        }
+    }
+
+    fn prepare_sound_at(
+        &mut self,
+        id: u32,
+        resource: u32,
+        repeats: u32,
+        notify: u32,
+        offset_ms: u64,
+    ) -> Result<Option<SoundOutput>, ()> {
+        let Some(channel) = self.channels.get_mut(&id) else {
+            return Err(());
         };
         if let Some(sink) = channel.sink.take() {
             sink.stop();
@@ -121,43 +234,24 @@ impl Vm {
         channel.notify = 0;
         channel.active = false;
         if repeats == 0 {
-            return true;
+            return Ok(None);
         }
-        let Some(handle) = &self.audio.handle else {
-            return false;
-        };
-        let Some(bytes) = self.story.sound_resource(resource) else {
-            return false;
-        };
-        let Ok(decoder) = Decoder::new(Cursor::new(bytes.to_vec())) else {
-            return false;
-        };
-        let sample_rate = decoder.sample_rate();
-        let channels = decoder.channels();
-        let samples: Vec<f32> = decoder.convert_samples().collect();
-        if samples.is_empty() || sample_rate == 0 || channels == 0 {
-            return false;
+        if self.audio.handle.is_none() {
+            return Err(());
         }
-        let duration =
-            Duration::from_secs_f64(samples.len() as f64 / sample_rate as f64 / channels as f64);
-        let source =
-            rodio::buffer::SamplesBuffer::new(channels, sample_rate, samples).repeat_infinite();
-        let Ok(sink) = Sink::try_new(handle) else {
-            return false;
-        };
+        let bytes = self.story.sound_resource(resource).ok_or(())?;
+        let format = self.story.resource_type(*b"Snd ", resource).ok_or(())?;
+        let source = decode_sound(bytes, format, repeats, offset_ms).ok_or(())?;
+        let (sink, output) = Sink::new_idle();
         sink.set_volume(channel.volume as f32 / 65536.0);
         if channel.paused {
             sink.pause();
         }
-        if repeats == u32::MAX {
-            sink.append(source.skip_duration(Duration::from_millis(offset_ms)));
-        } else {
-            sink.append(
-                source
-                    .take_duration(duration.saturating_mul(repeats))
-                    .skip_duration(Duration::from_millis(offset_ms)),
-            );
-        }
+        sink.append(rodio::source::UniformSourceIterator::<_, f32>::new(
+            source,
+            2,
+            tracker::SAMPLE_RATE,
+        ));
         channel.repeats = repeats;
         channel.position_ms = offset_ms;
         channel.offset_ms = offset_ms;
@@ -165,7 +259,7 @@ impl Vm {
         channel.resource = resource;
         channel.notify = if repeats == u32::MAX { 0 } else { notify };
         channel.sink = Some(sink);
-        true
+        Ok(Some(output))
     }
     pub(super) fn sound_call(&mut self, selector: u32, args: &[u32]) -> Result<u32, VmError> {
         let arg = |n: usize| args.get(n).copied().unwrap_or(0);
@@ -237,39 +331,37 @@ impl Vm {
                         self.memory.read32(arg(2).wrapping_add(i as u32 * 4))?
                     };
                 }
-                let states: Vec<_> = sounds
-                    .iter()
-                    .filter_map(|(id, _)| {
-                        self.channels.get_mut(id).map(|channel| {
-                            let paused = channel.paused;
-                            channel.paused = true;
-                            (*id, paused)
-                        })
-                    })
-                    .collect();
-                let count = sounds
-                    .into_iter()
-                    .filter(|(channel, sound)| self.play_sound(*channel, *sound, 1, arg(4)))
-                    .count() as u32;
-                for (id, paused) in states {
-                    if let Some(channel) = self.channels.get_mut(&id) {
-                        channel.paused = paused;
-                        if !paused && let Some(sink) = &channel.sink {
-                            sink.play();
-                        }
+                let mut started = Vec::new();
+                let mut outputs = Vec::new();
+                for (id, resource) in sounds {
+                    if let Ok(Some(output)) = self.prepare_sound_at(id, resource, 1, arg(4), 0) {
+                        started.push(id);
+                        outputs.push(output);
                     }
                 }
-                count
+                if !outputs.is_empty()
+                    && self
+                        .audio
+                        .handle
+                        .as_ref()
+                        .is_some_and(|handle| handle.play_raw(AlignedSounds { outputs }).is_ok())
+                {
+                    started.len() as u32
+                } else {
+                    for id in started {
+                        self.stop_sound(id);
+                    }
+                    0
+                }
             }
             0xfa => {
-                if let Some(channel) = self.channels.get_mut(&arg(0)) {
-                    channel.sink = None;
-                    channel.active = false;
-                    channel.notify = 0;
-                }
+                self.stop_sound(arg(0));
                 0
             }
             0xfb | 0xfd => {
+                // Settle elapsed fades before replacing them: the new fade starts
+                // at the current volume, and an already completed fade keeps its event.
+                self.poll_sound();
                 if let Some(channel) = self.channels.get_mut(&arg(0)) {
                     channel.fade = None;
                     channel.fade_resume = None;
@@ -340,6 +432,67 @@ mod tests {
         )
         .unwrap()
     }
+
+    #[test]
+    fn sound_gestalts_all_require_an_audio_device() {
+        let vm = vm();
+        assert!(!vm.sound_available());
+        for selector in [8, 9, 10, 13, 21] {
+            assert_eq!(vm.glk_gestalt(selector, 0), 0, "gestalt {selector}");
+        }
+    }
+
+    #[test]
+    fn multi_sounds_begin_on_the_same_stereo_frame() {
+        let (left_sink, left) = Sink::new_idle();
+        let (right_sink, right) = Sink::new_idle();
+        left_sink.append(rodio::buffer::SamplesBuffer::new(
+            2,
+            tracker::SAMPLE_RATE,
+            vec![0.25f32, 0.0, 0.0, 0.0],
+        ));
+        right_sink.append(rodio::buffer::SamplesBuffer::new(
+            2,
+            tracker::SAMPLE_RATE,
+            vec![0.0f32, 0.5, 0.0, 0.0],
+        ));
+        let mut mixed = AlignedSounds {
+            outputs: vec![left, right],
+        };
+        assert_eq!(
+            mixed.by_ref().take(4).collect::<Vec<_>>(),
+            [0.25, 0.5, 0.0, 0.0]
+        );
+        mixed.next();
+        assert!(left_sink.empty());
+        assert!(right_sink.empty());
+        drop((left_sink, right_sink));
+        assert!(mixed.take(4096).count() < 4096);
+    }
+
+    #[test]
+    fn multi_sounds_keep_independent_pause_and_volume_controls() {
+        let (quiet_sink, quiet) = Sink::new_idle();
+        let (paused_sink, paused) = Sink::new_idle();
+        quiet_sink.set_volume(0.5);
+        paused_sink.pause();
+        for sink in [&quiet_sink, &paused_sink] {
+            sink.append(rodio::buffer::SamplesBuffer::new(
+                2,
+                tracker::SAMPLE_RATE,
+                vec![0.5f32; 2048],
+            ));
+        }
+        let mut mixed = AlignedSounds {
+            outputs: vec![quiet, paused],
+        };
+        assert_eq!(mixed.next(), Some(0.25));
+        paused_sink.play();
+        // Rodio refreshes each channel's controls every five milliseconds.
+        assert_eq!(mixed.nth(1023), Some(0.75));
+        drop(quiet_sink);
+        assert_eq!(mixed.nth(1023), Some(0.5));
+    }
     #[test]
     fn completion_stop_and_volume_notifications() {
         let mut vm = vm();
@@ -369,5 +522,61 @@ mod tests {
         assert_eq!(vm.events.pop_front(), Some([9, 0, 0, 12]));
         assert_eq!(vm.sound_call(0xf8, &[1, 999]).unwrap(), 0);
         assert_eq!(vm.sound_call(0xf9, &[1, 999, 0, 55]).unwrap(), 1);
+    }
+
+    #[test]
+    fn interrupted_fade_starts_at_elapsed_volume_and_only_notifies_for_replacement() {
+        let mut vm = vm();
+        let mut channel = channel();
+        channel.fade = Some((
+            Instant::now() - Duration::from_secs(25),
+            Duration::from_secs(100),
+            65536,
+            0,
+            11,
+        ));
+        vm.channels.insert(1, channel);
+
+        vm.sound_call(0xfd, &[1, 16384, 10000, 22]).unwrap();
+        let channel = &vm.channels[&1];
+        let (_, duration, from, to, notify) = channel.fade.unwrap();
+        // A quarter-complete fade from full volume to silence is at 75%.
+        assert!(from.abs_diff(49152) < 256, "new fade starts at {from}");
+        assert_eq!(from, channel.volume);
+        assert_eq!((duration, to, notify), (Duration::from_secs(10), 16384, 22));
+        assert!(vm.events.is_empty());
+
+        vm.channels.get_mut(&1).unwrap().fade.as_mut().unwrap().0 =
+            Instant::now() - Duration::from_secs(20);
+        vm.poll_sound();
+        assert_eq!(vm.channels[&1].volume, 16384);
+        assert_eq!(vm.events.into_iter().collect::<Vec<_>>(), [[9, 0, 0, 22]]);
+    }
+
+    #[test]
+    fn completed_fade_keeps_notification_when_volume_is_replaced_before_poll() {
+        for selector in [0xfb, 0xfd] {
+            let mut vm = vm();
+            let mut channel = channel();
+            channel.fade = Some((
+                Instant::now() - Duration::from_secs(1),
+                Duration::from_millis(10),
+                65536,
+                32768,
+                11,
+            ));
+            vm.channels.insert(1, channel);
+
+            vm.sound_call(selector, &[1, 1000, 0, 22]).unwrap();
+            assert_eq!(vm.channels[&1].volume, 1000);
+            assert!(vm.channels[&1].fade.is_none());
+            let mut expected = vec![[9, 0, 0, 11]];
+            if selector == 0xfd {
+                expected.push([9, 0, 0, 22]);
+            }
+            assert_eq!(vm.events.iter().copied().collect::<Vec<_>>(), expected);
+            vm.poll_sound();
+            assert_eq!(vm.events.into_iter().collect::<Vec<_>>(), expected);
+        }
     }
 }

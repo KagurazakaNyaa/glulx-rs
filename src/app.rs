@@ -11,6 +11,8 @@ use crate::{
     translation::{Submission, TranslationSettings, Translator},
 };
 
+mod text_buffer;
+
 const STORAGE_KEY: &str = "glulx-rs-settings";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -196,6 +198,7 @@ pub struct PlayerApp {
     game_status: String,
     graphics: BTreeMap<u32, DisplayedGraphics>,
     image_cache: HashMap<u32, image::RgbaImage>,
+    buffer_images: text_buffer::ImageCache,
     status: String,
     error: Option<String>,
     show_options: bool,
@@ -227,6 +230,7 @@ impl PlayerApp {
             game_status: String::new(),
             graphics: BTreeMap::new(),
             image_cache: HashMap::new(),
+            buffer_images: text_buffer::ImageCache::default(),
             status: "Open a .ulx or .gblorb story to begin".to_owned(),
             error: None,
             show_options: false,
@@ -299,6 +303,7 @@ impl PlayerApp {
                 self.game_status.clear();
                 self.graphics.clear();
                 self.image_cache.clear();
+                self.buffer_images.clear();
                 self.cover = None;
                 self.error = None;
                 self.status = format!("Running {}", path.display());
@@ -321,6 +326,7 @@ impl PlayerApp {
                     self.game_status.clear();
                     self.graphics.clear();
                     self.image_cache.clear();
+                    self.buffer_images.clear();
                     self.error = None;
                     self.status = "Story restarted".to_owned();
                     self.last_state = RunState::Running;
@@ -725,69 +731,15 @@ impl PlayerApp {
                                     egui::ScrollArea::vertical().stick_to_bottom(true).show(
                                         ui,
                                         |ui| {
-                                            ui.horizontal_wrapped(|ui| {
-                                                ui.spacing_mut().item_spacing.x = 0.0;
-                                                for run in &view.runs {
-                                                    let hint = |index| {
-                                                        view.hints.get(&(run.style, index)).copied()
-                                                    };
-                                                    let mut foreground =
-                                                        hint(7).map(color_word).unwrap_or(text);
-                                                    let mut background = hint(8).map(color_word);
-                                                    if hint(9) == Some(1) {
-                                                        let old = foreground;
-                                                        foreground =
-                                                            background.unwrap_or(rgb(self
-                                                                .settings
-                                                                .background_color));
-                                                        background = Some(old);
-                                                    }
-                                                    let size = (self.settings.font_size
-                                                        + hint(3).unwrap_or(0) as i32 as f32 * 2.0)
-                                                        .clamp(8.0, 64.0);
-                                                    let mut rich = RichText::new(&run.text)
-                                                        .size(size)
-                                                        .color(foreground);
-                                                    if hint(4).map_or(
-                                                        matches!(run.style, 3 | 4 | 5 | 8),
-                                                        |v| v as i32 > 0,
-                                                    ) {
-                                                        rich = rich.strong();
-                                                    }
-                                                    if hint(5)
-                                                        .map_or(matches!(run.style, 1 | 5), |v| {
-                                                            v != 0
-                                                        })
-                                                    {
-                                                        rich = rich.italics();
-                                                    }
-                                                    if hint(6) == Some(0) || run.style == 2 {
-                                                        rich = rich.monospace();
-                                                    }
-                                                    if let Some(color) = background {
-                                                        rich = rich.background_color(color);
-                                                    }
-                                                    if run.hyperlink != 0 {
-                                                        if ui
-                                                            .add(
-                                                                egui::Label::new(
-                                                                    rich.color(rgb(self
-                                                                        .settings
-                                                                        .hyperlink_color))
-                                                                        .underline(),
-                                                                )
-                                                                .sense(egui::Sense::click()),
-                                                            )
-                                                            .clicked()
-                                                        {
-                                                            hyperlink =
-                                                                Some((view.id, run.hyperlink));
-                                                        }
-                                                    } else {
-                                                        ui.label(rich);
-                                                    }
-                                                }
-                                            });
+                                            if let Some(value) = text_buffer::show(
+                                                ui,
+                                                &view,
+                                                &self.settings,
+                                                self.vm.as_ref().unwrap(),
+                                                &mut self.buffer_images,
+                                            ) {
+                                                hyperlink = Some((view.id, value));
+                                            }
                                         },
                                     );
                                 }

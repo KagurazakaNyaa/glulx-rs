@@ -1,6 +1,6 @@
 # Glulx 规范兼容性 checklist
 
-更新：2026-09-08。本轮在 `31bb75c` 基线上实现并验收原清单中的缺口；以下描述本轮实现快照。`[x]` 表示实现及列出的验证已完成，不表示穷尽规范认证。详细测试、样本版本、复现命令见 [验收记录](glulx-validation.md)，实现限制见 [兼容性](compatibility.md)。
+更新：2026-09-08。原清单主要缺口已在 `4c16443` 提交；本轮继续补齐加速函数、MOD 与文本内嵌图像。以下描述实现与验收快照。`[x]` 表示实现及列出的验证已完成，不表示穷尽规范认证。详细测试、样本版本、复现命令见 [验收记录](glulx-validation.md)，实现限制见 [兼容性](compatibility.md)。
 
 ## 规范边界
 
@@ -20,8 +20,8 @@
 - [x] Null/filter/Glk I/O、byte/Unicode/Huffman 字符串、间接节点与带参调用。
 - [x] 单精度和双精度完整指令族；转换、NaN/Infinity、正负零、容差和双 word 存储次序；不跳转时也消费分支操作数。
 - [x] `save/restore`：IFZS 身份、CMem/UMem、Stks、MAll、失败不替换状态和保护区；与 Glulxe 双向互读。
-- [x] `accelfunc/accelparam` 正确消费参数；不支持的优化函数合法忽略。
-- [x] Glulx gestalt 与实现对齐：3.1.3、Float、Double、ExtUndo、加速设置；具体加速函数返回不支持。
+- [x] `accelfunc/accelparam` 与 Inform 加速函数 1–13；未知函数取消注册，未知参数合法忽略。属性、类、隐私和旧/新对象布局与 Glulxe 差分一致。
+- [x] Glulx gestalt 与实现对齐：3.1.3、Float、Double、ExtUndo、加速设置；加速函数 1–13 均声明支持。
 - [x] 启动和 `setrandom(0)` 使用系统熵；非零 seed 可复现，正/负/零范围有回归。
 - [x] 多级 undo、hasundo/discardundo 正确结果；最多 16 个状态且共用 64 MiB 预算。
 - [x] restore/undo/restart 不回滚 RNG、I/O system、字符串表、Glk 对象及保护区定义；restart 保留 undo。
@@ -36,12 +36,12 @@
 - [x] 按窗口保存行/字符请求、初始行内容、取消结果、多请求、队列、select/poll、定时器、鼠标和超链接。
 - [x] Latin1 输入/大小写、Unicode 扩展大小写/titlecase/NFC/NFD；官方 Unicode 和资源流样本与参考输出一致。
 - [x] 样式状态、查询与 GUI 文本段呈现；明确支持 text-buffer hints 3–9，忽略可选段落 hints 0–2 和 grid hints。
-- [x] text-grid、graphics window、实际窗口布局、图像缩放/裁剪、坐标及窗口类型能力参数；文本流内图像明确返回不支持。
-- [x] 声道、播放/重复/停止/暂停、音量及渐变、完成通知和多声道播放；无音频设备时不声明声音能力。
+- [x] text-grid、graphics window、实际窗口布局、图像缩放/裁剪、坐标及窗口类型能力参数；text-buffer 支持三种行内对齐、两侧/重复边栏绕排、flow-break、图片超链接及动态缩放。零尺寸图片不占空间。
+- [x] 声道、播放/重复/停止/暂停、音量及渐变、完成通知和多声道播放；MOD 使用纯 Rust 按需解码，play_multi 在同一立体声采样帧起播。无音频设备时不声明声音能力。
 - [x] 日期/时间、资源流、行终止键和回显控制；UTC/local、负时间及日期规范化回归。
 - [x] dispatch 的引用/数组/结构体/栈结果、对象生命周期和输出参数；未知 selector 记录并返回 0。
 - [x] gestalt 逐参数核对；headless 不声明图形、鼠标、声音等 GUI 能力。
-- [x] 升级 Glk 0.7.6，提供 `image_draw_scaled_ext`；仅声明 graphics window 绘图，文本窗口图像宽度规则不适用。
+- [x] 升级 Glk 0.7.6，提供 `image_draw_scaled_ext`；graphics 绘图固定调用时尺寸；text-buffer 根据当前窗口宽度动态重排，支持比例/aspect/maxwidth 规则及透明图像。
 
 ## Blorb 与播放器
 
@@ -51,11 +51,12 @@
 
 ## 验收与维护
 
-- [x] 56 个 Rust 测试通过；按领域的测试矩阵和边界覆盖见验收记录。
+- [x] 89 个 Rust 测试通过；按领域的测试矩阵和边界覆盖见验收记录。
 - [x] Glulxercise 综合、单精度、双精度共 92 个通过段落、三轮全部通过。
+- [x] Inform 加速函数 1–13 共 94 项结果与 Glulxe 精确一致；合成媒体故事验证图像重排、点击、MOD 完成事件和会话恢复。
 - [x] 固定 Glulxe/CheapGlk revision，合成故事及 Adventure 双向存档验证；Unicode/资源流精确规范化输出比较。
 - [x] 扩展公开故事回归到 Adventure、Unicode、资源流、输入扩展、日期时间、多窗口和 Sensory Jam；明确区分专项测试、启动冒烟与 GUI 操作。
 
 ## 明确保留的可选范围与验证限制
 
-具体 Inform 加速函数、MOD tracker 音乐、text-buffer 内嵌图像未实现且不声明支持。样式 hints 可以被宿主忽略；当前字体回退及 grid 排版受 egui 限制。Sound2 多通道启动未验证采样级同步。Linux GUI 验收不能替代 Windows/macOS 实机验证，公开游戏冒烟不等于完整通关。上述限制不是通过勾选被消除的能力；未来扩展需增加实现及相应验收。
+样式 hints 可以被宿主忽略；当前字体回退及 grid 排版受 egui 限制。MOD 支持 ProTracker/SoundTracker，未宣称全部历史方言或与特定硬件位精确重放；XM/S3M/IT 不属于此 MOD 支持范围。Sound2 同步以软件输出采样帧测试，未做实体声卡波形对比。Linux GUI 验收不能替代 Windows/macOS 实机验证，公开游戏冒烟不等于完整通关。上述限制需随新验收持续更新。

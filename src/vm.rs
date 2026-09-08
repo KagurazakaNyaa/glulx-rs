@@ -1,3 +1,4 @@
+mod acceleration;
 mod datetime;
 mod events;
 mod presentation;
@@ -8,7 +9,7 @@ mod streams;
 mod unicode;
 mod windows;
 use events::Request;
-pub use presentation::{TextRun, WindowView};
+pub use presentation::{BufferImage, TextRun, WindowView};
 #[cfg(test)]
 mod conformance;
 
@@ -380,6 +381,10 @@ impl Stack {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Vm {
+    #[serde(default)]
+    acceleration: acceleration::Acceleration,
+    #[serde(default)]
+    accelerated_return: Option<u32>,
     graphical_host: bool,
     #[serde(skip)]
     audio: sound::AudioDevice,
@@ -428,6 +433,8 @@ impl Vm {
         let stack_size = story.header.stack_size;
         let start_func = story.header.start_func;
         let mut vm = Self {
+            acceleration: acceleration::Acceleration::default(),
+            accelerated_return: None,
             graphical_host: true,
             audio: sound::AudioDevice::default(),
             channels: BTreeMap::new(),
@@ -531,6 +538,7 @@ impl Vm {
     }
 
     pub fn restart(&mut self) -> Result<(), VmError> {
+        self.accelerated_return = None;
         self.memory.restart(self.protection);
         self.stack.clear();
         self.pc = 0;
@@ -548,6 +556,9 @@ impl Vm {
     }
 
     fn step(&mut self) -> Result<(), VmError> {
+        if let Some(value) = self.accelerated_return.take() {
+            return self.return_from_function(value);
+        }
         let instruction_address = self.pc;
         let opcode = self.fetch_opcode()?;
         let count = operand_count(opcode).ok_or(VmError::UnsupportedOpcode {
@@ -1045,10 +1056,15 @@ impl Vm {
                 let address = load!(0);
                 self.mfree(address)?;
             }
-            0x180 | 0x181 => {
-                // Acceleration is optional; unknown functions and parameters are ignored.
-                let _index = load!(0);
-                let _value = load!(1);
+            0x180 => {
+                let index = load!(0);
+                let address = load!(1);
+                self.set_acceleration(index, address)?;
+            }
+            0x181 => {
+                let index = load!(0);
+                let value = load!(1);
+                self.acceleration.set_parameter(index, value);
             }
             0x190 => {
                 let value = (load!(0) as i32 as f32).to_bits();
@@ -1358,6 +1374,17 @@ impl Vm {
     }
 
     fn enter_function(&mut self, address: u32, arguments: &[u32]) -> Result<(), VmError> {
+        if let Some(index) = self.acceleration.functions.get(&address).copied() {
+            let value = self.accelerate(index, arguments)?;
+            // A minimal frame and deferred return keep string/filter continuations
+            // iterative, including strings with thousands of accelerated callbacks.
+            self.stack.frame_ptr = self.stack.len();
+            self.stack.push_u32(12)?;
+            self.stack.push_u32(12)?;
+            self.stack.push_u32(0)?;
+            self.accelerated_return = Some(value);
+            return Ok(());
+        }
         let function_type = self.memory.read8(address)?;
         if !matches!(function_type, 0xc0 | 0xc1) {
             return Err(VmError::InvalidFunction(address));
@@ -1817,15 +1844,18 @@ impl Vm {
                     }
                 } else if kind == WINTYPE_TEXT_BUFFER {
                     let window = self.glk_windows.get_mut(&window_id).unwrap();
-                    if let Some(run) = window
-                        .runs
-                        .last_mut()
-                        .filter(|r| r.style == window.style && r.hyperlink == window.hyperlink)
-                    {
+                    if let Some(run) = window.runs.last_mut().filter(|r| {
+                        r.image.is_none()
+                            && !r.flow_break
+                            && r.style == window.style
+                            && r.hyperlink == window.hyperlink
+                    }) {
                         run.text.push(character);
                     } else {
                         window.runs.push(TextRun {
                             text: character.to_string(),
+                            image: None,
+                            flow_break: false,
                             style: window.style,
                             hyperlink: window.hyperlink,
                         });
@@ -1871,7 +1901,7 @@ impl Vm {
                 }
             }
             9 => 1,
-            10 => 0,
+            10 => u32::from(acceleration::supported(argument)),
             11..=13 => 1,
             _ => 0,
         }
@@ -2287,65 +2317,11 @@ impl Vm {
                     0
                 }
             }
-            0x00e1 | 0x00e2 | 0x00ec => {
-                let window = arguments.first().copied().unwrap_or(0);
-                let resource = arguments.get(1).copied().unwrap_or(0);
-                if let Some(canvas) = self
-                    .glk_windows
-                    .get(&window)
-                    .filter(|w| w.kind == WINTYPE_GRAPHICS)
-                    && let Some(data) = self.story.resource(*b"Pict", resource)
-                    && let Some(original) = image_dimensions(data)
-                {
-                    let mut size = if selector == 0x00e1 {
-                        original
-                    } else {
-                        [
-                            arguments.get(4).copied().unwrap_or(0),
-                            arguments.get(5).copied().unwrap_or(0),
-                        ]
-                    };
-                    if selector == 0x00ec {
-                        let rule = arguments.get(6).copied().unwrap_or(0);
-                        if rule & !15 != 0 || rule & 3 == 0 || rule & 12 == 0 {
-                            return self.store_destination(&destination, 0, Width::Word);
-                        }
-                        let width = match rule & 3 {
-                            1 => original[0] as u64,
-                            2 => size[0] as u64,
-                            _ => canvas.width as u64 * size[0] as u64 / 65536,
-                        };
-                        let height = match rule & 12 {
-                            4 => original[1] as u64,
-                            8 => size[1] as u64,
-                            _ => ((width as u128 * original[1] as u128 * size[1] as u128)
-                                / (original[0].max(1) as u128 * 65536))
-                                .min(u32::MAX as u128) as u64,
-                        };
-                        size = [
-                            width.min(u32::MAX as u64) as u32,
-                            height.min(u32::MAX as u64) as u32,
-                        ];
-                    }
-                    if size[0] != 0 && size[1] != 0 {
-                        self.graphics.push(GraphicsRequest::Draw(ImageRequest {
-                            window,
-                            resource,
-                            data: data.to_vec(),
-                            position: [
-                                arguments.get(2).copied().unwrap_or(0) as i32,
-                                arguments.get(3).copied().unwrap_or(0) as i32,
-                            ],
-                            requested_size: Some(size),
-                            canvas_size: [canvas.width, canvas.height],
-                        }));
-                    }
-                    1
-                } else {
-                    0
-                }
+            0x00e1 | 0x00e2 | 0x00ec => self.draw_image(selector, &arguments),
+            0x00e8 => {
+                self.flow_break(arguments.first().copied().unwrap_or(0));
+                0
             }
-            0x00e8 => 0,
             0x00e9 | 0x00ea => {
                 let window_id = arguments.first().copied().unwrap_or(0);
                 if let Some(window) = self
@@ -2439,21 +2415,26 @@ impl Vm {
             }
             4 => u32::from(self.graphical_host && matches!(argument, 4 | 5)), // MouseInput
             5 => 1,                                                           // Timer
-            6 => 1,                                                           // Graphics
-            7 => u32::from(self.graphical_host && argument == WINTYPE_GRAPHICS),
+            6 => u32::from(self.graphical_host),                              // Graphics
+            7 => u32::from(
+                self.graphical_host && matches!(argument, WINTYPE_TEXT_BUFFER | WINTYPE_GRAPHICS),
+            ),
             8..=10 | 21 => u32::from(self.sound_available()), // Sound capabilities
             11 => 1,                                          // Hyperlinks
-            13 => 0,                                          // MOD tracker music is not supported
+            13 => u32::from(self.sound_available()),          // MOD tracker music
             12 => u32::from(self.graphical_host && argument == 3), // HyperlinkInput (GUI supports text buffers)
             17..=18 => u32::from(self.graphical_host),             // Line input echo / terminators
             19 => u32::from(
                 self.graphical_host && matches!(argument, 0xffff_fff8 | 0xffff_ffe4..=0xffff_ffef),
             ),
-            15..=16 => 1, // Unicode / UnicodeNorm
-            20 => 1,      // DateTime
+            14 => u32::from(self.graphical_host), // GraphicsTransparency
+            15..=16 => 1,                         // Unicode / UnicodeNorm
+            20 => 1,                              // DateTime
             22 => 1,
             23 => u32::from(self.graphical_host), // ResourceStream / GraphicsCharInput
-            24 => u32::from(self.graphical_host && argument == WINTYPE_GRAPHICS),
+            24 => u32::from(
+                self.graphical_host && matches!(argument, WINTYPE_TEXT_BUFFER | WINTYPE_GRAPHICS),
+            ),
             _ => 0,
         }
     }

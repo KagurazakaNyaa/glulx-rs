@@ -43,6 +43,10 @@ story restores the previous session. `View -> Story information` shows available
 iFiction metadata and cover art. Portable game saves and desktop sessions are
 separate formats.
 
+The desktop supports inline and margin images with resizing, picture hyperlinks,
+and MOD music alongside sampled audio. Inform acceleration functions 1–13 are
+available; see the compatibility document for tested media formats and limits.
+
 ## Translation
 
 Turn translation is optional and disabled by default. Enable it from
@@ -74,6 +78,14 @@ Optional reference validation (download fixtures separately; see
 
 ```sh
 python3 tools/check-reference.py --reference /path/to/glulxe --candidate target/debug/glulx-rs --fixtures /path/to/fixtures
+```
+
+An original media fixture can be generated locally to inspect image wrapping,
+clickable pictures, window resizing and MOD playback:
+
+```sh
+python3 tools/make-media-fixture.py /tmp/glulx-media.gblorb
+cargo run -- /tmp/glulx-media.gblorb
 ```
 
 The release profile uses LTO and strips symbols. Tagged GitHub releases build
