@@ -4,7 +4,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use eframe::egui::{self, Color32, RichText};
 
-use super::{PlayerSettings, color_image, color_word, rgb};
+use super::{PlayerSettings, color_word, rgb, texture_image};
 use crate::{Vm, vm::WindowView};
 
 #[derive(Default)]
@@ -20,10 +20,10 @@ impl ImageCache {
             .entry(resource)
             .or_insert_with(|| {
                 let bytes = vm.image_resource(resource)?;
-                let pixels = image::load_from_memory(bytes).ok()?.to_rgba8();
+                let pixels = crate::picture::decode(bytes).ok()?;
                 Some(ui.ctx().load_texture(
                     format!("glk-buffer-image-{resource}"),
-                    color_image(&pixels),
+                    texture_image(ui.ctx(), &pixels),
                     egui::TextureOptions::LINEAR,
                 ))
             })

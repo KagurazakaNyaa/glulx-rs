@@ -1,10 +1,13 @@
-//! ProTracker/SoundTracker MOD resources, rendered incrementally to stereo PCM.
+//! Blorb MOD/XM/S3M/IT resources, rendered incrementally to stereo PCM.
 //! Keeping the module with its borrowing player avoids expanding minutes of
 //! tracker music into a large PCM allocation before playback can begin.
 use rodio::Source;
 use std::time::Duration;
 use xmrs::prelude::Module;
 use xmrsplayer::xmrsplayer::XmrsPlayer;
+
+#[cfg(test)]
+mod fixtures;
 
 pub(super) const SAMPLE_RATE: u32 = 44_100;
 
@@ -18,15 +21,29 @@ self_cell::self_cell! {
 
 pub(super) struct ModSource {
     player: OwnedPlayer,
+    pending: Option<f32>,
     remaining: u32,
 }
 
 impl ModSource {
     pub(super) fn new(bytes: &[u8], repeats: u32) -> Option<Self> {
-        let module = Module::load_mod(bytes).ok()?;
-        let player = OwnedPlayer::new(module, Self::player);
+        let module = if bytes.starts_with(b"Extended Module: ") {
+            Module::load_xm(bytes)
+        } else if bytes.starts_with(b"IMPM") {
+            Module::load_it(bytes)
+        } else if bytes.get(44..48) == Some(b"SCRM") {
+            Module::load_s3m(bytes)
+        } else {
+            Module::load_mod(bytes)
+        }
+        .ok()?;
+        let mut player = OwnedPlayer::new(module, Self::player);
+        let pending = player
+            .with_dependent_mut(|_, player| player.next())
+            .map(|sample| sample as f32 / 32768.0);
         Some(Self {
             player,
+            pending,
             remaining: repeats,
         })
     }
@@ -39,6 +56,40 @@ impl ModSource {
         player.set_max_loop_count(1);
         player
     }
+
+    pub(super) fn skip_millis(&mut self, millis: u64) {
+        let frames = millis as u128 * SAMPLE_RATE as u128 / 1000;
+        for _ in 0..frames * 2 {
+            if self.next().is_none() {
+                break;
+            }
+        }
+    }
+    fn advance(&mut self) {
+        self.pending = self
+            .player
+            .with_dependent_mut(|_, player| player.next())
+            .map(|sample| sample as f32 / 32768.0);
+        if self.pending.is_some() {
+            return;
+        }
+        if self.remaining != u32::MAX {
+            self.remaining -= 1;
+        }
+        if self.remaining == 0 {
+            return;
+        }
+        self.player
+            .with_dependent_mut(|module, player| *player = Self::player(module));
+        // An empty song must terminate even for infinite repetition.
+        self.pending = self
+            .player
+            .with_dependent_mut(|_, player| player.next())
+            .map(|sample| sample as f32 / 32768.0);
+        if self.pending.is_none() {
+            self.remaining = 0;
+        }
+    }
 }
 
 impl Iterator for ModSource {
@@ -48,23 +99,16 @@ impl Iterator for ModSource {
         if self.remaining == 0 {
             return None;
         }
-        if let Some(sample) = self.player.with_dependent_mut(|_, player| player.next()) {
-            return Some(sample as f32 / 32768.0);
-        }
-        if self.remaining != u32::MAX {
-            self.remaining -= 1;
-        }
-        if self.remaining == 0 {
-            return None;
-        }
-        self.player
-            .with_dependent_mut(|module, player| *player = Self::player(module));
-        // An empty song must terminate even for infinite repetition.
-        let sample = self.player.with_dependent_mut(|_, player| player.next());
-        if sample.is_none() {
-            self.remaining = 0;
-        }
-        sample.map(|sample| sample as f32 / 32768.0)
+        let sample = self.pending.take()?;
+        self.advance();
+        Some(sample)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (
+            usize::from(self.remaining != 0 && self.pending.is_some()),
+            None,
+        )
     }
 }
 
@@ -183,5 +227,60 @@ mod tests {
         assert!(super::super::decode_sound(&bytes, *b"MOD ", 1, 0).is_some());
         assert!(super::super::decode_sound(&bytes, *b"OGGV", 1, 0).is_none());
         assert!(super::super::decode_sound(&bytes[..600], *b"MOD ", 1, 0).is_none());
+    }
+
+    #[test]
+    fn all_standard_blorb_tracker_formats_render_and_repeat_complete_songs() {
+        for (name, bytes) in [
+            ("MOD", module()),
+            ("XM", fixtures::xm()),
+            ("S3M", fixtures::s3m()),
+            ("IT", fixtures::it()),
+        ] {
+            let source = ModSource::new(&bytes, 1).unwrap_or_else(|| panic!("cannot load {name}"));
+            let once: Vec<_> = source.take(100_000).collect();
+            assert_eq!(once.len(), 15_876, "{name}: three 3-tick rows at125BPM");
+            assert!(
+                once[..4410].iter().any(|sample| sample.abs() > 0.001),
+                "{name} is silent"
+            );
+            let twice: Vec<_> = ModSource::new(&bytes, 2).unwrap().take(100_000).collect();
+            assert_eq!(twice, once.repeat(2), "{name} repeated playback");
+            let converted: Vec<f32> = rodio::source::UniformSourceIterator::new(
+                ModSource::new(&bytes, 2).unwrap(),
+                2,
+                SAMPLE_RATE,
+            )
+            .collect();
+            assert_eq!(converted, twice, "{name} playback conversion");
+            let mut resumed = ModSource::new(&bytes, 1).unwrap();
+            resumed.skip_millis(5);
+            assert_eq!(
+                resumed.collect::<Vec<_>>(),
+                once[440..],
+                "{name} stereo resume at5ms"
+            );
+            assert!(
+                super::super::decode_sound(&bytes, *b"MOD ", 1, 0).is_some(),
+                "{name} inMOD chunk"
+            );
+        }
+    }
+
+    #[test]
+    fn s3m_adlib_instruments_use_the_fm_synthesizer() {
+        let bytes = fixtures::s3m_adlib();
+        let pcm: Vec<_> = ModSource::new(&bytes, 1).unwrap().take(100_000).collect();
+        assert_eq!(pcm.len(), 15_876);
+        assert!(pcm[..4410].iter().any(|sample| sample.abs() > 0.001));
+        let loud = pcm[..4410]
+            .iter()
+            .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
+        let quiet = pcm[7056..]
+            .iter()
+            .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
+        // S3M volume zero maps to the OPL chip's finite total-level
+        // attenuation, so it is very quiet rather than digitally silent.
+        assert!(quiet < loud * 0.01, "FM volume: loud {loud}, quiet {quiet}");
     }
 }

@@ -41,12 +41,12 @@ Game-requested save/load prompts accept a path in the input bar; existing files
 require confirmation before modification, and read prompts require an existing file. The desktop
 also saves its session every 30 seconds and on normal exit; launching without a
 story restores the previous session. `View -> Story information` shows available
-iFiction metadata and cover art. Portable game saves and desktop sessions are
+iFiction metadata, cover art and image/sound text descriptions. Portable game saves and desktop sessions are
 separate formats.
 
 The desktop supports paragraph alignment and indentation, styled grids with inline
 editing, inline and margin images with resizing, picture hyperlinks,
-and MOD music alongside sampled audio. Inform acceleration functions 1–13 are
+and MOD/XM/S3M/IT music alongside sampled audio. Inform acceleration functions 1–13 are
 available. System fonts supply Unicode fallback; an extra font can be selected
 in `View -> Options`. See the compatibility document for tested media formats and limits.
 
@@ -96,6 +96,13 @@ Paragraph styles and grid interaction have a separate original fixture:
 ```sh
 python3 tools/make-style-fixture.py /tmp/glulx-styles.ulx
 cargo run -- /tmp/glulx-styles.ulx
+```
+
+Linux desktop input and graphics regression tools use an isolated Xvfb display:
+
+```sh
+python3 tools/check-input-ui.py --candidate target/debug/glulx-rs
+python3 tools/check-graphics-ui.py --candidate target/debug/glulx-rs
 ```
 
 The release profile uses LTO and strips symbols. Tagged GitHub releases build

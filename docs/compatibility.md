@@ -6,7 +6,7 @@ for coverage and reproducible evidence. This is not a claim of exhaustive confor
 
 ## Implemented
 
-- Validated raw Glulx and indexed Blorb executables, images, sound/data resources, iFiction metadata and cover art.
+- Validated raw Glulx and indexed Blorb executables, images, sound/data resources, iFiction metadata, cover art and RDes image/sound descriptions.
 - Standard integer, addressing, call, search, string, single/double precision and heap instructions.
 - IFZS persistent saves interoperating with Glulxe, restart/protect and multiple undo states.
 - Inform acceleration functions 1–13, including class/property access and legacy/current object layouts; unsupported registrations are removed as specified.
@@ -25,7 +25,11 @@ Desktop sessions are local player snapshots, not an interchange format.
 
 Text buffers support all five image alignments, margin flow breaks, image hyperlinks
 and Glk 0.7.6 dynamic width/aspect/maximum-width rules. Graphics-window images retain
-their dimensions at draw time. Text-buffer style hints 0–9 are supported; paragraph
+their dimensions at draw time; scaling samples only visible canvas pixels, including
+very large unsigned target sizes. PNG/JPEG resources are fully decoded before a
+successful Glk image result. Decoded sources are limited to 16 megapixels with a
+128 MiB decoder allocation budget; unavailable images report failure. RDes text
+alternatives are available in Story information. Text-buffer style hints 0–9 are supported; paragraph
 indentation/hanging indents and all four justification modes are implemented. Grid
 cells retain style and hyperlinks; grid layout hints 0–3/6 are ignored to keep equal
 cell dimensions, while weight/oblique/color hints apply. Measurements reflect actual
@@ -35,14 +39,17 @@ CharOutput reports missing glyphs accurately. Text-buffer window sizing uses the
 normal style’s actual font metrics; grids keep uniform 8×16 cells.
 
 Sound decoding uses rodio/Symphonia plus pure Rust xmrs/xmrsplayer for
-ProTracker/SoundTracker MOD music. MOD is streamed to PCM rather than fully expanded
-before playback. XM/S3M/IT and bit-exact reproduction of every historic MOD variant
-are not claimed. `play_multi` submits a single combined output source, aligning
+all four standard Blorb tracker formats: MOD, XM, S3M and IT. Tracker and sampled
+audio are decoded as played. Finite repetitions end at natural decoder EOF, retaining
+every PCM sample and stereo frame. Container frame counts remove encoder padding,
+and resampling remains continuous across packet and repetition boundaries. Bit-exact reproduction of every historic tracker
+variant is not claimed. `play_multi` submits a single combined output source, aligning
 channels to the same stereo sample frame; physical sound-card output is not measured.
 AIFF and generated MOD resources have GUI coverage, while not every codec/encoding
 combination has a fixture.
 
-File streams preserve encoded-byte positions and Unicode overwrite semantics. File
+File streams preserve encoded-byte positions and Unicode overwrite semantics, with
+shared contents and independent positions for concurrent streams of the same file. File
 prompts reject missing read paths and confirm modifications to existing files.
 Input cancellation echoes the retained composition, line terminators are bound to
 each request, and select_poll leaves player input for select. The GUI supports
@@ -53,6 +60,11 @@ GUI-only facilities. Without an audio output device the desktop disables sound
 capabilities. Gestalt queries account for their arguments and host availability.
 Unknown Glk selectors return zero and are recorded; unsupported VM instructions
 produce typed errors. A successfully started game is not necessarily fully playable.
+
+Date conversion uses Gregorian arithmetic across the signed 32-bit year range;
+local time retains historical offsets and future recurring timezone rules. IFZS
+restoration accepts repeatable annotation/extension chunks and ignores later duplicate
+singleton chunks as specified by Quetzal.
 
 Validation includes official Glulxercise, Unicode and resource-stream suites,
 Adventure save interoperability and Linux desktop smoke tests. Windows/macOS

@@ -77,9 +77,9 @@ impl Vm {
                 .ok_or(VmError::InvalidSave)?;
             let payload = data.get(cursor + 8..end).ok_or(VmError::InvalidSave)?;
             let tag = data.get(cursor..cursor + 4).ok_or(VmError::InvalidSave)?;
-            if chunks.insert(tag, payload).is_some() {
-                return Err(VmError::InvalidSave);
-            }
+            // Quetzal 1.4 sections 8.8–8.9 permit repeated annotations and
+            // unknown chunks; later copies of singleton chunks are ignored.
+            chunks.entry(tag).or_insert(payload);
             cursor = end.checked_add(length % 2).ok_or(VmError::InvalidSave)?;
         }
         if cursor != data.len()
@@ -276,4 +276,37 @@ pub(super) fn validate_stack(stack: &Stack, memory_size: u32) -> Result<(), VmEr
         frame = old;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restores_saves_with_repeated_annotations_and_extension_chunks() {
+        let mut vm = Vm::new(
+            Story::from_bytes(
+                &super::super::tests::image_with_program(&[0x81, 0x20]),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        vm.memory.write32(0x100, 42).unwrap();
+        let mut data = vm.encode_save(&Destination::Stack).unwrap();
+        for tag in [b"ANNO", b"IntD", b"Xtra"] {
+            chunk(&mut data, tag, b"first");
+            chunk(&mut data, tag, b"second");
+        }
+        // Later singleton chunks must not replace the original valid data.
+        for tag in [b"IFhd", b"CMem", b"Stks"] {
+            chunk(&mut data, tag, b"ignored");
+        }
+        let length = (data.len() - 8) as u32;
+        data[4..8].copy_from_slice(&length.to_be_bytes());
+        vm.memory.write32(0x100, 99).unwrap();
+        vm.decode_save(&data).unwrap();
+        assert_eq!(vm.memory.read32(0x100).unwrap(), 42);
+        assert_eq!(vm.stack.pop_u32().unwrap(), u32::MAX);
+    }
 }

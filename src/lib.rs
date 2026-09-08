@@ -1,5 +1,6 @@
 pub mod app;
 pub mod memory;
+mod picture;
 pub mod story;
 pub mod translation;
 pub mod vm;

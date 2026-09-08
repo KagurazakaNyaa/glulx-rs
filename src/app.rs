@@ -88,15 +88,17 @@ impl DisplayedGraphics {
         let pixels = image::RgbaImage::from_pixel(size[0], size[1], image::Rgba([255; 4]));
         let texture = context.load_texture(
             format!("glk-graphics-window-{window}"),
-            color_image(&pixels),
+            texture_image(context, &pixels),
             egui::TextureOptions::LINEAR,
         );
         Self { pixels, texture }
     }
 
-    fn upload(&mut self) {
-        self.texture
-            .set(color_image(&self.pixels), egui::TextureOptions::LINEAR);
+    fn upload(&mut self, context: &egui::Context) {
+        self.texture.set(
+            texture_image(context, &self.pixels),
+            egui::TextureOptions::LINEAR,
+        );
     }
 }
 
@@ -273,7 +275,7 @@ impl PlayerApp {
                         {
                             let texture = creation.egui_ctx.load_texture(
                                 format!("glk-graphics-window-{}", canvas.window),
-                                color_image(&pixels),
+                                texture_image(&creation.egui_ctx, &pixels),
                                 egui::TextureOptions::LINEAR,
                             );
                             app.graphics
@@ -449,9 +451,9 @@ impl PlayerApp {
                     if let std::collections::hash_map::Entry::Vacant(entry) =
                         self.image_cache.entry(request.resource)
                     {
-                        match image::load_from_memory(&request.data) {
+                        match crate::picture::decode(&request.data) {
                             Ok(decoded) => {
-                                entry.insert(decoded.to_rgba8());
+                                entry.insert(decoded);
                             }
                             Err(error) => {
                                 self.status = format!(
@@ -462,18 +464,10 @@ impl PlayerApp {
                             }
                         }
                     }
-                    let mut source = self.image_cache[&request.resource].clone();
-                    if let Some([width, height]) = request
+                    let source = &self.image_cache[&request.resource];
+                    let size = request
                         .requested_size
-                        .filter(|size| size[0] != 0 && size[1] != 0)
-                    {
-                        source = image::imageops::resize(
-                            &source,
-                            width,
-                            height,
-                            image::imageops::FilterType::Triangle,
-                        );
-                    }
+                        .unwrap_or([source.width(), source.height()]);
                     let canvas = ensure_canvas(
                         context,
                         &mut self.graphics,
@@ -481,12 +475,7 @@ impl PlayerApp {
                         request.canvas_size,
                         0xffffff,
                     );
-                    image::imageops::overlay(
-                        &mut canvas.pixels,
-                        &source,
-                        i64::from(request.position[0]),
-                        i64::from(request.position[1]),
-                    );
+                    crate::picture::draw_scaled(&mut canvas.pixels, source, request.position, size);
                     dirty.insert(request.window);
                 }
                 GraphicsRequest::Fill {
@@ -526,7 +515,7 @@ impl PlayerApp {
         }
         for window in dirty {
             if let Some(canvas) = self.graphics.get_mut(&window) {
-                canvas.upload();
+                canvas.upload(context);
             }
         }
     }
@@ -825,7 +814,10 @@ impl PlayerApp {
                                     if let Some(graphics) = self.graphics.get(&view.id) {
                                         let destination = egui::Rect::from_min_size(
                                             rect.min,
-                                            graphics.texture.size_vec2(),
+                                            egui::vec2(
+                                                graphics.pixels.width() as f32,
+                                                graphics.pixels.height() as f32,
+                                            ),
                                         );
                                         ui.painter().image(
                                             graphics.texture.id(),
@@ -1022,11 +1014,11 @@ impl PlayerApp {
             let metadata = vm.metadata();
             if self.cover.is_none()
                 && let Some(data) = vm.cover()
-                && let Ok(pixels) = image::load_from_memory(data)
+                && let Ok(pixels) = crate::picture::decode(data)
             {
                 self.cover = Some(context.load_texture(
                     "story-cover",
-                    color_image(&pixels.to_rgba8()),
+                    texture_image(context, &pixels),
                     egui::TextureOptions::LINEAR,
                 ));
             }
@@ -1048,6 +1040,24 @@ impl PlayerApp {
                     }
                     if !metadata.ifid.is_empty() {
                         ui.small(format!("IFID: {}", metadata.ifid));
+                    }
+                    let descriptions = vm.resource_descriptions();
+                    if !descriptions.is_empty() {
+                        ui.separator();
+                        ui.collapsing("Image and sound descriptions", |ui| {
+                            egui::ScrollArea::vertical()
+                                .max_height(300.0)
+                                .show(ui, |ui| {
+                                    for description in descriptions {
+                                        let kind = if description.usage == *b"Pict" {
+                                            "Image"
+                                        } else {
+                                            "Sound"
+                                        };
+                                        ui.label(format!("{kind}: {}", description.text));
+                                    }
+                                });
+                        });
                     }
                 });
         }
@@ -1296,6 +1306,22 @@ fn rgba(color: u32) -> image::Rgba<u8> {
     ])
 }
 
+fn texture_image(context: &egui::Context, pixels: &image::RgbaImage) -> egui::ColorImage {
+    let maximum = context.input(|input| input.max_texture_side).max(1) as u32;
+    let side = pixels.width().max(pixels.height());
+    if side <= maximum {
+        return color_image(pixels);
+    }
+    let width = (u64::from(pixels.width()) * u64::from(maximum) / u64::from(side)).max(1) as u32;
+    let height = (u64::from(pixels.height()) * u64::from(maximum) / u64::from(side)).max(1) as u32;
+    color_image(&image::imageops::resize(
+        pixels,
+        width,
+        height,
+        image::imageops::FilterType::Triangle,
+    ))
+}
+
 fn color_image(pixels: &image::RgbaImage) -> egui::ColorImage {
     egui::ColorImage::from_rgba_unmultiplied(
         [pixels.width() as usize, pixels.height() as usize],
@@ -1392,6 +1418,27 @@ mod tests {
         assert_eq!(*canvas.get_pixel(1, 1), rgba(0x123456));
         assert_eq!(*canvas.get_pixel(2, 1), rgba(0xffffff));
         assert_eq!(*canvas.get_pixel(0, 0), rgba(0xffffff));
+    }
+
+    #[test]
+    fn narrow_large_images_upload_within_the_host_texture_limit() {
+        let context = egui::Context::default();
+        for size in [(20_000, 1), (1, 20_000), (4000, 2000)] {
+            let pixels = image::RgbaImage::from_pixel(size.0, size.1, rgba(0x123456));
+            let image = texture_image(&context, &pixels);
+            let maximum = context.input(|input| input.max_texture_side);
+            assert!(image.size.iter().all(|side| *side > 0 && *side <= maximum));
+            assert!(
+                image
+                    .pixels
+                    .iter()
+                    .all(|pixel| *pixel == color_word(0x123456))
+            );
+            let texture =
+                context.load_texture("oversize-picture", image, egui::TextureOptions::LINEAR);
+            assert!(texture.size().iter().all(|side| *side <= maximum));
+            assert_eq!(pixels.dimensions(), size);
+        }
     }
 
     #[test]

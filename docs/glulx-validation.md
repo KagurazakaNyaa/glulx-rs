@@ -1,6 +1,6 @@
 # Glulx 实现验收记录
 
-日期：2026-09-08，Linux x86_64，核心实现提交 `4c16443`，加速与媒体提交 `c5fcc20`。本轮进一步修复完整规范审计发现的核心、窗口、输入、流、字体及呈现边界。
+日期：2026-09-08，Linux x86_64，核心实现提交 `4c16443`，加速与媒体提交 `c5fcc20`，输入/字体/窗口提交 `4870bcf`。随后继续完成媒体格式、共享文件、宽范围日期、IFZS 及图片边界修复。
 
 ## 可复现命令与结果
 
@@ -13,18 +13,19 @@ python3 tools/check-opcodes.py --spec /path/to/Glulx-Spec.md --output /tmp/glulx
 python3 tools/check-reference.py --reference /path/to/glulxe --candidate target/debug/glulx-rs --fixtures /path/to/fixtures
 ```
 
-Rust 测试 136 passed / 0 failed；Clippy（warnings 视为错误）及 release 构建通过。
+Rust 测试 158 passed / 0 failed；Clippy（warnings 视为错误）及 release 构建通过。
 脚本不下载样本、不修改仓库游戏资源；合成故事及存档使用临时目录。
 不传 `--fixtures` 仍可运行合成 IFZS 双向互操作、double stack 顺序、Inform 加速函数、零长度内存及深层字符串差分检查。
 官方 opcode 表 150/150 条分发和操作数数量匹配；官方 Glk dispatch 注册表 124/124 selectors 均有分发。这两项只证明表完整，执行语义仍需运行测试。
 
-此前完整脚本通过结果：
+最终整合后的完整脚本通过结果：
 
 ```text
 PASS Rust -> Glulxe: save continuation, heap chunk, double stack order
 PASS Glulxe -> Rust: save continuation, heap chunk, double stack order
 PASS acceleration: all 13 functions, 94 result checks, exact reference transcript
 PASS core boundaries: zero-length memory operations and 40000 Huffman substrings, exact reference transcript
+PASS shared file streams: cross-handle reads, independent counts, and final file bytes match reference
 PASS glulxercise.ulx: 92 passing sections
 PASS unicasetest.ulx: exact normalized reference transcript
 PASS resstreamtest.gblorb: exact normalized reference transcript
@@ -33,7 +34,7 @@ PASS Adventure Glulxe -> Rust
 ```
 
 Glulxercise 输入 `all / allfloat / alldouble / quit`，三次 `All tests passed.`。
-其随机分布测试有统计性误报概率，官方样本也明确说明；单次统计失败应记录并分析，不能用重复运行掩盖确定性缺陷。本轮提交前重跑，random 组 240 次取样出现 lobit=141 / hibit=99，超出样本设置的 [100..140]，导致该组两个断言失败；其他组通过，allfloat/alldouble 全通过。此结果记录为统计阈值失败，不算本次整套通过，亦未靠重跑隐藏它；此前完整通过结果保留为历史证据。
+其随机分布测试有统计性误报概率，官方样本也明确说明；单次统计失败应记录并分析，不能用重复运行掩盖确定性缺陷。`4870bcf` 提交前的一次重跑，random 组 240 次取样出现 lobit=141 / hibit=99，超出样本设置的 [100..140]，导致该组两个断言失败；其他组通过，allfloat/alldouble 全通过。该次记录为统计阈值失败，不算整套通过。随后共享流和 IFZS 改动完成后的必要整合回归，92 个段落及三轮全部通过；此处保留前次统计失败，未修改随机实现或样本阈值。脚本现在会保留失败全文并给出日志路径。
 文件流 UTF-8 byte mark/seek 按规范测试；CheapGlk 的 Unicode text stream 存在 mark 除以 4 的实现差异，该边界不宣称差分一致。
 Unicode 输入 `all / quit`，资源流输入 `quit`；比较只归一化 interpreter version 字段，Glulxe 使用 `-q -u` 保证 UTF-8。
 Adventure 的保存方执行 `north / save / 路径 / quit / y`，另一解释器执行
@@ -48,17 +49,17 @@ Adventure 的保存方执行 `north / save / 路径 / quit / y`，另一解释�
 | 解码、寻址、栈、局部变量 | `all_load_address_modes_and_opcode_encodings`、`narrow_copy_integer_extremes_and_stack_bounds`、零长度内存操作、locals 帧容量 | Glulxercise 综合 |
 | 调用、搜索、字符串/filter | 原 VM 测试、`huffman_leaf_and_indirection_matrix`、迭代输出续体及数值 filter 内存档 | Glulxercise 综合；40,000 次 Huffman 子字符串与参考一致 |
 | 单/双精度 | `double_*`、`floating_branches_*`、`float_nan_modulo_and_power_identities` | Glulxercise allfloat/alldouble；双栈结果参考测试 |
-| IFZS | round trip、损坏存档、文件提示、空 MAll | 合成故事及 Adventure 双向互读 |
+| IFZS | round trip、损坏存档、文件提示、空 MAll、重复注释/扩展/单例块 | 合成故事及 Adventure 双向互读 |
 | undo/restart/protect/heap | `undo_*`、`allocation_limits_*`、原 heap 回归 | Glulxercise 综合 |
 | Inform 加速 1–13 | [acceleration.rs](../src/vm/acceleration.rs)：注册/取消、类/属性/私有权限、旧/新布局、call/callf/tailcall、压缩字符串和 20,000 次 filter 回调、恢复状态边界 | 13 函数共 94 项结果与 Glulxe 精确一致 |
 | random/verify/gestalt | `random_ranges_determinism_verify_and_capabilities` | Glulxercise 综合 |
-| 流/dispatch | read/seek/Unicode/count、echo cycles、流关闭解除绑定、写入末尾定位、UTF-8 字节标记和覆盖、旧会话迁移、原栈引用测试 | resstreamtest 与参考完全一致 |
+| 流/dispatch | read/seek/Unicode/count、echo cycles、流关闭解除绑定、同文件共享缓存/独立位置/dirty flush/旧会话迁移、写入末尾定位、UTF-8 字节标记和覆盖、旧会话迁移、原栈引用测试 | resstreamtest 与参考完全一致；共享流输出/计数/最终文件字节差分一致 |
 | 窗口/事件 | 排列方向/嵌套 key/关闭/resize/字体度量、多窗口输入、取消/计时器、select_poll 事件分类、图形裁剪和背景扩展 | twocol 启动及 Sensory GUI |
 | Unicode | 扩展转换、titlecase、NFC/NFD、能力参数 | unicasetest 与参考完全一致 |
 | 文本图像 | [presentation.rs](../src/vm/presentation.rs) 图片顺序、事件关联、动态尺寸、零尺寸及会话；[text_buffer.rs](../src/app/text_buffer.rs) 行内基线、双侧/重复边栏、flow-break、换行/单词、缩放与裁剪 | 合成故事 GUI 缩放/点击/恢复 |
 | 样式/鼠标/链接/终止键 | 样式快照及真实测量、缩进/四种对齐、echo 样式传播、固定网格样式/链接/编辑；真实中文 glyph 绘制及缺字能力 | 25 种特殊按键、网格 LINK/预填编辑、官方定时取消和恢复编辑 GUI 验收 |
-| 日期/时间 | epoch、负时间、字段规范化、失败 sentinel、UTC 往返、New York DST 间隙及 Apia 跳日 | datetimetest 启动 |
-| 声音 | 无设备 idle sink：同步采样起播、独立暂停/音量、停止/结束/渐变通知；[tracker.rs](../src/vm/sound/tracker.rs)：PCM、速度/BPM/音量/E6 循环、重复及恢复偏移 | Sensory AIFF；合成 MOD GUI 播放及完成通知 |
+| 日期/时间 | epoch、负时间、完整 i32 年份、字段/负微秒规范化、UTC 往返、New York DST 间隙、Apia 跳日及远古/未来偏移 | datetimetest 启动 |
+| 声音 | 无设备 idle sink：同步采样起播、独立暂停/音量、停止/结束/渐变通知；[tracker.rs](../src/vm/sound/tracker.rs)：四格式 PCM、S3M OPL、速度/BPM/音量/E6 循环、重复及恢复偏移；sampled 流式编码/时长/重采样边界 | Sensory AIFF；合成 MOD GUI 播放及完成通知 |
 | Blorb/产品 | 容器边界/资源索引/元数据测试、session serialization | Adventure/Sensory 关闭重开恢复 |
 
 矩阵是按领域覆盖，不意味着每个合法/非法输入组合均已穷举。
@@ -137,3 +138,24 @@ python3 tools/check-input-ui.py --candidate target/debug/glulx-rs --output /tmp/
 输入脚本自动分配 X display，保留截图、应用日志及持久会话；使用正常 WM_DELETE_WINDOW 退出。原创故事检查 25 个原生按键事件（F1–F12、方向键、Delete/Backspace、Esc/Tab/Page/Home/End/Enter）的精确值，定时取消时组成的 abc，以及同一 VM 执行片段重新请求时的 NEW 预填。官方 Input Feature Test 检查定时取消后的 ROT13 显示、保留原文 abcdef，并在会话恢复后继续编辑。
 
 图形回归验证：改变尺寸立即保留左上可见像素，裁去缩小区域，用当前背景填充新增区域；缩小后再放大不会恢复已裁像素，零尺寸释放画布。无符号矩形宽高按规范裁剪，包含 0xFFFFFFFF 和负坐标组合。
+
+
+## 媒体格式与后续边界
+
+```sh
+python3 tools/check-graphics-ui.py --candidate target/debug/glulx-rs --output /tmp/glulx-graphics-ui
+python3 tools/check-audio-codecs.py
+```
+
+图形脚本已通过：缩小窗口裁去右侧绿色方块，放大后绿色不再出现，左上红色方块保留且新增区域填充当前背景；绘制宽高 0xFFFFFFFF、负起点的图片成功，并保留到正常关闭/恢复之后。脚本直接检查截图像素及持久会话，而非仅确认进程未退出。Rust 回归另检查损坏 IDAT 返回失败、透明度合成，以及合法 20000×1 图片上传前适配 GPU 纹理边长，避免 debug panic；VM 仍保留原始图片尺寸。
+
+Blorb RIdx 必须位于首块且唯一；RDes 解析验证 UTF-8、无条目间 padding、截断及重复条目，图像/声音文字描述显示于故事信息面板。依据 [Blorb 2.0.5](https://eblong.com/zarf/blorb/Blorb-Spec.md)。IFZS 重复块依据 [Quetzal 1.4 §8.8–8.9](https://www.ifarchive.org/if-archive/infocom/interpreters/specification/savefile_14.txt)。
+
+日期原始字节码差分中，10^13 秒返回 YEAR:318857，与 Glulxe 一致。共享文件原始字节码检查不同句柄读取刚写入的内容、独立读写计数及最终文件 XYC；已并入 check-reference.py。
+
+
+四种 tracker fixture 位于 [fixtures.rs](../src/vm/sound/tracker/fixtures.rs)，均为原创生成文件：MOD/XM/S3M/IT 验证非静音、结束、完整重复和帧对齐恢复；S3M 另检查 OPL 乐器的声音和音量衰减。采样源由 [sampled.rs](../src/vm/sound/sampled.rs) 逐包解码，保持编码数据共享，按容器整数帧数裁掉编码填充。播放重复按自然 EOF 计数，不依赖浮点 Duration。
+
+音频 codec 工具用 ffmpeg 生成原创 44.1 kHz 立体声音调，再测试项目当前构建的解码器：AIFF/OGG/MP3 各 250 ms（22,050 个样本）和 1250 ms（110,250 个样本），共六组精确样本数、时长、有限/无限重复、5 ms 恢复及播放转换均通过。所用 Rodio/Symphonia 构建由 Cargo 的 JSON artifact 输出定位，避免选择旧 feature 组合。工具需要 cargo/rustc/ffmpeg；运行时播放器不依赖 ffmpeg。
+
+18 项音频专项还验证 8/22.05/48 kHz 输入转 44.1 kHz 时逐样本等于完整缓冲区基准，解码分包及重复边界不重置重采样相位。

@@ -113,6 +113,13 @@ pub struct Metadata {
     pub ifid: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceDescription {
+    pub usage: [u8; 4],
+    pub number: u32,
+    pub text: String,
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct Story {
     pub path: Option<PathBuf>,
@@ -194,6 +201,36 @@ impl Story {
         let number = read_u32(self.container_chunk(*b"Fspc")?, 0).ok()?;
         self.resource(*b"Pict", number)
     }
+    pub fn resource_descriptions(&self) -> Vec<ResourceDescription> {
+        let parse = || -> Option<Vec<ResourceDescription>> {
+            let data = self.container_chunk(*b"RDes")?;
+            let count = read_u32(data, 0).ok()?;
+            let mut cursor = 4usize;
+            let mut entries: Vec<ResourceDescription> = Vec::new();
+            for _ in 0..count {
+                let usage = read_u32(data, cursor).ok()?.to_be_bytes();
+                let number = read_u32(data, cursor + 4).ok()?;
+                let length = read_u32(data, cursor + 8).ok()? as usize;
+                cursor = cursor.checked_add(12)?;
+                let end = cursor.checked_add(length)?;
+                let text = std::str::from_utf8(data.get(cursor..end)?).ok()?;
+                cursor = end;
+                if matches!(&usage, b"Pict" | b"Snd ")
+                    && !entries
+                        .iter()
+                        .any(|entry| entry.usage == usage && entry.number == number)
+                {
+                    entries.push(ResourceDescription {
+                        usage,
+                        number,
+                        text: text.to_owned(),
+                    });
+                }
+            }
+            (cursor == data.len()).then_some(entries)
+        };
+        parse().unwrap_or_default()
+    }
     pub fn container_chunk(&self, tag: [u8; 4]) -> Option<&[u8]> {
         let bytes = self.container.as_ref()?;
         blorb_chunks(bytes)
@@ -262,6 +299,12 @@ fn blorb_chunks(bytes: &[u8]) -> Result<Vec<(usize, usize)>, StoryError> {
 
 fn parse_resource_index(bytes: &[u8]) -> Result<ResourceIndex, StoryError> {
     let chunks = blorb_chunks(bytes)?;
+    if chunks
+        .first()
+        .is_none_or(|(start, _)| &bytes[*start..*start + 4] != b"RIdx")
+    {
+        return Err(StoryError::InvalidBlorb("first chunk must be RIdx"));
+    }
     let mut resources = HashMap::new();
     let mut index_seen = false;
     for &(start, end) in &chunks {
@@ -388,11 +431,11 @@ mod tests {
     #[test]
     fn extracts_glul_from_blorb() {
         let image = minimal_image();
-        let form_len = 4 + 8 + image.len();
+        let form_len = 4 + 12 + 8 + image.len();
         let mut blorb = Vec::new();
         blorb.extend_from_slice(b"FORM");
         blorb.extend_from_slice(&(form_len as u32).to_be_bytes());
-        blorb.extend_from_slice(b"IFRS");
+        blorb.extend_from_slice(b"IFRSRIdx\0\0\0\x04\0\0\0\0");
         blorb.extend_from_slice(b"GLUL");
         blorb.extend_from_slice(&(image.len() as u32).to_be_bytes());
         blorb.extend_from_slice(&image);
@@ -411,8 +454,8 @@ mod tests {
             })
         ));
         let mut blorb = b"FORM".to_vec();
-        blorb.extend_from_slice(&(4 + 8 + image.len() as u32).to_be_bytes());
-        blorb.extend_from_slice(b"IFRSGLUL");
+        blorb.extend_from_slice(&(4 + 12 + 8 + image.len() as u32).to_be_bytes());
+        blorb.extend_from_slice(b"IFRSRIdx\0\0\0\x04\0\0\0\0GLUL");
         blorb.extend_from_slice(&(image.len() as u32).to_be_bytes());
         blorb.extend_from_slice(&image);
         assert!(matches!(
@@ -497,7 +540,11 @@ mod tests {
         let image = minimal_image();
         let xml=b"<ifindex><story><bibliographic><title>A &amp; B</title><author>Writer</author></bibliographic><identification><ifid>TEST</ifid></identification></story></ifindex>";
         let mut blorb = b"FORM\0\0\0\0IFRS".to_vec();
-        for (tag, data) in [(b"GLUL", image.as_slice()), (b"IFmd", xml.as_slice())] {
+        for (tag, data) in [
+            (b"RIdx", &[0u8; 4][..]),
+            (b"GLUL", image.as_slice()),
+            (b"IFmd", xml.as_slice()),
+        ] {
             blorb.extend_from_slice(tag);
             blorb.extend_from_slice(&(data.len() as u32).to_be_bytes());
             blorb.extend_from_slice(data);
@@ -511,5 +558,52 @@ mod tests {
         assert_eq!(story.title, "A & B");
         assert_eq!(story.metadata().ifid, "TEST");
         assert_eq!(story.metadata().author, "Writer");
+    }
+
+    #[test]
+    fn index_must_be_first_and_resource_descriptions_keep_utf8_and_padding() {
+        let image = minimal_image();
+        let mut descriptions = 3u32.to_be_bytes().to_vec();
+        for (usage, number, text) in [
+            (b"Pict", 7u32, "A fox"),
+            (b"Snd ", 2, "钟声"),
+            (b"Pict", 7, "Duplicate"),
+        ] {
+            descriptions.extend_from_slice(usage);
+            descriptions.extend_from_slice(&number.to_be_bytes());
+            descriptions.extend_from_slice(&(text.len() as u32).to_be_bytes());
+            descriptions.extend_from_slice(text.as_bytes());
+        }
+        let build = |tags: &[([u8; 4], &[u8])]| {
+            let mut bytes = b"FORM\0\0\0\0IFRS".to_vec();
+            for (tag, data) in tags {
+                bytes.extend_from_slice(tag);
+                bytes.extend_from_slice(&(data.len() as u32).to_be_bytes());
+                bytes.extend_from_slice(data);
+                if data.len() % 2 != 0 {
+                    bytes.push(0);
+                }
+            }
+            let len = bytes.len() as u32 - 8;
+            bytes[4..8].copy_from_slice(&len.to_be_bytes());
+            bytes
+        };
+        let tags = [
+            (*b"RIdx", &[0u8; 4][..]),
+            (*b"GLUL", image.as_slice()),
+            (*b"RDes", descriptions.as_slice()),
+        ];
+        let story = Story::from_bytes(&build(&tags), None).unwrap();
+        let entries = story.resource_descriptions();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].text, "A fox");
+        assert_eq!(entries[1].text, "钟声");
+        assert!(Story::from_bytes(&build(&tags[1..]), None).is_err());
+        assert!(Story::from_bytes(&build(&[tags[1], tags[0]]), None).is_err());
+        assert!(Story::from_bytes(&build(&[tags[0], tags[0], tags[1]]), None).is_err());
+        let broken = &descriptions[..descriptions.len() - 1];
+        let story =
+            Story::from_bytes(&build(&[tags[0], tags[1], (*b"RDes", broken)]), None).unwrap();
+        assert!(story.resource_descriptions().is_empty());
     }
 }

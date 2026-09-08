@@ -1,10 +1,8 @@
 use super::*;
-use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
-use std::{
-    io::Cursor,
-    time::{Duration, Instant},
-};
+use rodio::{OutputStream, OutputStreamHandle, Sink, Source};
+use std::time::{Duration, Instant};
 
+mod sampled;
 mod tracker;
 
 type SoundOutput = rodio::queue::SourcesQueueOutput<f32>;
@@ -54,32 +52,14 @@ fn decode_sound(
     repeats: u32,
     offset_ms: u64,
 ) -> Option<Box<dyn Source<Item = f32> + Send>> {
-    let offset = Duration::from_millis(offset_ms);
     if format == *b"MOD " {
-        return Some(Box::new(
-            tracker::ModSource::new(bytes, repeats)?.skip_duration(offset),
-        ));
+        let mut source = tracker::ModSource::new(bytes, repeats)?;
+        source.skip_millis(offset_ms);
+        return Some(Box::new(source));
     }
-    let decoder = Decoder::new(Cursor::new(bytes.to_vec())).ok()?;
-    let sample_rate = decoder.sample_rate();
-    let channels = decoder.channels();
-    let samples: Vec<f32> = decoder.convert_samples().collect();
-    if samples.is_empty() || sample_rate == 0 || channels == 0 {
-        return None;
-    }
-    let duration =
-        Duration::from_secs_f64(samples.len() as f64 / sample_rate as f64 / channels as f64);
-    let source =
-        rodio::buffer::SamplesBuffer::new(channels, sample_rate, samples).repeat_infinite();
-    if repeats == u32::MAX {
-        Some(Box::new(source.skip_duration(offset)))
-    } else {
-        Some(Box::new(
-            source
-                .take_duration(duration.saturating_mul(repeats))
-                .skip_duration(offset),
-        ))
-    }
+    Some(Box::new(sampled::SampledSource::new(
+        bytes, repeats, offset_ms,
+    )?))
 }
 
 #[derive(Default)]

@@ -1079,9 +1079,11 @@ dependencies = [
  "reqwest",
  "rodio",
  "roxmltree",
+ "same-file",
  "self_cell",
  "serde",
  "serde_json",
+ "symphonia",
  "thiserror 2.0.20",
  "unicode-case-mapping",
  "unicode-normalization",
@@ -2213,6 +2215,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
+name = "oplon"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0df1044d4a29bc6db30e653b263b80599bcb4f15c0c0e2c61f9ac32f71d58de3"
+
+[[package]]
 name = "orbclient"
 version = "0.3.55"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3013,6 +3021,7 @@ dependencies = [
  "symphonia-codec-vorbis",
  "symphonia-core",
  "symphonia-format-isomp4",
+ "symphonia-format-ogg",
  "symphonia-format-riff",
  "symphonia-metadata",
 ]
@@ -3103,6 +3112,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "243739585d11f81daf8dac8d9f3d18cc7898f6c09a259675fc364b382c30e0a5"
 dependencies = [
  "encoding_rs",
+ "log",
+ "symphonia-core",
+ "symphonia-metadata",
+ "symphonia-utils-xiph",
+]
+
+[[package]]
+name = "symphonia-format-ogg"
+version = "0.5.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b4955c67c1ed3aa8ae8428d04ca8397fbef6a19b2b051e73b5da8b1435639cb"
+dependencies = [
  "log",
  "symphonia-core",
  "symphonia-metadata",
@@ -4346,6 +4367,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28f2177dbaa7894cdba1ca410dd20944dee4db1058c73698b895d532c2e552ff"
 dependencies = [
  "ciborium",
+ "oplon",
  "serde",
 ]
 

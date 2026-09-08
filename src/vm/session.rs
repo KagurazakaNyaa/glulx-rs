@@ -65,6 +65,7 @@ impl Vm {
         self.story = original;
         self.story.path = path;
         self.story.header.decoding_table = table;
+        self.restore_file_streams()?;
         Ok(self)
     }
     pub fn metadata(&self) -> crate::story::Metadata {

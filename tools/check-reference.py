@@ -94,9 +94,9 @@ def story():
     return b.finish()
 
 
-def run(executable, image, save, action, candidate):
-    command = [str(executable)] + (['--headless'] if candidate else ['-q', '-u']) + [str(image)]
-    result = subprocess.run(command, input=f'{action}\n{save}\n', text=True, capture_output=True, timeout=20)
+def run(executable, image, save, action, candidate, cwd=None):
+    command = [str(pathlib.Path(executable).resolve())] + (['--headless'] if candidate else ['-q', '-u']) + [str(image)]
+    result = subprocess.run(command, input=f'{action}\n{save}\n', text=True, capture_output=True, timeout=20, cwd=cwd)
     if result.returncode:
         raise AssertionError(f'{command}: {result.stderr}\n{result.stdout}')
     return result.stdout
@@ -250,6 +250,46 @@ def core_boundary_story():
     return image, 'ZERO-OK\n' + 'A' * 40_000 + '\nSTRING-OK\n'
 
 
+def shared_stream_story():
+    """Two ReadWrite handles share bytes while marks/counts stay independent."""
+    b = StoryBuilder()
+    mem = lambda address: (7, address)
+    b.instruction(0x149, 2, 0)
+    b.glk(0x23, [0, 0, 0, 3, 0], mem(0x800))
+    b.glk(0x2f, [mem(0x800)])
+    b.glk(0x61, [0, 0xa00, 0], mem(0x804))
+    b.glk(0x42, [mem(0x804), 3, 0], mem(0x808))
+    b.glk(0x42, [mem(0x804), 3, 0], mem(0x80c))
+    b.glk(0x81, [mem(0x808), ord('X')])
+    b.glk(0x44, [mem(0x808), 0])
+    b.glk(0x45, [mem(0x80c), 0, 0])
+    b.glk(0x90, [mem(0x80c)], mem(0x810))
+    b.text('SHARED:')
+    b.instruction(0x70, mem(0x810))
+    b.instruction(0x70, 10)
+    b.glk(0x45, [mem(0x80c), 1, 0])
+    b.glk(0x81, [mem(0x80c), ord('Y')])
+    b.glk(0x44, [mem(0x80c), 0x814])
+    b.text('READCOUNT:')
+    b.instruction(0x71, mem(0x814))
+    b.text(' WRITECOUNT:')
+    b.instruction(0x71, mem(0x818))
+    b.instruction(0x70, 10)
+    b.glk(0x42, [mem(0x804), 2, 0], mem(0x808))
+    b.glk(0x92, [mem(0x808), 0x820, 3])
+    b.text('DATA:')
+    b.glk(0x84, [0x820, 3])
+    b.instruction(0x70, 10)
+    b.glk(0x44, [mem(0x808), 0])
+    b.instruction(0x120)
+    image = b.finish()
+    name = b'\xe0sharedfile\0'
+    image[0xa00:0xa00 + len(name)] = name
+    image[32:36] = bytes(4)
+    image[32:36] = u32(sum(word[0] for word in struct.iter_unpack('>I', image)))
+    return image, 'SHARED:X\nREADCOUNT:1 WRITECOUNT:1\nDATA:XYC\n'
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--reference', type=pathlib.Path, required=True)
@@ -296,13 +336,30 @@ def main():
         assert transcripts[0] == transcripts[1], 'Core boundary transcripts differ'
         print('PASS core boundaries: zero-length memory operations and 40000 Huffman substrings, exact reference transcript')
 
+        image = root / 'shared-streams.ulx'
+        data, expected = shared_stream_story()
+        image.write_bytes(data)
+        for candidate in [False, True]:
+            file = root / 'sharedfile.glkdata'
+            file.write_bytes(b'ABC')
+            executable = args.candidate if candidate else args.reference
+            output = run(executable, image, root / 'unused', '', candidate, cwd=root)
+            assert output == expected, ('Shared stream transcript differs', candidate, output)
+            assert file.read_bytes() == b'XYC', ('Shared file contents differ', candidate, file.read_bytes())
+        print('PASS shared file streams: cross-handle reads, independent counts, and final file bytes match reference')
+
     if args.fixtures:
         import re
         for fixture, commands in [('glulxercise.ulx','all\nallfloat\nalldouble\nquit\n'),('unicasetest.ulx','all\nquit\n'),('resstreamtest.gblorb','quit\n')]:
             file=args.fixtures / fixture
             result=subprocess.run([str(args.candidate),'--headless',str(file)],input=commands,text=True,capture_output=True,timeout=60)
             assert result.returncode==0,(fixture,result.stderr)
-            assert 'FAIL' not in result.stdout and 'tests failed' not in result.stdout,(fixture,result.stdout)
+            if 'FAIL' in result.stdout or 'tests failed' in result.stdout:
+                with tempfile.NamedTemporaryFile(mode='w', prefix=f'{fixture}-', suffix='.log', delete=False) as log:
+                    log.write(result.stdout + result.stderr)
+                    saved = log.name
+                failures = '\n'.join(line for line in result.stdout.splitlines() if 'FAIL' in line or 'tests failed' in line)
+                raise AssertionError(f'{fixture}: {failures}\nFull transcript: {saved}')
             if fixture=='glulxercise.ulx':
                 assert result.stdout.count('All tests passed.')==3,result.stdout
                 print(f'PASS {fixture}: {result.stdout.count("Passed.")} passing sections')

@@ -1,12 +1,12 @@
 # Glulx 规范兼容性 checklist
 
-更新：2026-09-08。原清单主要缺口已在 `4c16443` 提交；加速函数、MOD 与文本内嵌图像在 `c5fcc20` 提交。本轮按完整规范重新审计并修正窗口、输入、流、样式和核心边界。以下描述实现与验收快照。`[x]` 表示实现及列出的验证已完成，不表示穷尽规范认证。详细测试、样本版本、复现命令见 [验收记录](glulx-validation.md)，实现限制见 [兼容性](compatibility.md)。
+更新：2026-09-08。原清单主要缺口已在 `4c16443` 提交；加速函数、MOD 与文本内嵌图像在 `c5fcc20` 提交。窗口、输入、字体和样式提交 `4870bcf`；本轮继续补齐完整规范审计发现的媒体、流、日期和存档边界。以下描述实现与验收快照。`[x]` 表示实现及列出的验证已完成，不表示穷尽规范认证。详细测试、样本版本、复现命令见 [验收记录](glulx-validation.md)，实现限制见 [兼容性](compatibility.md)。
 
 ## 规范边界
 
 - [Glulx 3.1.3](https://eblong.com/zarf/glulx/Glulx-Spec.html)：VM、指令、存档和能力查询。
 - [Glk 0.7.6](https://eblong.com/zarf/glk/Glk-Spec-076.html)：窗口、流、输入和可选媒体扩展。
-- [Blorb](https://eblong.com/zarf/blorb/)：执行文件与资源容器。
+- [Blorb 2.0.5](https://eblong.com/zarf/blorb/)：执行文件与资源容器。
 - [Glulxe](https://github.com/erkyrath/glulxe)：差分和存档互操作参考。来源调研保留在 [原调研](glulx-spec-research.md)。
 
 ## VM 核心
@@ -37,8 +37,8 @@
 - [x] Latin1 输入/大小写、Unicode 扩展大小写/titlecase/NFC/NFD；官方 Unicode 和资源流样本与参考输出一致。
 - [x] 样式状态、查询与 GUI 文本段呈现；支持段落缩进/悬挂缩进/四种对齐及 text-buffer hints 0–9；网格支持字重、斜体、颜色/反色，保留固定格尺寸。样式查询报告实际值，样式命令沿 echo 链传播。
 - [x] text-grid、graphics window、实际窗口布局、图像缩放/裁剪、坐标及窗口类型能力参数；text-buffer 支持三种行内对齐、两侧/重复边栏绕排、flow-break、图片超链接及动态缩放。零尺寸图片不占空间。graphics 画布随窗口裁剪/扩展并填充当前背景，矩形宽高按无符号值裁剪。
-- [x] 声道、播放/重复/停止/暂停、音量及渐变、完成通知和多声道播放；MOD 使用纯 Rust 按需解码，play_multi 在同一立体声采样帧起播。无音频设备时不声明声音能力。
-- [x] 日期/时间、资源流、行终止键和回显控制；UTC/local、负时间及日期规范化回归；超出时间库范围返回规范失败值，DST 间隙与跳日有隔离时区测试。
+- [x] 声道、播放/重复/停止/暂停、音量及渐变、完成通知和多声道播放；MOD/XM/S3M/IT 使用纯 Rust 按需解码，play_multi 在同一立体声采样帧起播。无音频设备时不声明声音能力。
+- [x] 日期/时间、资源流、行终止键和回显控制；UTC/local、负时间及日期规范化回归；完整 i32 年字段范围使用 Gregorian 运算，DST 间隙、跳日及远古/未来偏移有隔离时区测试。
 - [x] dispatch 的引用/数组/结构体/栈结果、对象生命周期和输出参数；124 个官方 selector 均有分发；未知 selector 记录并返回 0。
 - [x] gestalt 逐参数核对；GUI 按真实字体覆盖返回 CharOutput，支持系统/自选字体；headless 不声明图形、鼠标、声音等 GUI 能力。
 - [x] 升级 Glk 0.7.6，提供 `image_draw_scaled_ext`；graphics 绘图固定调用时尺寸；text-buffer 根据当前窗口宽度动态重排，支持比例/aspect/maxwidth 规则及透明图像。
@@ -46,26 +46,26 @@
 ## Blorb 与播放器
 
 - [x] 严格 FORM/IFRS chunk 边界及 RIdx 校验、索引执行文件、图片/声音/数据资源、FORM 音频资源头。
-- [x] iFiction 元数据、Fspc 封面及故事信息面板。
+- [x] iFiction 元数据、Fspc 封面、RDes 图像/声音文字描述及故事信息面板。
 - [x] GUI 每 30 秒及正常退出保存会话；不指定故事启动时恢复 VM、Glk、输入等待、图形画布、计时器及声音进度。桌面快照独立于可移植 IFZS。
 
 ## 验收与维护
 
-- [x] 136 个 Rust 测试通过；按领域的测试矩阵和边界覆盖见验收记录。
-- [x] Glulxercise 综合、单精度、双精度此前共 92 个通过段落、三轮全部通过；本轮重跑仅随机分布组出现统计阈值失败，见验收记录。
+- [x] 158 个 Rust 测试通过；按领域的测试矩阵和边界覆盖见验收记录。
+- [x] Glulxercise 综合、单精度、双精度最终整合共 92 个通过段落、三轮全部通过；此前一次随机分布阈值失败亦保留在验收记录。
 - [x] Inform 加速函数 1–13 共 94 项结果与 Glulxe 精确一致；合成媒体故事验证图像重排、点击、MOD 完成事件和会话恢复。
 - [x] 固定 Glulxe/CheapGlk revision，合成故事及 Adventure 双向存档验证；Unicode/资源流精确规范化输出比较。
 - [x] 扩展公开故事回归到 Adventure、Unicode、资源流、输入扩展、日期时间、多窗口和 Sensory Jam；明确区分专项测试、启动冒烟与 GUI 操作。
 
-## 新一轮审计待完成
+## 后续审计补充
 
-- [ ] 同一文件多个流的读写一致性，避免旧句柄关闭时覆盖新数据。
-- [ ] 超出 chrono 范围、但 Glk 日期字段仍可表示的时间戳转换。
-- [ ] IFZS 重复 ANNO/未知 chunk 及重复已知 chunk 的规范处理。
-- [ ] 精确有限音频重复；Blorb MOD 资源内的 XM/S3M/IT 格式。
-- [ ] 损坏图片绘制返回失败，以及超大目标尺寸的有界裁剪采样。
-- [ ] Blorb RIdx 首块规则及 RDes 文本描述。
+- [x] 同一文件多个流的读写一致性，避免旧句柄关闭时覆盖新数据。
+- [x] 超出 chrono 范围、但 Glk 日期字段仍可表示的时间戳转换。
+- [x] IFZS 重复 ANNO/未知 chunk 及重复已知 chunk 的规范处理。
+- [x] 精确有限音频重复；Blorb MOD 资源内的 XM/S3M/IT 格式；AIFF/OGG/MP3 逐包解码、编码填充裁剪及连续重采样。
+- [x] 损坏图片绘制返回失败，超大目标尺寸的有界裁剪采样，以及 GPU 纹理边长适配。
+- [x] Blorb RIdx 首块规则及 RDes 文本描述。
 
 ## 明确保留的可选范围与验证限制
 
-网格按规范保持统一格尺寸，忽略改变格布局的 hints 0–3/6；默认字体没有 light 字重时回退常规字重并如实报告。缺少字形返回 CannotPrint，可加载备用字体。MOD 支持 ProTracker/SoundTracker，未宣称全部历史方言或与特定硬件位精确重放；XM/S3M/IT 不属于此 MOD 支持范围。Sound2 同步以软件输出采样帧测试，未做实体声卡波形对比。Linux GUI 验收不能替代 Windows/macOS 实机验证，公开游戏冒烟不等于完整通关。上述限制需随新验收持续更新。
+网格按规范保持统一格尺寸，忽略改变格布局的 hints 0–3/6；默认字体没有 light 字重时回退常规字重并如实报告。缺少字形返回 CannotPrint，可加载备用字体。MOD/XM/S3M/IT 均支持，未宣称全部历史方言或与特定硬件位精确重放。Blorb 的 Rect/Reso/APal/Loop 属于 Z-machine 范围；deprecated SONG 格式为规范明确允许不实现的旧扩展。图片源超过 16 megapixels 或 decoder 128 MiB 分配预算时返回不可用；绘制目标尺寸不受此源图像限制。Sound2 同步以软件输出采样帧测试，未做实体声卡波形对比。Linux GUI 验收不能替代 Windows/macOS 实机验证，公开游戏冒烟不等于完整通关。上述限制需随新验收持续更新。

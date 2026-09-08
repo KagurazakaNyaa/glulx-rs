@@ -405,6 +405,8 @@ pub struct Vm {
     accelerated_return: Option<u32>,
     #[serde(default)]
     text_appearance: TextAppearance,
+    #[serde(skip)]
+    image_info: BTreeMap<u32, Option<[u32; 2]>>,
     graphical_host: bool,
     #[serde(skip)]
     audio: sound::AudioDevice,
@@ -458,6 +460,7 @@ impl Vm {
             acceleration: acceleration::Acceleration::default(),
             accelerated_return: None,
             text_appearance: TextAppearance::default(),
+            image_info: BTreeMap::new(),
             graphical_host: true,
             audio: sound::AudioDevice::default(),
             channels: BTreeMap::new(),
@@ -2121,10 +2124,7 @@ impl Vm {
                 0
             }
             0x00e0 => {
-                let dimensions = self
-                    .story
-                    .resource(*b"Pict", arguments.first().copied().unwrap_or(0))
-                    .and_then(image_dimensions);
+                let dimensions = self.picture_dimensions(arguments.first().copied().unwrap_or(0));
                 if let Some([width, height]) = dimensions {
                     self.write_glk_reference(arguments.get(1).copied().unwrap_or(0), width)?;
                     self.write_glk_reference(arguments.get(2).copied().unwrap_or(0), height)?;
@@ -2519,57 +2519,8 @@ fn floats_equal(a: f32, b: f32, tolerance: f32) -> bool {
 }
 
 fn image_dimensions(data: &[u8]) -> Option<[u32; 2]> {
-    if data.starts_with(b"\x89PNG\r\n\x1a\n") && data.len() >= 24 {
-        return Some([
-            u32::from_be_bytes(data[16..20].try_into().ok()?),
-            u32::from_be_bytes(data[20..24].try_into().ok()?),
-        ]);
-    }
-    if !data.starts_with(&[0xff, 0xd8]) {
-        return None;
-    }
-    let mut cursor = 2usize;
-    while cursor + 4 <= data.len() {
-        while data.get(cursor) == Some(&0xff) {
-            cursor += 1;
-        }
-        let marker = *data.get(cursor)?;
-        cursor += 1;
-        if matches!(marker, 0xd8 | 0xd9) {
-            continue;
-        }
-        let length = u16::from_be_bytes(data.get(cursor..cursor + 2)?.try_into().ok()?) as usize;
-        if length < 2 || cursor + length > data.len() {
-            return None;
-        }
-        if matches!(
-            marker,
-            0xc0 | 0xc1
-                | 0xc2
-                | 0xc3
-                | 0xc5
-                | 0xc6
-                | 0xc7
-                | 0xc9
-                | 0xca
-                | 0xcb
-                | 0xcd
-                | 0xce
-                | 0xcf
-        ) {
-            if length < 7 {
-                return None;
-            }
-            let height = u16::from_be_bytes(data[cursor + 3..cursor + 5].try_into().ok()?) as u32;
-            let width = u16::from_be_bytes(data[cursor + 5..cursor + 7].try_into().ok()?) as u32;
-            return Some([width, height]);
-        }
-        if marker == 0xda {
-            return None;
-        }
-        cursor += length;
-    }
-    None
+    let decoded = crate::picture::decode(data).ok()?;
+    Some([decoded.width(), decoded.height()])
 }
 
 fn operand_count(opcode: u32) -> Option<usize> {

@@ -189,12 +189,27 @@ impl Vm {
         self.story.resource(*b"Pict", resource)
     }
 
+    pub fn resource_descriptions(&self) -> Vec<crate::story::ResourceDescription> {
+        self.story.resource_descriptions()
+    }
+
+    pub(super) fn picture_dimensions(&mut self, resource: u32) -> Option<[u32; 2]> {
+        *self.image_info.entry(resource).or_insert_with(|| {
+            self.story
+                .resource(*b"Pict", resource)
+                .and_then(image_dimensions)
+        })
+    }
+
     pub(super) fn draw_image(&mut self, selector: u32, args: &[u32]) -> u32 {
         if !self.graphical_host {
             return 0;
         }
         let arg = |n: usize| args.get(n).copied().unwrap_or(0);
         let (window_id, resource) = (arg(0), arg(1));
+        let Some(original) = self.picture_dimensions(resource) else {
+            return 0;
+        };
         let Some(window) = self
             .glk_windows
             .get(&window_id)
@@ -203,9 +218,6 @@ impl Vm {
             return 0;
         };
         let Some(data) = self.story.resource(*b"Pict", resource) else {
-            return 0;
-        };
-        let Some(original) = image_dimensions(data) else {
             return 0;
         };
         let rule = match selector {
@@ -472,6 +484,22 @@ mod tests {
             1
         );
         vm.stack.pop_u32().unwrap()
+    }
+
+    #[test]
+    fn corrupt_picture_reports_failure_before_enqueuing_a_draw() {
+        let mut vm = pictured_vm();
+        let data = vm.story.container.as_mut().unwrap();
+        let idat = data.windows(4).position(|part| part == b"IDAT").unwrap();
+        data[idat + 4] ^= 0xff;
+        let window = vm.open_window(&[0, 0, 0, 5, 0]);
+        vm.take_graphics();
+        assert_eq!(vm.picture_dimensions(7), None);
+        assert_eq!(vm.draw_image(0xe1, &[window, 7, 0, 0]), 0);
+        assert!(vm.take_graphics().is_empty());
+        let buffer = vm.open_window(&[window, 0x22, 50, 3, 0]);
+        assert_eq!(vm.draw_image(0xe1, &[buffer, 7, 1, 0]), 0);
+        assert!(vm.glk_windows[&buffer].runs.is_empty());
     }
 
     #[test]
