@@ -10,6 +10,7 @@ homepage = "https://github.com/KagurazakaNyaa/glulx-rs"
 documentation = "https://docs.rs/glulx-rs"
 
 [dependencies]
+sys-locale = "0.3"
 ab_glyph = "0.2"
 ttf-parser = "0.25"
 crossterm = "0.29"

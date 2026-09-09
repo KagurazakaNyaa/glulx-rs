@@ -42,6 +42,8 @@ cargo run --release -- --no-auto-resources path/to/story.ulx
 
 File → Choose resources 通过重启故事应用资源选择。交互终端中的 `--headless` 可显示网格、实时编辑行输入并接收单键；管道保留自动化协议。终端 Ctrl+N 切换待输入窗口，Ctrl+C 退出。已支持 SONG 音频和可用的真实 light 字体。
 
+界面支持中文和英文。**视图 → 选项 → 界面语言** 默认“跟随系统”，系统语言不受支持或无法检测时回退到英文。选择 **中文** 或 **English** 后立即生效，并保存在本地应用设置中。界面语言与故事翻译目标语言独立；系统原生对话框的内置控件遵循操作系统语言。 翻译文件和维护说明见 [assets/locales](assets/locales/README.md)。
+
 ## 翻译
 
 回合翻译是可选功能，默认关闭。在 `View -> Translation panel` 中启用，然后在 `View -> Options` 中配置兼容 OpenAI 的服务端点、模型、目标语言和系统提示词。

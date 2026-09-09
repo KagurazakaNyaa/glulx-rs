@@ -1,0 +1,74 @@
+[
+  {
+    "source": "Could not read {}. Correct the file and restart.",
+    "key": "diagnostic.read_settings"
+  },
+  {
+    "source": "Running {}",
+    "key": "diagnostic.running"
+  },
+  {
+    "source": "Windows dialog failed: {}",
+    "key": "diagnostic.windows_dialog"
+  },
+  {
+    "source": "Invalid font data: {}",
+    "key": "diagnostic.font_data"
+  },
+  {
+    "source": "Could not restore previous session: {}",
+    "key": "diagnostic.restore"
+  },
+  {
+    "source": "Could not decode picture {}",
+    "key": "diagnostic.decode_picture"
+  },
+  {
+    "source": "Could not read {}",
+    "key": "diagnostic.read"
+  },
+  {
+    "source": "Could not save {}",
+    "key": "diagnostic.save"
+  },
+  {
+    "source": "Could not load {}",
+    "key": "diagnostic.load"
+  },
+  {
+    "source": "cannot create HTTP client: {}",
+    "key": "diagnostic.http_client"
+  },
+  {
+    "source": "translation request failed: {}",
+    "key": "diagnostic.translation_request"
+  },
+  {
+    "source": "translation server rejected the request: {}",
+    "key": "diagnostic.translation_rejected"
+  },
+  {
+    "source": "invalid translation response: {}",
+    "key": "diagnostic.translation_response"
+  },
+  {
+    "source": "Replace existing file {}? Enter yes or no.",
+    "key": "diagnostic.replace_file"
+  },
+  {
+    "source": "Modify existing file {}? Enter yes or no.",
+    "key": "diagnostic.modify_file"
+  },
+  {
+    "source": "Not an existing file: {} Enter another file path (empty cancels).",
+    "key": "diagnostic.missing_file"
+  },
+  {
+    "source": "{} Enter another file path (empty cancels).",
+    "key": "diagnostic.retry_file"
+  },
+  {
+    "source": "{}\nProgram counter: {}",
+    "key": "diagnostic.program_counter"
+  }
+]

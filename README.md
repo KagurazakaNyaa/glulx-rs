@@ -65,6 +65,8 @@ Interactive `--headless` sessions display grids and support live line editing an
 single-key input; pipes retain the automation protocol. In a terminal, Ctrl+N changes
 input windows and Ctrl+C exits. SONG audio and available light font faces are supported.
 
+The interface supports English and Chinese. **View → Options → Interface language** defaults to **Follow system**; unsupported or unavailable system locales fall back to English. Selecting **English** or **中文** takes effect immediately and is persisted in the local application settings. Interface language is independent of story translation. Native system dialog controls follow the operating system language. Translation catalogs and contributor instructions: [assets/locales](assets/locales/README.md).
+
 ## Translation
 
 Turn translation is optional and disabled by default. Enable it from

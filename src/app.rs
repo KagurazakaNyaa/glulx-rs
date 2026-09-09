@@ -12,6 +12,10 @@ use crate::{
     translation::{Submission, TranslationSettings, Translator},
 };
 
+mod i18n;
+use i18n::Language;
+pub use i18n::LanguagePreference;
+
 mod fonts;
 mod text_buffer;
 mod text_grid;
@@ -21,6 +25,7 @@ const STORAGE_KEY: &str = "glulx-rs-settings";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PlayerSettings {
+    pub language: LanguagePreference,
     pub font_size: f32,
     pub fallback_font: String,
     pub text_color: [u8; 3],
@@ -34,6 +39,7 @@ pub struct PlayerSettings {
 impl Default for PlayerSettings {
     fn default() -> Self {
         Self {
+            language: LanguagePreference::System,
             font_size: 18.0,
             fallback_font: String::new(),
             text_color: [32, 34, 37],
@@ -123,24 +129,25 @@ impl FileBrowser {
         }
     }
 
-    fn show(&mut self, context: &egui::Context) -> Option<PathBuf> {
+    fn show(&mut self, context: &egui::Context, language: Language) -> Option<PathBuf> {
         if !self.open {
             return None;
         }
         let mut selected = None;
         let mut keep_open = self.open;
         egui::Window::new(if self.resources {
-            "Choose resource archive or directory"
+            language.text("ui.choose_resource_archive_or_directory")
         } else {
-            "Open Glulx story"
+            language.text("ui.open_glulx_story")
         })
+        .id(egui::Id::new("file-browser"))
         .collapsible(false)
         .resizable(true)
         .default_size([660.0, 440.0])
         .open(&mut keep_open)
         .show(context, |ui| {
             ui.horizontal(|ui| {
-                if ui.button("Up").clicked()
+                if ui.button(language.text("ui.up")).clicked()
                     && let Some(parent) = self.directory.parent()
                 {
                     self.directory = parent.to_path_buf();
@@ -156,7 +163,7 @@ impl FileBrowser {
                     }
                 }
             });
-            if self.resources && ui.button("Use this directory").clicked() {
+            if self.resources && ui.button(language.text("ui.use_this_directory")).clicked() {
                 selected = Some(self.directory.clone());
             }
             ui.separator();
@@ -177,7 +184,7 @@ impl FileBrowser {
                     }
                     let name = entry.file_name().to_string_lossy().into_owned();
                     let label = if path.is_dir() {
-                        format!("[DIR] {name}")
+                        language.format("ui.dir", &[&name])
                     } else {
                         name
                     };
@@ -258,7 +265,7 @@ impl PlayerApp {
             graphics: BTreeMap::new(),
             image_cache: HashMap::new(),
             buffer_images: text_buffer::ImageCache::default(),
-            status: "Open a .ulx or .gblorb story to begin".to_owned(),
+            status: "ui.open_a_ulx_or_gblorb_story_to_begin".to_owned(),
             error: None,
             show_options: false,
             show_about: false,
@@ -304,7 +311,7 @@ impl PlayerApp {
                                 .insert(canvas.window, DisplayedGraphics { pixels, texture });
                         }
                     }
-                    app.status = "Previous session restored".to_owned();
+                    app.status = "ui.previous_session_restored".to_owned();
                 }
                 Err(error) => {
                     app.error = Some(format!("Could not restore previous session: {error}"))
@@ -349,7 +356,7 @@ impl PlayerApp {
             }
             Err(error) => {
                 self.error = Some(error.to_string());
-                self.status = "Could not open story".to_owned();
+                self.status = "ui.could_not_open_story".to_owned();
             }
         }
     }
@@ -366,7 +373,7 @@ impl PlayerApp {
                     self.image_cache.clear();
                     self.buffer_images.clear();
                     self.error = None;
-                    self.status = "Story restarted".to_owned();
+                    self.status = "ui.story_restarted".to_owned();
                     self.last_state = RunState::Running;
                 }
                 Err(error) => self.fail(error.to_string()),
@@ -391,7 +398,7 @@ impl PlayerApp {
             let pc = vm.pc();
             vm.stop();
             self.error = Some(format!("{error}\nProgram counter: {pc:#010x}"));
-            self.status = "VM stopped after an error".to_owned();
+            self.status = "ui.vm_stopped_after_an_error".to_owned();
         }
         let output = vm.take_output();
         self.game_status = vm.status_text();
@@ -414,12 +421,12 @@ impl PlayerApp {
             self.finish_turn();
         }
         self.status = match state {
-            RunState::Running => "Running".to_owned(),
-            RunState::WaitingForLine => "Waiting for a command".to_owned(),
-            RunState::WaitingForChar => "Waiting for a key".to_owned(),
-            RunState::WaitingForFile => "Enter a file path, or submit empty to cancel".to_owned(),
-            RunState::WaitingForEvent => "Waiting for an event".to_owned(),
-            RunState::Halted => "Story finished".to_owned(),
+            RunState::Running => "ui.running".to_owned(),
+            RunState::WaitingForLine => "ui.waiting_for_a_command".to_owned(),
+            RunState::WaitingForChar => "ui.waiting_for_a_key".to_owned(),
+            RunState::WaitingForFile => "ui.enter_a_file_path_or_submit_empty_to".to_owned(),
+            RunState::WaitingForEvent => "ui.waiting_for_an_event".to_owned(),
+            RunState::Halted => "ui.story_finished".to_owned(),
         };
         self.last_state = state;
     }
@@ -611,17 +618,18 @@ impl PlayerApp {
 
     fn fail(&mut self, message: String) {
         self.error = Some(message);
-        self.status = "Error".to_owned();
+        self.status = "ui.error".to_owned();
     }
 
     fn menu_bar(&mut self, root: &mut egui::Ui) {
+        let language = self.settings.language.resolve();
         if !self.settings.show_chrome {
             return;
         }
         egui::Panel::top("menu").show(root, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
-                ui.menu_button("File", |ui| {
-                    if ui.button("Open story...").clicked() {
+                ui.menu_button(language.text("ui.file"), |ui| {
+                    if ui.button(language.text("ui.open_story")).clicked() {
                         self.file_browser.resources = false;
                         self.file_browser.open = true;
                         ui.close();
@@ -629,7 +637,7 @@ impl PlayerApp {
                     if ui
                         .add_enabled(
                             self.story_path.is_some(),
-                            egui::Button::new("Choose resources..."),
+                            egui::Button::new(language.text("ui.choose_resources")),
                         )
                         .clicked()
                     {
@@ -643,14 +651,20 @@ impl PlayerApp {
                         ui.close();
                     }
                     if ui
-                        .add_enabled(self.vm.is_some(), egui::Button::new("Restart"))
+                        .add_enabled(
+                            self.vm.is_some(),
+                            egui::Button::new(language.text("ui.restart")),
+                        )
                         .clicked()
                     {
                         self.restart_story();
                         ui.close();
                     }
                     if ui
-                        .add_enabled(self.vm.is_some(), egui::Button::new("Stop"))
+                        .add_enabled(
+                            self.vm.is_some(),
+                            egui::Button::new(language.text("ui.stop")),
+                        )
                         .clicked()
                     {
                         if let Some(vm) = &mut self.vm {
@@ -659,23 +673,26 @@ impl PlayerApp {
                         ui.close();
                     }
                 });
-                ui.menu_button("View", |ui| {
-                    if ui.button("Story information").clicked() {
+                ui.menu_button(language.text("ui.view"), |ui| {
+                    if ui.button(language.text("ui.story_information")).clicked() {
                         self.show_story_info = true;
                         ui.close();
                     }
-                    if ui.button("Scrollback").clicked() {
+                    if ui.button(language.text("ui.scrollback")).clicked() {
                         self.show_scrollback = true;
                         ui.close();
                     }
-                    if ui.button("Options...").clicked() {
+                    if ui.button(language.text("ui.options")).clicked() {
                         self.show_options = true;
                         ui.close();
                     }
-                    ui.checkbox(&mut self.settings.translation.enabled, "Translation panel");
+                    ui.checkbox(
+                        &mut self.settings.translation.enabled,
+                        language.text("ui.translation_panel"),
+                    );
                 });
-                ui.menu_button("Help", |ui| {
-                    if ui.button("About Glulx Player").clicked() {
+                ui.menu_button(language.text("ui.help"), |ui| {
+                    if ui.button(language.text("ui.about_glulx_player")).clicked() {
                         self.show_about = true;
                         ui.close();
                     }
@@ -685,23 +702,29 @@ impl PlayerApp {
         egui::Panel::top("toolbar").show(root, |ui| {
             ui.horizontal(|ui| {
                 if ui
-                    .button("Open")
-                    .on_hover_text("Open a Glulx story")
+                    .button(language.text("ui.open"))
+                    .on_hover_text(language.text("ui.open_a_glulx_story"))
                     .clicked()
                 {
                     self.file_browser.resources = false;
                     self.file_browser.open = true;
                 }
                 if ui
-                    .add_enabled(self.vm.is_some(), egui::Button::new("Restart"))
-                    .on_hover_text("Restart the current story")
+                    .add_enabled(
+                        self.vm.is_some(),
+                        egui::Button::new(language.text("ui.restart")),
+                    )
+                    .on_hover_text(language.text("ui.restart_the_current_story"))
                     .clicked()
                 {
                     self.restart_story();
                 }
                 if ui
-                    .add_enabled(self.vm.is_some(), egui::Button::new("Stop"))
-                    .on_hover_text("Stop execution")
+                    .add_enabled(
+                        self.vm.is_some(),
+                        egui::Button::new(language.text("ui.stop")),
+                    )
+                    .on_hover_text(language.text("ui.stop_execution"))
                     .clicked()
                     && let Some(vm) = &mut self.vm
                 {
@@ -709,8 +732,11 @@ impl PlayerApp {
                 }
                 ui.separator();
                 if ui
-                    .selectable_label(self.settings.translation.enabled, "Translate")
-                    .on_hover_text("Show translated turns")
+                    .selectable_label(
+                        self.settings.translation.enabled,
+                        language.text("ui.translate"),
+                    )
+                    .on_hover_text(language.text("ui.show_translated_turns"))
                     .clicked()
                 {
                     self.settings.translation.enabled = !self.settings.translation.enabled;
@@ -723,6 +749,7 @@ impl PlayerApp {
     }
 
     fn story_view(&mut self, root: &mut egui::Ui) {
+        let language = self.settings.language.resolve();
         let context = root.ctx().clone();
         let accept_input = !self.dialog_open(&context);
         let background = rgb(self.settings.background_color);
@@ -736,13 +763,13 @@ impl PlayerApp {
                         .inner_margin(16.0),
                 )
                 .show(root, |ui| {
-                    ui.heading("Translation");
+                    ui.heading(language.text("ui.translation"));
                     ui.separator();
                     egui::ScrollArea::vertical()
                         .stick_to_bottom(true)
                         .show(ui, |ui| {
                             for turn in &self.turns {
-                                ui.collapsing("Original", |ui| {
+                                ui.collapsing(language.text("ui.original"), |ui| {
                                     ui.weak(turn.original.trim());
                                 });
                                 match &turn.translation {
@@ -752,10 +779,13 @@ impl PlayerApp {
                                         );
                                     }
                                     Some(Err(error)) => {
-                                        ui.colored_label(Color32::from_rgb(170, 50, 45), error);
+                                        ui.colored_label(
+                                            Color32::from_rgb(170, 50, 45),
+                                            language.message(error),
+                                        );
                                     }
                                     None => {
-                                        ui.weak("Translating...");
+                                        ui.weak(language.text("ui.translating_legacy"));
                                     }
                                 }
                                 ui.add_space(14.0);
@@ -775,9 +805,9 @@ impl PlayerApp {
                         ui.add_space((ui.available_height() * 0.28).max(40.0));
                         ui.heading("Glulx Player");
                         ui.add_space(8.0);
-                        ui.label("Open a Glulx executable or Blorb story file.");
+                        ui.label(language.text("ui.open_a_glulx_executable_or_blorb_story_file"));
                         ui.add_space(16.0);
-                        if ui.button("Open story...").clicked() {
+                        if ui.button(language.text("ui.open_story")).clicked() {
                             self.file_browser.open = true;
                         }
                     });
@@ -960,6 +990,7 @@ impl PlayerApp {
     }
 
     fn input_bar(&mut self, root: &mut egui::Ui) {
+        let language = self.settings.language.resolve();
         let accept_input = !self.dialog_open(root.ctx());
         let request = self.vm.as_ref().and_then(Vm::input_request);
         if request.is_none() {
@@ -978,7 +1009,7 @@ impl PlayerApp {
                 if matches!(request, Some(InputRequest::File { .. }))
                     && let Some(vm) = &self.vm
                 {
-                    ui.label(vm.file_prompt_message());
+                    ui.label(language.message(&vm.file_prompt_message()));
                 }
                 ui.horizontal(|ui| {
                     if let Some(vm) = &mut self.vm {
@@ -986,13 +1017,13 @@ impl PlayerApp {
                         if windows.len() > 1 {
                             let mut selected = vm.input_window();
                             egui::ComboBox::from_id_salt("input-window")
-                                .selected_text(format!("Window {selected}"))
+                                .selected_text(language.format("ui.window", &[&selected]))
                                 .show_ui(ui, |ui| {
                                     for window in windows {
                                         ui.selectable_value(
                                             &mut selected,
                                             window,
-                                            format!("Window {window}"),
+                                            language.format("ui.window", &[&window]),
                                         );
                                     }
                                 });
@@ -1006,8 +1037,8 @@ impl PlayerApp {
                     // Changing the window can also change the input kind.
                     let request = self.vm.as_ref().and_then(Vm::input_request);
                     if matches!(request, Some(InputRequest::Character)) {
-                        ui.label("Press a key");
-                        if ui.button("Return").clicked() {
+                        ui.label(language.text("ui.press_a_key"));
+                        if ui.button(language.text("ui.return")).clicked() {
                             self.submit_key(0xffff_fffa);
                         }
                         return;
@@ -1017,8 +1048,12 @@ impl PlayerApp {
                     if !grid_line {
                         ui.label(match request {
                             Some(InputRequest::Line { .. }) => ">",
-                            Some(InputRequest::File { writing: true }) => "Save file",
-                            Some(InputRequest::File { writing: false }) => "Open file",
+                            Some(InputRequest::File { writing: true }) => {
+                                language.text("ui.save_file")
+                            }
+                            Some(InputRequest::File { writing: false }) => {
+                                language.text("ui.open_file")
+                            }
                             _ => "",
                         });
                         let limit = match request {
@@ -1045,7 +1080,7 @@ impl PlayerApp {
                             response.request_focus();
                         }
                     } else {
-                        ui.label("Type in the highlighted field");
+                        ui.label(language.text("ui.type_in_highlighted_field"));
                     }
                     let terminator =
                         if accept_input && matches!(request, Some(InputRequest::Line { .. })) {
@@ -1060,7 +1095,7 @@ impl PlayerApp {
                         };
                     if let Some(terminator) = terminator {
                         self.submit_terminated_input(terminator);
-                    } else if ui.button("Send").clicked() || enter {
+                    } else if ui.button(language.text("ui.send")).clicked() || enter {
                         self.submit_input();
                     }
                 });
@@ -1068,12 +1103,13 @@ impl PlayerApp {
     }
 
     fn status_bar(&mut self, root: &mut egui::Ui) {
+        let language = self.settings.language.resolve();
         if !self.settings.show_chrome {
             return;
         }
         egui::Panel::bottom("status").show(root, |ui| {
             ui.horizontal(|ui| {
-                ui.small(&self.status);
+                ui.small(language.message(&self.status));
                 if let Some(path) = &self.story_path {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.small(path.display().to_string());
@@ -1084,44 +1120,47 @@ impl PlayerApp {
     }
 
     fn dialogs(&mut self, context: &egui::Context) {
+        let language = self.settings.language.resolve();
         let mut resource_selection = None;
-        egui::Window::new("Story resources")
+        egui::Window::new(language.text("ui.story_resources"))
+            .id(egui::Id::new("ui.story_resources"))
             .open(&mut self.show_resources)
             .collapsible(false)
             .default_width(540.0)
             .show(context, |ui| {
-                ui.label("Choose the pictures, sounds and data for this story.");
+                ui.label(language.text("ui.choose_the_pictures_sounds_and_data_for_this"));
                 ui.radio_value(
                     &mut self.resource_choice,
                     0,
-                    "Find a same-name archive automatically",
+                    language.text("ui.find_a_same_name_archive_automatically"),
                 );
                 ui.radio_value(
                     &mut self.resource_choice,
                     1,
-                    "Use only resources embedded in the story",
+                    language.text("ui.use_only_resources_embedded_in_the_story"),
                 );
                 ui.radio_value(
                     &mut self.resource_choice,
                     2,
-                    "Use an archive or resource directory",
+                    language.text("ui.use_an_archive_or_resource_directory"),
                 );
                 if self.resource_choice == 2 {
                     ui.horizontal(|ui| {
                         ui.text_edit_singleline(&mut self.resource_path);
-                        if ui.button("Browse...").clicked() {
+                        if ui.button(language.text("ui.browse")).clicked() {
                             self.file_browser.resources = true;
                             self.file_browser.open = true;
                         }
                     });
                 }
                 ui.separator();
-                ui.label(
-                    "Applying resources restarts the story. Save your game before continuing.",
-                );
+                ui.label(language.text("ui.applying_resources_restarts_the_story_save_your_game"));
                 let valid = self.resource_choice != 2 || !self.resource_path.trim().is_empty();
                 if ui
-                    .add_enabled(valid, egui::Button::new("Restart with selected resources"))
+                    .add_enabled(
+                        valid,
+                        egui::Button::new(language.text("ui.restart_with_selected_resources")),
+                    )
                     .clicked()
                 {
                     resource_selection = Some(match self.resource_choice {
@@ -1151,7 +1190,8 @@ impl PlayerApp {
                     egui::TextureOptions::LINEAR,
                 ));
             }
-            egui::Window::new("Story information")
+            egui::Window::new(language.text("ui.story_information"))
+                .id(egui::Id::new("ui.story_information"))
                 .open(&mut self.show_story_info)
                 .show(context, |ui| {
                     ui.heading(vm.story_title());
@@ -1159,7 +1199,7 @@ impl PlayerApp {
                         ui.add(egui::Image::new(cover).max_height(300.0));
                     }
                     if !metadata.author.is_empty() {
-                        ui.label(format!("By {}", metadata.author));
+                        ui.label(language.format("ui.by", &[&metadata.author]));
                     }
                     if !metadata.headline.is_empty() {
                         ui.label(&metadata.headline);
@@ -1171,20 +1211,20 @@ impl PlayerApp {
                         ui.small(format!("IFID: {}", metadata.ifid));
                     }
                     if let Some(path) = vm.resource_path() {
-                        ui.label(format!("Resources: {}", path.display()));
+                        ui.label(language.format("ui.resources", &[&path.display()]));
                     }
                     let descriptions = vm.resource_descriptions();
                     if !descriptions.is_empty() {
                         ui.separator();
-                        ui.collapsing("Image and sound descriptions", |ui| {
+                        ui.collapsing(language.text("ui.image_and_sound_descriptions"), |ui| {
                             egui::ScrollArea::vertical()
                                 .max_height(300.0)
                                 .show(ui, |ui| {
                                     for description in descriptions {
                                         let kind = if description.usage == *b"Pict" {
-                                            "Image"
+                                            language.text("ui.image")
                                         } else {
-                                            "Sound"
+                                            language.text("ui.sound")
                                         };
                                         ui.label(format!("{kind}: {}", description.text));
                                     }
@@ -1195,13 +1235,14 @@ impl PlayerApp {
         }
         if let Some(error) = self.error.clone() {
             let mut open = true;
-            egui::Window::new("Glulx error")
+            egui::Window::new(language.text("ui.glulx_error"))
+                .id(egui::Id::new("ui.glulx_error"))
                 .collapsible(false)
                 .resizable(true)
                 .open(&mut open)
                 .show(context, |ui| {
-                    ui.colored_label(Color32::from_rgb(170, 45, 40), error);
-                    if ui.button("Dismiss").clicked() {
+                    ui.colored_label(Color32::from_rgb(170, 45, 40), language.message(&error));
+                    if ui.button(language.text("ui.dismiss")).clicked() {
                         self.error = None;
                     }
                 });
@@ -1209,62 +1250,94 @@ impl PlayerApp {
                 self.error = None;
             }
         }
-        egui::Window::new("Options")
+        egui::Window::new(language.text("ui.options_window"))
+            .id(egui::Id::new("ui.options"))
             .open(&mut self.show_options)
             .resizable(true)
             .default_width(520.0)
             .show(context, |ui| {
-                ui.heading("Display");
+                ui.label(language.text("ui.interface_language"));
+                egui::ComboBox::from_id_salt("interface-language")
+                    .selected_text(match self.settings.language {
+                        LanguagePreference::System => language.text("ui.follow_system"),
+                        LanguagePreference::English => language.text("language.english"),
+                        LanguagePreference::Chinese => language.text("language.chinese"),
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.settings.language,
+                            LanguagePreference::System,
+                            language.text("ui.follow_system"),
+                        );
+                        ui.selectable_value(
+                            &mut self.settings.language,
+                            LanguagePreference::English,
+                            language.text("language.english"),
+                        );
+                        ui.selectable_value(
+                            &mut self.settings.language,
+                            LanguagePreference::Chinese,
+                            language.text("language.chinese"),
+                        );
+                    });
+                ui.heading(language.text("ui.display"));
                 ui.add(
-                    egui::Slider::new(&mut self.settings.font_size, 12.0..=32.0).text("Text size"),
+                    egui::Slider::new(&mut self.settings.font_size, 12.0..=32.0)
+                        .text(language.text("ui.text_size")),
                 );
-                ui.label("Extra fallback font (TTF, OTF or TTC)");
+                ui.label(language.text("ui.extra_fallback_font"));
                 ui.text_edit_singleline(&mut self.settings.fallback_font);
-                if ui.button("Apply font").clicked() {
+                if ui.button(language.text("ui.apply_font")).clicked() {
                     self.fonts = fonts::Fonts::new(context, &self.settings.fallback_font);
                 }
-                ui.weak(format!(
-                    "{} fallback fonts loaded",
-                    self.fonts.fallback_count
-                ));
+                ui.weak(language.format("ui.fallback_fonts_loaded", &[&self.fonts.fallback_count]));
                 if let Some(error) = &self.fonts.error {
-                    ui.colored_label(Color32::from_rgb(170, 50, 45), error);
+                    ui.colored_label(Color32::from_rgb(170, 50, 45), language.message(error));
                 }
-                color_setting(ui, "Text", &mut self.settings.text_color);
-                color_setting(ui, "Background", &mut self.settings.background_color);
-                color_setting(ui, "Hyperlinks", &mut self.settings.hyperlink_color);
+                color_setting(ui, language.text("ui.text"), &mut self.settings.text_color);
+                color_setting(
+                    ui,
+                    language.text("ui.background"),
+                    &mut self.settings.background_color,
+                );
+                color_setting(
+                    ui,
+                    language.text("ui.hyperlinks"),
+                    &mut self.settings.hyperlink_color,
+                );
                 ui.checkbox(
                     &mut self.settings.window_borders,
-                    "Borders between game windows",
+                    language.text("ui.borders_between_game_windows"),
                 );
                 ui.checkbox(
                     &mut self.settings.show_chrome,
-                    "Menus, toolbar and status bar",
+                    language.text("ui.menus_toolbar_and_status_bar"),
                 );
                 ui.separator();
-                ui.heading("Translation");
+                ui.heading(language.text("ui.translation"));
                 ui.checkbox(
                     &mut self.settings.translation.enabled,
-                    "Enable turn translation",
+                    language.text("ui.enable_turn_translation"),
                 );
-                ui.label("OpenAI-compatible endpoint");
+                ui.label(language.text("ui.openai_compatible_endpoint"));
                 ui.text_edit_singleline(&mut self.settings.translation.endpoint);
-                ui.label("Model");
+                ui.label(language.text("ui.model"));
                 ui.text_edit_singleline(&mut self.settings.translation.model);
-                ui.label("Target language");
+                ui.label(language.text("ui.target_language"));
                 ui.text_edit_singleline(&mut self.settings.translation.target_language);
-                ui.label("API key (kept in local app settings)");
+                ui.label(language.text("ui.api_key_kept_in_local_app_settings"));
                 ui.add(
                     egui::TextEdit::singleline(&mut self.settings.translation.api_key)
                         .password(true),
                 );
-                ui.label("System prompt");
+                ui.label(language.text("ui.system_prompt"));
                 ui.add(
                     egui::TextEdit::multiline(&mut self.settings.translation.system_prompt)
                         .desired_rows(4),
                 );
             });
-        egui::Window::new("Scrollback")
+        egui::Window::new(language.text("ui.scrollback"))
+            .id(egui::Id::new("ui.scrollback"))
             .open(&mut self.show_scrollback)
             .default_size([720.0, 560.0])
             .show(context, |ui| {
@@ -1272,15 +1345,16 @@ impl PlayerApp {
                     ui.label(&self.transcript);
                 });
             });
-        egui::Window::new("About Glulx Player")
+        egui::Window::new(language.text("ui.about_glulx_player"))
+            .id(egui::Id::new("ui.about_glulx_player"))
             .open(&mut self.show_about)
             .collapsible(false)
             .resizable(false)
             .show(context, |ui| {
                 ui.heading("Glulx Player 0.1.0");
-                ui.label("A pure Rust Glulx VM with a cross-platform graphical interface.");
-                ui.label("VM behavior is based on the Glulx specification and David Kinder's Git.");
-                ui.label("The interface follows the Windows Git player workflow.");
+                ui.label(language.text("ui.a_pure_rust_glulx_vm_with_a_cross"));
+                ui.label(language.text("ui.vm_behavior_is_based_on_the_glulx_specification"));
+                ui.label(language.text("ui.the_interface_follows_the_windows_git_player_workflow"));
             });
     }
 }
@@ -1369,7 +1443,10 @@ impl eframe::App for PlayerApp {
         self.input_bar(root);
         self.story_view(root);
         self.dialogs(&context);
-        if let Some(path) = self.file_browser.show(&context) {
+        if let Some(path) = self
+            .file_browser
+            .show(&context, self.settings.language.resolve())
+        {
             if self.file_browser.resources {
                 self.resource_path = path.display().to_string();
                 self.resource_choice = 2;
