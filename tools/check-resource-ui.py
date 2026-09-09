@@ -109,7 +109,9 @@ class Desktop:
                         XDG_DATA_HOME=str(directory / 'data'),
                         XDG_CACHE_HOME=str(directory / 'cache'))
         self.log = (directory / f'{phase}.log').open('w')
-        self.process = subprocess.Popen([str(candidate), *map(str, arguments)], env=self.env,
+        local_candidate = directory / candidate.name
+        shutil.copy2(candidate, local_candidate)
+        self.process = subprocess.Popen([str(local_candidate), *map(str, arguments)], env=self.env,
                                         stdout=self.log, stderr=self.log)
         self.window = None
 
@@ -171,7 +173,7 @@ class Desktop:
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             assert self.process.poll() is None, (self.directory / f'{self.phase}.log').read_text()
-            result = subprocess.run(['xdotool', 'search', '--onlyvisible', '--name', 'Glulx Player'],
+            result = subprocess.run(['xdotool', 'search', '--onlyvisible', '--name', '^Glulx Player$'],
                                     env=self.env, capture_output=True, timeout=5)
             if result.returncode == 0 and result.stdout.strip():
                 self.window = int(result.stdout.splitlines()[0])
@@ -182,6 +184,7 @@ class Desktop:
             subprocess.run(['xdotool', 'search', '--name', '.*', 'getwindowname', '%@'],
                            env=self.env, stdout=self.log, stderr=self.log, timeout=5)
             raise AssertionError(f'Desktop window did not appear; see {self.directory}')
+        self.keys('windowraise', self.window)
         self.keys('windowfocus', '--sync', self.window)
         self.keys('windowmove', self.window, 0, 0)
         self.keys('windowsize', self.window, 1100, 760)
@@ -229,7 +232,7 @@ def main():
     raw = fixture(root)
     read_fd, write_fd = os.pipe()
     with (root / 'xvfb.log').open('w') as log:
-        server = subprocess.Popen(['Xvfb', '-displayfd', str(write_fd), '-noreset', '-screen', '0', '1280x900x24'],
+        server = subprocess.Popen(['Xvfb', '-noreset', '-displayfd', str(write_fd), '-noreset', '-screen', '0', '1280x900x24'],
                                   pass_fds=(write_fd,), stdout=log, stderr=log)
         os.close(write_fd)
         try:

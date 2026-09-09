@@ -28,20 +28,35 @@ pub(crate) fn draw_scaled(
     position: [i32; 2],
     size: [u32; 2],
 ) {
+    let clip = [0, 0, canvas.width(), canvas.height()];
+    draw_scaled_clipped(canvas, source, position, size, clip);
+}
+
+pub(crate) fn draw_scaled_clipped(
+    canvas: &mut RgbaImage,
+    source: &RgbaImage,
+    position: [i32; 2],
+    size: [u32; 2],
+    clip: [u32; 4],
+) {
     if size.contains(&0) || source.width() == 0 || source.height() == 0 {
         return;
     }
     let [left, top] = position.map(i64::from);
-    let right = (left + i64::from(size[0])).clamp(0, i64::from(canvas.width()));
-    let bottom = (top + i64::from(size[1])).clamp(0, i64::from(canvas.height()));
+    let right = (left + i64::from(size[0]))
+        .clamp(0, i64::from(canvas.width()))
+        .min(clip[2] as i64);
+    let bottom = (top + i64::from(size[1]))
+        .clamp(0, i64::from(canvas.height()))
+        .min(clip[3] as i64);
     // Bilinear samples use source pixel centers. Work and memory depend on the
     // clipped canvas, even for unsigned extents such as 0xFFFFFFFF.
-    for y in top.max(0)..bottom {
+    for y in top.max(clip[1] as i64)..bottom {
         let sy = ((y - top) as f64 + 0.5) * f64::from(source.height()) / f64::from(size[1]) - 0.5;
         let sy = sy.clamp(0.0, f64::from(source.height() - 1));
         let y0 = sy.floor() as u32;
         let fy = sy - f64::from(y0);
-        for x in left.max(0)..right {
+        for x in left.max(clip[0] as i64)..right {
             let sx =
                 ((x - left) as f64 + 0.5) * f64::from(source.width()) / f64::from(size[0]) - 0.5;
             let sx = sx.clamp(0.0, f64::from(source.width() - 1));

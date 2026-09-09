@@ -161,6 +161,17 @@ pub struct Story {
 }
 
 impl Story {
+    pub(crate) fn snapshot_byte_len(&self) -> usize {
+        self.image
+            .len()
+            .saturating_add(self.container.as_ref().map_or(0, Vec::len))
+            .saturating_add(
+                self.external_resources
+                    .as_ref()
+                    .map_or(0, |resources| resources.bytes.len()),
+            )
+    }
+
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoryError> {
         Self::open_with_resources(path, ResourceSelection::Auto)
     }

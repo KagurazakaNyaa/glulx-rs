@@ -49,6 +49,10 @@ pub enum InputRequest {
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct ImageRequest {
+    /// Reuse validation's decode for the first host draw. Desktop snapshots
+    /// retain `data` instead, so this cache is never serialized.
+    #[serde(skip)]
+    pub decoded: Option<std::sync::Arc<image::RgbaImage>>,
     pub window: u32,
     pub resource: u32,
     pub data: Vec<u8>,
@@ -81,6 +85,12 @@ pub enum GraphicsRequest {
     Close {
         window: u32,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TextBufferEvent {
+    Text { window: u32, text: String },
+    Clear { window: u32 },
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy)]
@@ -407,6 +417,10 @@ pub struct Vm {
     text_appearance: TextAppearance,
     #[serde(skip)]
     image_info: BTreeMap<u32, Option<[u32; 2]>>,
+    #[serde(skip)]
+    decoded_picture: Option<(u32, std::sync::Arc<image::RgbaImage>)>,
+    #[serde(skip)]
+    presentation_revision: u64,
     graphical_host: bool,
     #[serde(skip)]
     terminal_host: bool,
@@ -422,6 +436,8 @@ pub struct Vm {
     io_system: u32,
     io_rock: u32,
     output: String,
+    #[serde(skip)]
+    text_buffer_events: Option<Vec<TextBufferEvent>>,
     requests: BTreeMap<u32, Request>,
     events: std::collections::VecDeque<[u32; 4]>,
     #[serde(skip)]
@@ -463,6 +479,8 @@ impl Vm {
             accelerated_return: None,
             text_appearance: TextAppearance::default(),
             image_info: BTreeMap::new(),
+            decoded_picture: None,
+            presentation_revision: 0,
             graphical_host: true,
             terminal_host: false,
             audio: sound::AudioDevice::default(),
@@ -476,6 +494,7 @@ impl Vm {
             io_system: 0,
             io_rock: 0,
             output: String::new(),
+            text_buffer_events: None,
             requests: BTreeMap::new(),
             events: std::collections::VecDeque::new(),
             timer: None,
@@ -530,8 +549,34 @@ impl Vm {
         }
     }
 
+    /// The editor remains present while a timer/Arrange handler runs with an
+    /// outstanding request. `input_request` still controls event submission.
+    pub fn pending_input_request(&self) -> Option<InputRequest> {
+        if matches!(self.state, RunState::Halted | RunState::WaitingForFile) {
+            return self.input_request();
+        }
+        match self.requests.get(&self.input_window) {
+            Some(Request::Line(_)) => Some(InputRequest::Line {
+                maximum_length: self.line_input_max_len(),
+            }),
+            Some(Request::Character { .. }) => Some(InputRequest::Character),
+            None => None,
+        }
+    }
+
     pub fn take_output(&mut self) -> String {
         std::mem::take(&mut self.output)
+    }
+
+    pub(crate) fn enable_text_buffer_events(&mut self) {
+        self.text_buffer_events.get_or_insert_with(Vec::new);
+    }
+
+    pub(crate) fn take_text_buffer_events(&mut self) -> Vec<TextBufferEvent> {
+        self.text_buffer_events
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
     }
 
     pub fn status_text(&self) -> String {
@@ -549,14 +594,47 @@ impl Vm {
     }
 
     pub fn run_steps(&mut self, budget: usize) -> Result<RunState, VmError> {
+        self.run_steps_until(budget, false)
+    }
+
+    pub(crate) fn presentation_revision(&self) -> u64 {
+        self.presentation_revision
+    }
+
+    pub(crate) fn run_presentation_steps(&mut self, budget: usize) -> Result<RunState, VmError> {
+        self.run_steps_until(budget, true)
+    }
+
+    fn run_steps_until(
+        &mut self,
+        budget: usize,
+        yield_at_presentation: bool,
+    ) -> Result<RunState, VmError> {
+        let revision = self.presentation_revision;
         self.poll_events()?;
         for _ in 0..budget {
-            if self.state != RunState::Running {
+            if self.state != RunState::Running
+                || (yield_at_presentation && self.presentation_revision != revision)
+            {
                 break;
             }
             self.step()?;
         }
         Ok(self.state)
+    }
+
+    pub(crate) fn diagnostic_summary(&self) -> String {
+        format!(
+            "vm={:?} pc={:#x} viewport={:?} windows={} requests={} events={:?} select={} graphics={}",
+            self.state,
+            self.pc,
+            self.viewport_size,
+            self.glk_windows.len(),
+            self.requests.len(),
+            self.events.iter().map(|event| event[0]).collect::<Vec<_>>(),
+            self.pending_select.is_some(),
+            self.graphics.len()
+        )
     }
 
     pub fn provide_input(&mut self, text: &str) -> Result<(), VmError> {
@@ -567,6 +645,10 @@ impl Vm {
     }
 
     pub fn restart(&mut self) -> Result<(), VmError> {
+        self.presentation_revision = 0;
+        if let Some(events) = &mut self.text_buffer_events {
+            events.clear();
+        }
         self.accelerated_return = None;
         self.memory.restart(self.protection);
         self.stack.clear();
@@ -1677,6 +1759,20 @@ impl Vm {
                         });
                     }
                     self.output.push(character);
+                    if window.style != 8
+                        && let Some(events) = &mut self.text_buffer_events
+                    {
+                        if let Some(TextBufferEvent::Text { window, text }) = events.last_mut()
+                            && *window == window_id
+                        {
+                            text.push(character);
+                        } else {
+                            events.push(TextBufferEvent::Text {
+                                window: window_id,
+                                text: character.to_string(),
+                            });
+                        }
+                    }
                 }
                 let echo = self
                     .glk_windows
@@ -1842,6 +1938,10 @@ impl Vm {
                             color: window.background_color,
                             canvas_size: [window.width, window.height],
                         });
+                    } else if window.kind == WINTYPE_TEXT_BUFFER
+                        && let Some(events) = &mut self.text_buffer_events
+                    {
+                        events.push(TextBufferEvent::Clear { window: window_id });
                     }
                 }
                 0
@@ -2523,11 +2623,6 @@ fn floats_equal(a: f32, b: f32, tolerance: f32) -> bool {
     (a - b).abs() <= tolerance.abs()
 }
 
-fn image_dimensions(data: &[u8]) -> Option<[u32; 2]> {
-    let decoded = crate::picture::decode(data).ok()?;
-    Some([decoded.width(), decoded.height()])
-}
-
 fn operand_count(opcode: u32) -> Option<usize> {
     Some(match opcode {
         0x200..=0x204 | 0x238..=0x239 => 3,
@@ -2650,7 +2745,7 @@ pub enum VmError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     pub(super) fn push_glk_arguments(vm: &mut Vm, arguments: &[u32]) {
@@ -2659,7 +2754,7 @@ mod tests {
         }
     }
 
-    pub(super) fn image_with_program(program: &[u8]) -> Vec<u8> {
+    pub(crate) fn image_with_program(program: &[u8]) -> Vec<u8> {
         let mut bytes = vec![0; 0x200];
         bytes[0..4].copy_from_slice(b"Glul");
         for (offset, value) in [
@@ -3009,6 +3104,101 @@ mod tests {
 
         assert_eq!(vm.status_text(), "Score: 7");
         assert_eq!(vm.take_output(), "");
+    }
+
+    fn text_buffer_glk(vm: &mut Vm, selector: u32, arguments: &[u32]) -> u32 {
+        push_glk_arguments(vm, arguments);
+        vm.glk(selector, arguments.len() as u32, Destination::Stack)
+            .unwrap();
+        vm.stack.pop_u32().unwrap()
+    }
+
+    #[test]
+    fn text_buffer_events_capture_narrative_and_window_clear_boundaries() {
+        let story = Story::from_bytes(&image_with_program(&[0x81, 0x20]), None).unwrap();
+        let mut vm = Vm::new(story).unwrap();
+        vm.enable_text_buffer_events();
+        let main = text_buffer_glk(&mut vm, 0x23, &[0, 0, 0, WINTYPE_TEXT_BUFFER, 0]);
+        let main_stream = text_buffer_glk(&mut vm, 0x2c, &[main]);
+        let grid = text_buffer_glk(&mut vm, 0x23, &[main, 0x12, 1, WINTYPE_TEXT_GRID, 0]);
+        let grid_stream = text_buffer_glk(&mut vm, 0x2c, &[grid]);
+        text_buffer_glk(&mut vm, 0x81, &[main_stream, 'A' as u32]);
+        text_buffer_glk(&mut vm, 0x81, &[main_stream, 'B' as u32]);
+        text_buffer_glk(&mut vm, 0x81, &[grid_stream, 'G' as u32]);
+        text_buffer_glk(&mut vm, 0x2a, &[grid]);
+        text_buffer_glk(&mut vm, 0x24, &[grid, 0]);
+        text_buffer_glk(&mut vm, 0x87, &[main_stream, 8]);
+        text_buffer_glk(&mut vm, 0x81, &[main_stream, 'I' as u32]);
+        text_buffer_glk(&mut vm, 0x87, &[main_stream, 0]);
+        text_buffer_glk(&mut vm, 0x81, &[main_stream, 'C' as u32]);
+        text_buffer_glk(&mut vm, 0x2a, &[main]);
+        text_buffer_glk(&mut vm, 0x81, &[main_stream, 'D' as u32]);
+        text_buffer_glk(&mut vm, 0x24, &[main, 0]);
+        assert_eq!(
+            vm.take_text_buffer_events(),
+            vec![
+                TextBufferEvent::Text {
+                    window: main,
+                    text: "ABC".to_owned(),
+                },
+                TextBufferEvent::Clear { window: main },
+                TextBufferEvent::Text {
+                    window: main,
+                    text: "D".to_owned(),
+                },
+                TextBufferEvent::Clear { window: main },
+            ]
+        );
+        assert_eq!(vm.take_output(), "ABICD");
+        assert!(vm.take_text_buffer_events().is_empty());
+    }
+
+    #[test]
+    fn text_buffer_events_are_opt_in_and_reset_without_losing_capture() {
+        let story = Story::from_bytes(&image_with_program(&[0x81, 0x20]), None).unwrap();
+        let mut vm = Vm::new(story).unwrap();
+        let window = text_buffer_glk(&mut vm, 0x23, &[0, 0, 0, WINTYPE_TEXT_BUFFER, 0]);
+        let stream = text_buffer_glk(&mut vm, 0x2c, &[window]);
+        text_buffer_glk(&mut vm, 0x81, &[stream, 'A' as u32]);
+        assert!(vm.take_text_buffer_events().is_empty());
+        assert!(vm.text_buffer_events.is_none());
+        vm.enable_text_buffer_events();
+        text_buffer_glk(&mut vm, 0x81, &[stream, 'B' as u32]);
+        vm.enable_text_buffer_events();
+        assert_eq!(
+            vm.take_text_buffer_events(),
+            vec![TextBufferEvent::Text {
+                window,
+                text: "B".to_owned(),
+            }]
+        );
+        text_buffer_glk(&mut vm, 0x81, &[stream, 'C' as u32]);
+        vm.restart().unwrap();
+        assert!(vm.take_text_buffer_events().is_empty());
+        text_buffer_glk(&mut vm, 0x81, &[stream, 'D' as u32]);
+        assert_eq!(
+            vm.take_text_buffer_events(),
+            vec![TextBufferEvent::Text {
+                window,
+                text: "D".to_owned(),
+            }]
+        );
+        assert_eq!(vm.take_output(), "ABCD");
+    }
+
+    #[test]
+    fn text_buffer_events_are_not_stored_in_vm_snapshots() {
+        let story = Story::from_bytes(&image_with_program(&[0x81, 0x20]), None).unwrap();
+        let mut vm = Vm::new(story).unwrap();
+        vm.enable_text_buffer_events();
+        let window = text_buffer_glk(&mut vm, 0x23, &[0, 0, 0, WINTYPE_TEXT_BUFFER, 0]);
+        let stream = text_buffer_glk(&mut vm, 0x2c, &[window]);
+        text_buffer_glk(&mut vm, 0x81, &[stream, 'A' as u32]);
+        let snapshot = serde_json::to_value(&vm).unwrap();
+        assert!(snapshot.get("text_buffer_events").is_none());
+        let mut restored: Vm = serde_json::from_value(snapshot).unwrap();
+        assert!(restored.take_text_buffer_events().is_empty());
+        assert!(restored.text_buffer_events.is_none());
     }
 
     #[test]

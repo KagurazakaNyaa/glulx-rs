@@ -1,6 +1,17 @@
 use super::*;
 
 impl Vm {
+    /// Raw story and memory bytes that the text desktop snapshot would expand
+    /// into integer arrays. Check before serializing, including undo memories.
+    pub(crate) fn snapshot_byte_len(&self) -> usize {
+        self.undo.iter().fold(
+            self.story
+                .snapshot_byte_len()
+                .saturating_add(self.memory.snapshot_byte_len()),
+            |bytes, undo| bytes.saturating_add(undo.memory.snapshot_byte_len()),
+        )
+    }
+
     /// Validate a desktop session before resuming it. This is a versioned player
     /// snapshot, separate from portable IFZS saves (which exclude Glk state).
     pub fn validate_session(mut self) -> Result<Self, VmError> {

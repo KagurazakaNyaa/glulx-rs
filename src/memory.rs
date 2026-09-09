@@ -13,6 +13,10 @@ pub struct Memory {
 }
 
 impl Memory {
+    pub(crate) fn snapshot_byte_len(&self) -> usize {
+        self.bytes.len().saturating_add(self.initial.len())
+    }
+
     pub(crate) fn validate_session(&self, story: &Story) -> Result<(), VmError> {
         if self.ram_start != story.header.ram_start
             || self.ext_start != story.header.ext_start

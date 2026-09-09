@@ -117,6 +117,11 @@ impl Vm {
         let mut pending = vec![id];
         while let Some(id) = pending.pop() {
             if let Some(window) = self.glk_windows.remove(&id) {
+                if window.kind == WINTYPE_TEXT_BUFFER
+                    && let Some(events) = &mut self.text_buffer_events
+                {
+                    events.push(TextBufferEvent::Clear { window: id });
+                }
                 if let Some(children) = window.children {
                     pending.extend(children);
                 }

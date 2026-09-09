@@ -227,7 +227,13 @@ mod tests {
 
     #[test]
     fn ui_references_only_existing_catalog_keys() {
-        for source in [include_str!("../app.rs")] {
+        for source in [
+            include_str!("../app.rs"),
+            include_str!("windows.rs"),
+            include_str!("font_dialog/linux.rs"),
+            include_str!("font_dialog/macos.rs"),
+            include_str!("font_dialog/windows.rs"),
+        ] {
             for call in ["language.text(", "language.format("] {
                 for rest in source.split(call).skip(1) {
                     if let Some(literal) = rest.trim_start().strip_prefix('"') {

@@ -212,9 +212,13 @@ impl Vm {
 
     pub(super) fn picture_dimensions(&mut self, resource: u32) -> Option<[u32; 2]> {
         *self.image_info.entry(resource).or_insert_with(|| {
-            self.story
-                .resource(*b"Pict", resource)
-                .and_then(image_dimensions)
+            let data = self.story.resource(*b"Pict", resource)?;
+            let decoded = std::sync::Arc::new(crate::picture::decode(data).ok()?);
+            let size = [decoded.width(), decoded.height()];
+            // Keep only the most recent validation result, not every image
+            // queried by a game that scans its resource catalog at startup.
+            self.decoded_picture = Some((resource, decoded));
+            Some(size)
         })
     }
 
@@ -285,6 +289,11 @@ impl Vm {
             let size = image.dimensions(window.width);
             if size[0] != 0 && size[1] != 0 {
                 self.graphics.push(GraphicsRequest::Draw(ImageRequest {
+                    decoded: self
+                        .decoded_picture
+                        .as_ref()
+                        .filter(|(id, _)| *id == resource)
+                        .map(|(_, decoded)| decoded.clone()),
                     window: window_id,
                     resource,
                     data: data.to_vec(),
@@ -509,6 +518,27 @@ mod tests {
             1
         );
         vm.stack.pop_u32().unwrap()
+    }
+
+    #[test]
+    fn first_graphics_draw_reuses_validation_decode_but_sessions_keep_source_bytes() {
+        let mut vm = pictured_vm();
+        assert!(vm.picture_dimensions(7).is_some());
+        let validated = vm.decoded_picture.as_ref().unwrap().1.clone();
+        let window = vm.open_window(&[0, 0, 0, 5, 0]);
+        vm.take_graphics();
+        assert_eq!(vm.draw_image(0xe1, &[window, 7, 0, 0]), 1);
+        let GraphicsRequest::Draw(draw) = vm.take_graphics().pop().unwrap() else {
+            panic!("expected a graphics draw");
+        };
+        assert!(std::sync::Arc::ptr_eq(
+            draw.decoded.as_ref().unwrap(),
+            &validated
+        ));
+        let restored: ImageRequest =
+            serde_json::from_str(&serde_json::to_string(&draw).unwrap()).unwrap();
+        assert!(restored.decoded.is_none());
+        assert_eq!(crate::picture::decode(&restored.data).unwrap(), *validated);
     }
 
     #[test]

@@ -23,7 +23,7 @@ pub(super) struct Fonts {
 }
 
 impl Fonts {
-    pub fn new(context: &egui::Context, extra_path: &str) -> Self {
+    pub fn new(context: &egui::Context, extra_path: &str, system_font: &str) -> Self {
         let mut definitions = egui::FontDefinitions::default();
         let mut errors = None;
         let mut fallback_count = 0;
@@ -33,10 +33,35 @@ impl Fonts {
         if !extra_path.trim().is_empty() {
             match add_font(&mut definitions, extra, "player-extra-font") {
                 Ok(length) => {
+                    prefer_font(&mut definitions, "player-extra-font");
                     fallback_count += 1;
                     total_bytes += length;
                 }
                 Err(error) => errors = Some(format!("Could not load {}: {error}", extra.display())),
+            }
+        }
+        if extra_path.trim().is_empty() && !system_font.is_empty() {
+            match super::font_dialog::font_bytes(system_font).and_then(|bytes| {
+                let index = (0..ttf_parser::fonts_in_collection(&bytes).unwrap_or(1))
+                    .find(|&index| {
+                        ttf_parser::Face::parse(&bytes, index).is_ok_and(|face| {
+                            face.names().into_iter().any(|name| {
+                                matches!(name.name_id, 1 | 16)
+                                    && name.to_string().is_some_and(|name| {
+                                        name.to_lowercase() == system_font.to_lowercase()
+                                    })
+                            })
+                        })
+                    })
+                    .unwrap_or(0);
+                install_font(&mut definitions, bytes, index, "player-system-font")
+            }) {
+                Ok(length) => {
+                    prefer_font(&mut definitions, "player-system-font");
+                    fallback_count += 1;
+                    total_bytes += length;
+                }
+                Err(error) => errors = Some(format!("Could not load {system_font}: {error}")),
             }
         }
         for (index, path) in candidates.iter().enumerate() {
@@ -245,13 +270,26 @@ fn add_font(
         return Err("Font file exceeds 64 MiB".to_owned());
     }
     let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+    install_font(definitions, bytes, 0, name)
+}
+
+fn install_font(
+    definitions: &mut egui::FontDefinitions,
+    bytes: Vec<u8>,
+    index: u32,
+    name: &str,
+) -> Result<u64, String> {
+    let length = bytes.len() as u64;
     // Validate outline data at the collection index supplied to egui. Keep
     // malformed or unsupported fonts out of the host's fallback definitions.
-    let font = FontVec::try_from_vec_and_index(bytes, 0).map_err(|error| error.to_string())?;
-    definitions.font_data.insert(
-        name.to_owned(),
-        Arc::new(egui::FontData::from_owned(font.into_vec())),
-    );
+    ttf_parser::Face::parse(&bytes, index)
+        .map_err(|error| format!("Invalid font data: {error} (face {index})"))?;
+    let font = FontVec::try_from_vec_and_index(bytes, index).map_err(|error| error.to_string())?;
+    let mut data = egui::FontData::from_owned(font.into_vec());
+    data.index = index;
+    definitions
+        .font_data
+        .insert(name.to_owned(), Arc::new(data));
     for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
         definitions
             .families
@@ -260,6 +298,20 @@ fn add_font(
             .push(name.to_owned());
     }
     Ok(length)
+}
+
+fn prefer_font(definitions: &mut egui::FontDefinitions, name: &str) {
+    let data = &definitions.font_data[name];
+    let mono =
+        ttf_parser::Face::parse(&data.font, data.index).is_ok_and(|face| is_monospace(&face));
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        if family == egui::FontFamily::Monospace && !mono {
+            continue;
+        }
+        let names = definitions.families.entry(family).or_default();
+        names.retain(|candidate| candidate != name);
+        names.insert(0, name.to_owned());
+    }
 }
 
 fn glyph_support(definitions: &egui::FontDefinitions) -> GlyphSupport {
@@ -544,4 +596,21 @@ mod tests {
         assert!(!target.families.contains_key(&light_family(false)));
         std::fs::remove_file(path).unwrap();
     }
+}
+#[test]
+fn selected_font_has_priority_and_preserves_a_real_monospace_fallback() {
+    let mut definitions = egui::FontDefinitions::default();
+    let original_mono = definitions.families[&egui::FontFamily::Monospace][0].clone();
+    let source = definitions.families[&egui::FontFamily::Proportional][0].clone();
+    let data = definitions.font_data[&source].clone();
+    install_font(&mut definitions, data.font.to_vec(), data.index, "selected").unwrap();
+    prefer_font(&mut definitions, "selected");
+    assert_eq!(
+        definitions.families[&egui::FontFamily::Proportional][0],
+        "selected"
+    );
+    assert_eq!(
+        definitions.families[&egui::FontFamily::Monospace][0],
+        original_mono
+    );
 }

@@ -19,6 +19,7 @@ retained original input, and continued editing after session restoration.
 import argparse
 import ctypes as C
 import importlib.util
+import json
 import os
 from pathlib import Path
 import re
@@ -90,7 +91,7 @@ def load_session(directory):
     return result
 
 
-def run_story(candidate, story, directory, display_name, exercise, phase='app'):
+def run_story(candidate, story, directory, display_name, exercise, phase='app', focus_input=False, diagnostics=False):
     directory.mkdir(exist_ok=True)
     env = os.environ.copy()
     env.update(DISPLAY=display_name, XDG_CONFIG_HOME=str(directory / 'config'),
@@ -98,24 +99,38 @@ def run_story(candidate, story, directory, display_name, exercise, phase='app'):
                LIBGL_ALWAYS_SOFTWARE='1')
 
     def keys(*arguments):
-        subprocess.run(['xdotool', *arguments], env=env, check=True, timeout=10)
+        return subprocess.run(['xdotool', *arguments], env=env, check=True, timeout=10, capture_output=True, text=True)
 
     with (directory / f'{phase}.log').open('w') as log:
-        command = [str(candidate)] + ([] if story is None else [str(story)])
+        # Keep executable-adjacent portable settings isolated between fixtures.
+        local_candidate = directory / candidate.name
+        shutil.copy2(candidate, local_candidate)
+        settings_path = directory / 'glulx-settings.json'
+        if not settings_path.exists():
+            settings_path.write_text(json.dumps({'language': 'en'}))
+        command = [str(local_candidate)] + ([] if story is None else [str(story)])
+        if diagnostics:
+            command += ['--diagnostics', str(directory / 'diagnostic.log')]
         app = subprocess.Popen(command, env=env, stdout=log, stderr=log)
         try:
             deadline = time.monotonic() + 30
             window = None
             while time.monotonic() < deadline:
                 assert app.poll() is None, (directory / f'{phase}.log').read_text()
-                result = subprocess.run(['xdotool', 'search', '--onlyvisible', '--name', 'Glulx Player'],
+                result = subprocess.run(['xdotool', 'search', '--onlyvisible', '--name', '^Glulx Player$'],
                                         env=env, capture_output=True, timeout=5)
                 if result.returncode == 0 and result.stdout.strip():
                     window = int(result.stdout.splitlines()[0])
                     break
                 time.sleep(.1)
             assert window, 'Desktop window did not appear'
-            keys('windowfocus', '--sync', str(window))
+            focus_window = window
+            if focus_input:
+                result = subprocess.run(['xdotool', 'search', '--onlyvisible', '--name', 'Log and input$'],
+                                        env=env, capture_output=True, check=True, timeout=5)
+                focus_window = int(result.stdout.splitlines()[0])
+            keys('windowraise', str(focus_window))
+            keys('windowfocus', '--sync', str(focus_window))
             # Allow fonts/story initialization and the first Glk select.
             time.sleep(3)
             exercise(keys)
@@ -156,7 +171,7 @@ def main():
 
     read_fd, write_fd = os.pipe()
     with (root / 'xvfb.log').open('w') as log:
-        xserver = subprocess.Popen(['Xvfb', '-displayfd', str(write_fd), '-screen', '0', '1280x900x24'],
+        xserver = subprocess.Popen(['Xvfb', '-noreset', '-displayfd', str(write_fd), '-screen', '0', '1280x900x24'],
                                    pass_fds=(write_fd,), stdout=log, stderr=log)
         os.close(write_fd)
         try:
@@ -172,7 +187,7 @@ def main():
                 time.sleep(.3)
                 keys('type', '--clearmodifiers', 'abc')
                 time.sleep(2.2)
-            session = run_story(candidate, story, root / 'keys', display_name, key_matrix)
+            session = run_story(candidate, story, root / 'keys', display_name, key_matrix, focus_input=True)
             got = [int(value) for value in re.findall(r'KEY:(-?\d+)', session['transcript'])]
             expected = [value for _, value in fixture.KEYS]
             assert got == expected, (got, expected)
@@ -191,14 +206,14 @@ def main():
                     time.sleep(.2)
                     keys('type', '--clearmodifiers', 'abcdef')
                     time.sleep(2.8)
-                session = run_story(candidate, args.input_feature, root / 'input-feature', display_name, interrupt_line)
+                session = run_story(candidate, args.input_feature, root / 'input-feature', display_name, interrupt_line, focus_input=True)
                 assert 'nopqrs' in session['transcript'] and 'rot13' in session['transcript']
                 assert session['input'] == 'abcdef', session['input']
                 def continue_line(keys):
                     keys('key', 'End')
                     keys('type', '--clearmodifiers', 'xyz')
                     time.sleep(.3)
-                resumed = run_story(candidate, None, root / 'input-feature', display_name, continue_line, 'resume')
+                resumed = run_story(candidate, None, root / 'input-feature', display_name, continue_line, 'resume', focus_input=True)
                 assert resumed['input'] == 'abcdefxyz', resumed['input']
                 print('PASS official Input Feature Test: timer cancellation, ROT13 display and resumed editing', flush=True)
         finally:

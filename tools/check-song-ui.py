@@ -34,7 +34,7 @@ def main():
     harness = module('check-input-ui')
     read_fd, write_fd = os.pipe()
     with (root / 'xvfb.log').open('w') as log:
-        server = subprocess.Popen(['Xvfb', '-displayfd', str(write_fd), '-screen', '0', '1280x900x24'],
+        server = subprocess.Popen(['Xvfb', '-noreset', '-displayfd', str(write_fd), '-screen', '0', '1280x900x24'],
                                   pass_fds=(write_fd,), stdout=log, stderr=log)
         os.close(write_fd)
         try:
@@ -49,7 +49,7 @@ def main():
 
             def pause(keys):
                 command(keys, 'p')
-            saved = harness.run_story(args.candidate.resolve(), story, root / 'session', display, pause)
+            saved = harness.run_story(args.candidate.resolve(), story, root / 'session', display, pause, focus_input=True)
             assert 'SONG playback started (2 repeats).' in saved['transcript'], saved['transcript']
             assert 'SONG paused.' in saved['transcript']
             assert 'SONG playback completed.' not in saved['transcript']
@@ -66,7 +66,7 @@ def main():
                 command(keys, 'n')
                 command(keys, 's')
             restored = harness.run_story(args.candidate.resolve(), None, root / 'session', display,
-                                         resume_and_finish, 'resume')
+                                         resume_and_finish, 'resume', focus_input=True)
             output = restored['transcript']
             assert 'SONG resumed.' in output and 'SONG fade completed.' in output
             assert 'SONG simultaneous channels started: 2' in output, output

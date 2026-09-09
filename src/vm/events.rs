@@ -74,11 +74,13 @@ impl Vm {
         }
     }
     pub fn is_grid_line_input(&self) -> bool {
-        matches!(self.input_request(), Some(InputRequest::Line { .. }))
-            && self
-                .glk_windows
-                .get(&self.input_window)
-                .is_some_and(|w| w.kind == WINTYPE_TEXT_GRID)
+        matches!(
+            self.pending_input_request(),
+            Some(InputRequest::Line { .. })
+        ) && self
+            .glk_windows
+            .get(&self.input_window)
+            .is_some_and(|w| w.kind == WINTYPE_TEXT_GRID)
     }
     /// Deliver a character or one of Glk's special keycodes to the selected
     /// window. Special keys stay intact for both Latin-1 and Unicode requests.
@@ -164,37 +166,46 @@ impl Vm {
         if let Some(w) = self.glk_windows.get(&window) {
             let (stream, echo, old_style, old_link, old_count) =
                 (w.stream, w.echo_stream, w.style, w.hyperlink, w.write_count);
-            // Input display is not a put_char call on the window stream. Its
-            // count and current style/link must survive input unchanged.
-            self.glk_windows.get_mut(&window).unwrap().echo_stream = 0;
-            let output_len = self.output.len();
-            if request.echo {
-                self.style_call(0x87, &[stream, 8])?;
-                self.glk_windows.get_mut(&window).unwrap().hyperlink = 0;
-                for character in text.chars() {
-                    self.glk_write_char(stream, character);
+            // Echo is player input, including the newline written after restoring
+            // the narrative style. Preserve capture even if echoing returns an error.
+            let captured = self.text_buffer_events.take();
+            let echoed = (|| {
+                // Input display is not a put_char call on the window stream. Its
+                // count and current style/link must survive input unchanged.
+                self.glk_windows.get_mut(&window).unwrap().echo_stream = 0;
+                let output_len = self.output.len();
+                if request.echo {
+                    self.style_call(0x87, &[stream, 8])?;
+                    self.glk_windows.get_mut(&window).unwrap().hyperlink = 0;
+                    for character in text.chars() {
+                        self.glk_write_char(stream, character);
+                    }
+                    self.style_call(0x87, &[stream, old_style])?;
+                    self.glk_write_char(stream, '\n');
                 }
-                self.style_call(0x87, &[stream, old_style])?;
-                self.glk_write_char(stream, '\n');
-            }
-            let w = self.glk_windows.get_mut(&window).unwrap();
-            w.echo_stream = echo;
-            w.hyperlink = old_link;
-            w.write_count = old_count;
-            self.output.truncate(output_len);
-            // A transcript still receives input when display echo is disabled.
-            if echo != 0 {
-                self.style_call(0x87, &[echo, 8])?;
-                for character in text.chars() {
-                    self.glk_write_char(echo, character);
+                let w = self.glk_windows.get_mut(&window).unwrap();
+                w.echo_stream = echo;
+                w.hyperlink = old_link;
+                w.write_count = old_count;
+                self.output.truncate(output_len);
+                // A transcript still receives input when display echo is disabled.
+                if echo != 0 {
+                    self.style_call(0x87, &[echo, 8])?;
+                    for character in text.chars() {
+                        self.glk_write_char(echo, character);
+                    }
+                    self.style_call(0x87, &[echo, old_style])?;
+                    self.glk_write_char(echo, '\n');
                 }
-                self.style_call(0x87, &[echo, old_style])?;
-                self.glk_write_char(echo, '\n');
-            }
+                Ok::<_, VmError>(())
+            })();
+            self.text_buffer_events = captured;
+            echoed?;
         }
         Ok([3, window, length, terminator])
     }
     pub(super) fn select_poll(&mut self, address: u32) -> Result<(), VmError> {
+        self.presentation_revision = self.presentation_revision.wrapping_add(1);
         self.poll_events()?;
         let event = self
             .events
@@ -229,6 +240,10 @@ impl Vm {
         if self.viewport_size == size {
             return;
         }
+        crate::diagnostics::record(format_args!(
+            "resize {:?} -> {:?} state={:?}",
+            self.viewport_size, size, self.state
+        ));
         self.viewport_size = size;
         self.layout_windows();
         let limits: Vec<_> = self
@@ -269,6 +284,7 @@ impl Vm {
         address: u32,
         destination: Destination,
     ) -> Result<(), VmError> {
+        self.presentation_revision = self.presentation_revision.wrapping_add(1);
         self.pending_select = Some(PendingSelect {
             event_address: address,
             destination,
@@ -389,6 +405,59 @@ mod tests {
             vm.select_event(0x100, Destination::Discard).unwrap();
             for (index, value) in event.into_iter().enumerate() {
                 assert_eq!(vm.memory.read32(0x100 + index as u32 * 4).unwrap(), value);
+            }
+        }
+    }
+
+    #[test]
+    fn text_buffer_events_exclude_input_echo_including_newlines_and_echo_windows() {
+        for display_echo in [true, false] {
+            for cancelled in [true, false] {
+                let mut vm = vm();
+                vm.enable_text_buffer_events();
+                let window = glk(&mut vm, 0x23, &[0, 0, 0, WINTYPE_TEXT_BUFFER, 0]);
+                let echo_window = glk(&mut vm, 0x23, &[window, 0x12, 1, WINTYPE_TEXT_BUFFER, 0]);
+                let stream = glk(&mut vm, 0x2c, &[window]);
+                let echo_stream = glk(&mut vm, 0x2c, &[echo_window]);
+                glk(&mut vm, 0x2d, &[window, echo_stream]);
+                glk(&mut vm, 0x81, &[stream, '>' as u32]);
+                glk(&mut vm, 0x150, &[window, u32::from(display_echo)]);
+                vm.request_line(&[window, 0x100, 8, 0], true).unwrap();
+                vm.select_event(0x140, Destination::Discard).unwrap();
+                if cancelled {
+                    vm.update_line_input("look").unwrap();
+                    vm.cancel_line(&[window, 0x120]).unwrap();
+                } else {
+                    vm.provide_window_input(window, "look").unwrap();
+                }
+                assert_eq!(
+                    vm.take_text_buffer_events(),
+                    vec![
+                        TextBufferEvent::Text {
+                            window,
+                            text: ">".to_owned(),
+                        },
+                        TextBufferEvent::Text {
+                            window: echo_window,
+                            text: ">".to_owned(),
+                        },
+                    ],
+                    "display_echo={display_echo} cancelled={cancelled}"
+                );
+                glk(&mut vm, 0x81, &[stream, 'A' as u32]);
+                assert_eq!(
+                    vm.take_text_buffer_events(),
+                    vec![
+                        TextBufferEvent::Text {
+                            window,
+                            text: "A".to_owned(),
+                        },
+                        TextBufferEvent::Text {
+                            window: echo_window,
+                            text: "A".to_owned(),
+                        },
+                    ]
+                );
             }
         }
     }

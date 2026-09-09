@@ -19,7 +19,8 @@ errors carrying execution context. Host behavior is split into modules under
 `sound`, `save`, `session`, `acceleration`, `strings` and `grid`. The VM depends on neither egui nor HTTP; sound uses
 rodio; MOD/XM/S3M/IT resources are generated incrementally by a Rust tracker player;
 sampled formats repeat at decoder EOF without expanding the whole clip in memory. Multi-play
-channels enter the device as one aligned source. The picture module validates source images and samples only visible destination
+channels enter the device as one aligned source. The picture module validates source images, shares the first decode with graphics
+draw requests, and samples only visible destination
 pixels, so oversized draw requests do not allocate oversized images. Presentation returns window rectangles,
 text runs with image/flow markers, and graphics commands. The GUI text-buffer layout
 formats inline images and floating margins together with styled text, retaining image
@@ -29,8 +30,16 @@ style and hyperlink attributes with consistent paint and input geometry. Host fo
 coverage and metrics are injected callbacks, omitted from portable and desktop
 serialization and reinstalled by the GUI. This keeps egui out of the VM.
 
-`PlayerApp` executes short slices, renders each window, and supplies keyboard,
-mouse, hyperlink and file-selection results. Waiting states distinguish line,
+`PlayerApp` advances the VM for about 8 ms per slice (checking every 1024
+instructions), yielding at Glk select/select_poll boundaries before publishing
+a complete presentation. It supplies keyboard,
+mouse, hyperlink and file-selection results. Native companion viewports contain log/input, translation and settings; only the root
+canvas determines Glk dimensions. Graphics retain clipped image/rectangle primitives, published with shared window
+views at event boundaries. Hardware OpenGL scales and blends them on the GPU.
+Software drivers use an incremental CPU bitmap. Opaque draws remove covered
+commands; long histories compact, and the recent-image cache is capped at 128 MiB.
+CPU rasterization also preserves the existing desktop snapshot format.
+Waiting states distinguish line,
 character, file (including overwrite confirmation) and general events. The pipe adapter reads stdin on a worker
 so waiting for a line does not prevent timer delivery. Streams share file contents across handles, retain independent cursors and flush only
 dirty content at stop/save.
@@ -44,6 +53,11 @@ assembler resolves AIFF references before handing a module to the existing track
 
 ## Persistence
 
+Player settings use an executable-adjacent `glulx-settings.json`, migrated from
+the old eframe settings key when absent. Writes use a same-directory temporary
+file and rename. Invalid JSON is reported and preserved instead of overwritten.
+Desktop session storage remains separate.
+
 `save` implements portable IFZS. It validates identity, memory, heap and stack
 continuations before replacing execution state. RNG, Glk, I/O system, the string
 table and protection definition remain independent of restore/undo/restart.
@@ -56,13 +70,23 @@ on the native stack; desktop snapshots retain pending completion.
 Glk objects, pending input and audio progress. The app adds graphics canvases and
 resumes timers/audio. Eframe storage saves every 30 seconds and on normal exit;
 startup without an explicit story attempts to resume it. This local snapshot is
-separate from game-requested, portable saves.
+separate from game-requested, portable saves. The synchronous desktop serializer
+expands byte arrays into RON integer lists. A 16 MiB raw-payload guard skips
+large story/memory/canvas snapshots before serialization and clears any stale
+previous session; settings and game-requested IFZS saves remain available.
 
 ## Translation
 
 `Translator` copies narrative text to an asynchronous worker at input waits.
 Translation cannot mutate execution, input or save state. Request IDs retain turn
-order; the source text is the cache key. Original output is always immediately
+order; source text and request configuration form the cache key. Identical
+in-flight requests share a worker call and fan out to distinct turn IDs. Only
+successful results are cached. Toggle transitions clear unfinished capture,
+without altering recorded turn state or backfilling old content. An opt-in VM
+text-buffer event stream carries narrative text and clear boundaries, excludes
+input echo, and is omitted from snapshots. Clears discard pending text from that
+window and start a new view; same-view batches append, old views are collapsed
+in History, and exact redraws reuse the current view. Original output is always immediately
 available. Credentials are local settings, not release artifacts.
 
 Glulxe is used for output and save interoperability checks; Git and Gargoyle

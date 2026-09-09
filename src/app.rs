@@ -16,11 +16,19 @@ mod i18n;
 use i18n::Language;
 pub use i18n::LanguagePreference;
 
+mod canvas;
+mod font_dialog;
+use canvas::Canvas as DisplayedGraphics;
 mod fonts;
+mod settings_file;
 mod text_buffer;
 mod text_grid;
+mod windows;
 
 const STORAGE_KEY: &str = "glulx-rs-settings";
+// RON expands each byte into a decimal integer, then eframe copies the whole
+// string. Large media packages must not enter this synchronous UI-thread path.
+const MAX_DESKTOP_SNAPSHOT_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -28,11 +36,14 @@ pub struct PlayerSettings {
     pub language: LanguagePreference,
     pub font_size: f32,
     pub fallback_font: String,
+    pub system_font: String,
     pub text_color: [u8; 3],
     pub background_color: [u8; 3],
     pub hyperlink_color: [u8; 3],
     pub show_chrome: bool,
     pub window_borders: bool,
+    pub show_log_window: bool,
+    pub show_translation_window: bool,
     pub translation: TranslationSettings,
 }
 
@@ -42,20 +53,32 @@ impl Default for PlayerSettings {
             language: LanguagePreference::System,
             font_size: 18.0,
             fallback_font: String::new(),
+            system_font: String::new(),
             text_color: [32, 34, 37],
             background_color: [248, 248, 246],
             hyperlink_color: [20, 94, 150],
             show_chrome: true,
             window_borders: true,
+            show_log_window: true,
+            show_translation_window: true,
             translation: TranslationSettings::default(),
         }
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+enum TurnTranslation {
+    #[default]
+    NotRequested,
+    Pending,
+    Complete(Result<String, String>),
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct Turn {
+    view: u64,
     original: String,
-    translation: Option<Result<String, String>>,
+    translation: TurnTranslation,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -82,31 +105,6 @@ struct Session {
     input: String,
     timer: Option<u32>,
     canvases: Vec<SavedCanvas>,
-}
-
-struct DisplayedGraphics {
-    pixels: image::RgbaImage,
-    texture: egui::TextureHandle,
-}
-
-impl DisplayedGraphics {
-    fn new(context: &egui::Context, window: u32, size: [u32; 2]) -> Self {
-        let size = [size[0].max(1), size[1].max(1)];
-        let pixels = image::RgbaImage::from_pixel(size[0], size[1], image::Rgba([255; 4]));
-        let texture = context.load_texture(
-            format!("glk-graphics-window-{window}"),
-            texture_image(context, &pixels),
-            egui::TextureOptions::LINEAR,
-        );
-        Self { pixels, texture }
-    }
-
-    fn upload(&mut self, context: &egui::Context) {
-        self.texture.set(
-            texture_image(context, &self.pixels),
-            egui::TextureOptions::LINEAR,
-        );
-    }
 }
 
 struct FileBrowser {
@@ -209,16 +207,30 @@ impl FileBrowser {
 
 pub struct PlayerApp {
     settings: PlayerSettings,
+    settings_file: settings_file::SettingsFile,
     vm: Option<Vm>,
     story_path: Option<PathBuf>,
     story_title: String,
     transcript: String,
     turn_buffer: String,
+    turn_windows: Vec<(u32, String)>,
+    translation_view: u64,
+    translation_view_start: usize,
+    translation_view_settings: Option<TranslationSettings>,
+    new_translation_view: bool,
+    translation_capture_enabled: bool,
     turns: Vec<Turn>,
     input: String,
     game_status: String,
     graphics: BTreeMap<u32, DisplayedGraphics>,
-    image_cache: HashMap<u32, image::RgbaImage>,
+    dirty_graphics: HashSet<u32>,
+    presented_graphics: BTreeMap<u32, std::sync::Arc<DisplayedGraphics>>,
+    presented_views: std::sync::Arc<[crate::vm::WindowView]>,
+    presented_revision: u64,
+    presented_state: RunState,
+    image_cache: HashMap<u32, (std::sync::Arc<canvas::ImageAsset>, u64)>,
+    image_cache_tick: u64,
+    gpu_canvas: bool,
     buffer_images: text_buffer::ImageCache,
     status: String,
     error: Option<String>,
@@ -226,18 +238,38 @@ pub struct PlayerApp {
     show_about: bool,
     show_story_info: bool,
     cover: Option<egui::TextureHandle>,
-    show_scrollback: bool,
     file_browser: FileBrowser,
     translator: Translator,
     pending_translations: HashMap<u64, usize>,
     last_state: RunState,
     fonts: fonts::Fonts,
+    pending_font_metrics: bool,
     show_resources: bool,
     resource_choice: u8,
     resource_path: String,
 }
 
 impl PlayerApp {
+    fn clear_presentation(&mut self) {
+        self.dirty_graphics.clear();
+        self.presented_graphics.clear();
+        self.presented_views = Default::default();
+        self.presented_revision = 0;
+        self.presented_state = RunState::Running;
+    }
+
+    fn desktop_snapshot_too_large(&self) -> bool {
+        let bytes = self
+            .vm
+            .as_ref()
+            .map_or(0, Vm::snapshot_byte_len)
+            .saturating_add(self.transcript.len())
+            .saturating_add(self.input.len());
+        self.graphics.values().fold(bytes, |bytes, canvas| {
+            bytes.saturating_add(canvas.size[0] as usize * canvas.size[1] as usize * 4)
+        }) > MAX_DESKTOP_SNAPSHOT_BYTES
+    }
+
     pub fn new(creation: &eframe::CreationContext<'_>, initial_story: Option<PathBuf>) -> Self {
         Self::new_with_resources(creation, initial_story, ResourceSelection::Auto)
     }
@@ -247,23 +279,63 @@ impl PlayerApp {
         initial_story: Option<PathBuf>,
         selection: ResourceSelection,
     ) -> Self {
+        let _stage = crate::diagnostics::stage("create-app-or-restore-session");
+        let mut gpu_canvas = false;
+        if let Some(gl) = &creation.gl {
+            use eframe::glow::HasContext;
+            // Eframe has made this context current during app creation.
+            let renderer = unsafe { gl.get_parameter_string(eframe::glow::RENDERER) };
+            let software = [
+                "llvmpipe",
+                "softpipe",
+                "swiftshader",
+                "software",
+                "gdi generic",
+            ]
+            .iter()
+            .any(|name| renderer.to_lowercase().contains(name));
+            gpu_canvas = !software || std::env::var_os("GLULX_FORCE_GPU").is_some();
+            crate::diagnostics::record(format_args!(
+                "graphics_gpu={gpu_canvas} renderer={renderer}"
+            ));
+        }
         let settings: PlayerSettings = creation
             .storage
             .and_then(|storage| eframe::get_value(storage, STORAGE_KEY))
             .unwrap_or_default();
-        let fonts = fonts::Fonts::new(&creation.egui_ctx, &settings.fallback_font);
+        let (mut settings_file, settings) = settings_file::SettingsFile::application(settings);
+        settings_file.save(&settings);
+        let fonts = fonts::Fonts::new(
+            &creation.egui_ctx,
+            &settings.fallback_font,
+            &settings.system_font,
+        );
         let mut app = Self {
+            translation_capture_enabled: settings.translation.enabled,
             settings,
+            settings_file,
             vm: None,
             story_path: None,
             story_title: "Glulx Player".to_owned(),
             transcript: String::new(),
             turn_buffer: String::new(),
+            turn_windows: Vec::new(),
+            translation_view: 0,
+            translation_view_start: 0,
+            translation_view_settings: None,
+            new_translation_view: false,
             turns: Vec::new(),
             input: String::new(),
             game_status: String::new(),
             graphics: BTreeMap::new(),
+            dirty_graphics: HashSet::new(),
+            presented_graphics: BTreeMap::new(),
+            presented_views: Default::default(),
+            presented_revision: 0,
+            presented_state: RunState::Running,
             image_cache: HashMap::new(),
+            image_cache_tick: 0,
+            gpu_canvas,
             buffer_images: text_buffer::ImageCache::default(),
             status: "ui.open_a_ulx_or_gblorb_story_to_begin".to_owned(),
             error: None,
@@ -271,12 +343,12 @@ impl PlayerApp {
             show_about: false,
             show_story_info: false,
             cover: None,
-            show_scrollback: false,
             file_browser: FileBrowser::new(),
             translator: Translator::new(),
             pending_translations: HashMap::new(),
             last_state: RunState::Halted,
             fonts,
+            pending_font_metrics: false,
             show_resources: false,
             resource_choice: 0,
             resource_path: String::new(),
@@ -302,13 +374,10 @@ impl PlayerApp {
                         if let Some(pixels) =
                             image::RgbaImage::from_raw(canvas.width, canvas.height, canvas.pixels)
                         {
-                            let texture = creation.egui_ctx.load_texture(
-                                format!("glk-graphics-window-{}", canvas.window),
-                                texture_image(&creation.egui_ctx, &pixels),
-                                egui::TextureOptions::LINEAR,
+                            app.graphics.insert(
+                                canvas.window,
+                                DisplayedGraphics::from_pixels(&creation.egui_ctx, pixels),
                             );
-                            app.graphics
-                                .insert(canvas.window, DisplayedGraphics { pixels, texture });
                         }
                     }
                     app.status = "ui.previous_session_restored".to_owned();
@@ -326,6 +395,7 @@ impl PlayerApp {
     }
 
     fn load_story_with_resources(&mut self, path: PathBuf, selection: ResourceSelection) {
+        let _stage = crate::diagnostics::stage("load-story");
         let loaded = Story::open_with_resources(&path, selection)
             .map_err(|error| error.to_string())
             .and_then(|story| Vm::new(story).map_err(|error| error.to_string()));
@@ -341,12 +411,11 @@ impl PlayerApp {
                 self.vm = Some(vm);
                 self.story_path = Some(path.clone());
                 self.transcript.clear();
-                self.turn_buffer.clear();
-                self.turns.clear();
-                self.pending_translations.clear();
+                self.reset_translation_history();
                 self.input.clear();
                 self.game_status.clear();
                 self.graphics.clear();
+                self.clear_presentation();
                 self.image_cache.clear();
                 self.buffer_images.clear();
                 self.cover = None;
@@ -366,10 +435,10 @@ impl PlayerApp {
             match vm.restart() {
                 Ok(()) => {
                     self.transcript.clear();
-                    self.turn_buffer.clear();
-                    self.turns.clear();
+                    self.reset_translation_history();
                     self.game_status.clear();
                     self.graphics.clear();
+                    self.clear_presentation();
                     self.image_cache.clear();
                     self.buffer_images.clear();
                     self.error = None;
@@ -382,42 +451,49 @@ impl PlayerApp {
     }
 
     fn run_vm(&mut self) {
+        self.sync_translation_capture();
+        let _stage = crate::diagnostics::stage("vm-slice");
         let Some(vm) = &mut self.vm else {
             return;
         };
+        vm.enable_text_buffer_events();
         let word = |c: [u8; 3]| u32::from_be_bytes([0, c[0], c[1], c[2]]);
         vm.set_light_fonts(self.fonts.light_fonts);
         vm.set_glyph_support(self.fonts.support.clone());
-        vm.set_text_metrics(self.fonts.metrics.clone());
+        if !self.pending_font_metrics {
+            vm.set_text_metrics(self.fonts.metrics.clone());
+        }
         vm.set_text_appearance(
             self.settings.font_size,
             word(self.settings.text_color),
             word(self.settings.background_color),
         );
-        if let Err(error) = vm.run_steps(25_000) {
+        let presentation_revision = vm.presentation_revision();
+        if let Err(error) = run_vm_slice(vm) {
             let pc = vm.pc();
             vm.stop();
             self.error = Some(format!("{error}\nProgram counter: {pc:#010x}"));
             self.status = "ui.vm_stopped_after_an_error".to_owned();
         }
         let output = vm.take_output();
+        crate::diagnostics::vm(vm);
         self.game_status = vm.status_text();
         if !output.is_empty() {
             self.transcript.push_str(&output);
-            self.turn_buffer.push_str(&output);
         }
+        let text_events = vm.take_text_buffer_events();
         let state = vm.state();
+        let output_boundary = vm.presentation_revision() != presentation_revision;
+        if state != self.last_state {
+            crate::diagnostics::record(format_args!("state {:?} -> {state:?}", self.last_state));
+        }
         // A timer can cancel and re-request input during one VM slice, leaving
         // the same RunState but supplying a different prefilled line.
         if state == RunState::WaitingForLine {
             self.input = vm.initial_input();
         }
-        if matches!(state, RunState::WaitingForLine | RunState::WaitingForChar)
-            && !matches!(
-                self.last_state,
-                RunState::WaitingForLine | RunState::WaitingForChar
-            )
-        {
+        self.capture_translation_events(text_events);
+        if output_boundary || (state != RunState::Running && self.last_state == RunState::Running) {
             self.finish_turn();
         }
         self.status = match state {
@@ -433,40 +509,129 @@ impl PlayerApp {
 
     fn finish_turn(&mut self) {
         let source = std::mem::take(&mut self.turn_buffer);
+        self.turn_windows.clear();
         if source.trim().is_empty() {
             return;
         }
+        let starting_view = self.new_translation_view || self.turns.is_empty();
+        if self.new_translation_view && !self.turns.is_empty() {
+            let current = &self.turns[self.translation_view_start..];
+            let same_source = current
+                .iter()
+                .map(|turn| turn.original.as_str())
+                .collect::<String>()
+                == source;
+            let same_capture = current.iter().all(|turn| {
+                match (&turn.translation, self.settings.translation.enabled) {
+                    (TurnTranslation::NotRequested, false) => true,
+                    (TurnTranslation::Pending | TurnTranslation::Complete(Ok(_)), true) => {
+                        self.translation_view_settings.as_ref() == Some(&self.settings.translation)
+                    }
+                    _ => false,
+                }
+            });
+            if same_source && same_capture {
+                self.new_translation_view = false;
+                return;
+            }
+            self.translation_view += 1;
+            self.translation_view_start = self.turns.len();
+        }
+        self.new_translation_view = false;
+        if starting_view {
+            self.translation_view_settings = Some(self.settings.translation.clone());
+        } else if self.translation_view_settings.as_ref() != Some(&self.settings.translation) {
+            self.translation_view_settings = None; // This view contains mixed capture settings.
+        }
         let index = self.turns.len();
         self.turns.push(Turn {
+            view: self.translation_view,
             original: source.clone(),
-            translation: None,
+            translation: TurnTranslation::NotRequested,
         });
         if self.settings.translation.enabled {
             match self.translator.submit(source, &self.settings.translation) {
-                Submission::Cached(value) => self.turns[index].translation = Some(Ok(value)),
+                Submission::Cached(value) => {
+                    self.turns[index].translation = TurnTranslation::Complete(Ok(value));
+                    crate::diagnostics::record(format_args!("translation cached turn={index}"));
+                }
                 Submission::Queued(id) => {
+                    self.turns[index].translation = TurnTranslation::Pending;
                     self.pending_translations.insert(id, index);
+                    crate::diagnostics::record(format_args!(
+                        "translation queued turn={index} id={id}"
+                    ));
                 }
             }
         }
     }
 
     fn poll_translations(&mut self) {
+        self.sync_translation_capture();
         for result in self.translator.poll() {
             if let Some(index) = self.pending_translations.remove(&result.id)
                 && let Some(turn) = self.turns.get_mut(index)
             {
-                turn.translation = Some(result.result);
+                turn.translation = TurnTranslation::Complete(result.result);
+                crate::diagnostics::record(format_args!(
+                    "translation completed turn={index} id={}",
+                    result.id
+                ));
             }
-        }
-        if self.settings.translation.enabled {
-            self.queue_untranslated_turns();
         }
     }
 
+    fn sync_translation_capture(&mut self) {
+        if self.translation_capture_enabled != self.settings.translation.enabled {
+            // Match the reference capture boundary: changing the switch drops
+            // unfinished capture, but never touches recorded turns or requests.
+            self.turn_buffer.clear();
+            self.turn_windows.clear();
+            self.translation_capture_enabled = self.settings.translation.enabled;
+        }
+    }
+
+    fn capture_translation_events(&mut self, events: Vec<crate::vm::TextBufferEvent>) {
+        for event in events {
+            match event {
+                crate::vm::TextBufferEvent::Text { window, text } => {
+                    self.turn_buffer.push_str(&text);
+                    if let Some((last_window, last_text)) = self.turn_windows.last_mut()
+                        && *last_window == window
+                    {
+                        last_text.push_str(&text);
+                    } else {
+                        self.turn_windows.push((window, text));
+                    }
+                }
+                crate::vm::TextBufferEvent::Clear { window } => {
+                    self.turn_windows.retain(|(id, _)| *id != window);
+                    self.turn_buffer = self
+                        .turn_windows
+                        .iter()
+                        .map(|(_, text)| text.as_str())
+                        .collect();
+                    self.new_translation_view = true;
+                }
+            }
+        }
+    }
+
+    fn reset_translation_history(&mut self) {
+        self.turn_buffer.clear();
+        self.turn_windows.clear();
+        self.turns.clear();
+        self.pending_translations.clear();
+        self.translation_view = 0;
+        self.translation_view_start = 0;
+        self.translation_view_settings = None;
+        self.new_translation_view = false;
+    }
+
     fn poll_graphics(&mut self, context: &egui::Context) {
+        let _stage = crate::diagnostics::stage("graphics");
         let requests = self.vm.as_mut().map(Vm::take_graphics).unwrap_or_default();
-        let mut dirty = HashSet::new();
+        let dirty = &mut self.dirty_graphics;
         for request in requests {
             match request {
                 GraphicsRequest::Resize {
@@ -477,7 +642,8 @@ impl PlayerApp {
                     if canvas_size.contains(&0) {
                         self.graphics.remove(&window);
                     } else {
-                        ensure_canvas(context, &mut self.graphics, window, canvas_size, background);
+                        ensure_canvas(context, &mut self.graphics, window, canvas_size, background)
+                            .use_cpu(!self.gpu_canvas);
                         dirty.insert(window);
                     }
                 }
@@ -485,26 +651,49 @@ impl PlayerApp {
                     if request.canvas_size.contains(&0) {
                         continue;
                     }
-                    if let std::collections::hash_map::Entry::Vacant(entry) =
-                        self.image_cache.entry(request.resource)
-                    {
-                        match crate::picture::decode(&request.data) {
-                            Ok(decoded) => {
-                                entry.insert(decoded);
+                    self.image_cache_tick += 1;
+                    let tick = self.image_cache_tick;
+                    let source =
+                        if let Some((source, used)) = self.image_cache.get_mut(&request.resource) {
+                            *used = tick;
+                            source.clone()
+                        } else {
+                            match request.decoded.map(Ok).unwrap_or_else(|| {
+                                crate::picture::decode(&request.data).map(std::sync::Arc::new)
+                            }) {
+                                Ok(decoded) => {
+                                    let source = canvas::ImageAsset::new(context, decoded);
+                                    self.image_cache
+                                        .insert(request.resource, (source.clone(), tick));
+                                    while self
+                                        .image_cache
+                                        .values()
+                                        .map(|(asset, _)| asset.pixels.as_raw().len())
+                                        .sum::<usize>()
+                                        > 128 * 1024 * 1024
+                                    {
+                                        let oldest = *self
+                                            .image_cache
+                                            .iter()
+                                            .min_by_key(|(_, (_, used))| *used)
+                                            .unwrap()
+                                            .0;
+                                        self.image_cache.remove(&oldest);
+                                    }
+                                    source
+                                }
+                                Err(error) => {
+                                    self.status = format!(
+                                        "Could not decode picture {}: {error}",
+                                        request.resource
+                                    );
+                                    continue;
+                                }
                             }
-                            Err(error) => {
-                                self.status = format!(
-                                    "Could not decode picture {}: {error}",
-                                    request.resource
-                                );
-                                continue;
-                            }
-                        }
-                    }
-                    let source = &self.image_cache[&request.resource];
+                        };
                     let size = request
                         .requested_size
-                        .unwrap_or([source.width(), source.height()]);
+                        .unwrap_or([source.pixels.width(), source.pixels.height()]);
                     let canvas = ensure_canvas(
                         context,
                         &mut self.graphics,
@@ -512,7 +701,8 @@ impl PlayerApp {
                         request.canvas_size,
                         0xffffff,
                     );
-                    crate::picture::draw_scaled(&mut canvas.pixels, source, request.position, size);
+                    canvas.use_cpu(!self.gpu_canvas);
+                    canvas.draw(context, source, request.position, size);
                     dirty.insert(request.window);
                 }
                 GraphicsRequest::Fill {
@@ -526,7 +716,8 @@ impl PlayerApp {
                     }
                     let canvas =
                         ensure_canvas(context, &mut self.graphics, window, canvas_size, 0xffffff);
-                    fill_rect(&mut canvas.pixels, rect, color);
+                    canvas.use_cpu(!self.gpu_canvas);
+                    canvas.fill(context, rect, color);
                     dirty.insert(window);
                 }
                 GraphicsRequest::Clear {
@@ -539,10 +730,8 @@ impl PlayerApp {
                     }
                     let canvas =
                         ensure_canvas(context, &mut self.graphics, window, canvas_size, color);
-                    let color = rgba(color);
-                    for pixel in canvas.pixels.pixels_mut() {
-                        *pixel = color;
-                    }
+                    canvas.use_cpu(!self.gpu_canvas);
+                    canvas.clear(color);
                     dirty.insert(window);
                 }
                 GraphicsRequest::Close { window } => {
@@ -550,31 +739,36 @@ impl PlayerApp {
                 }
             }
         }
-        for window in dirty {
-            if let Some(canvas) = self.graphics.get_mut(&window) {
-                canvas.upload(context);
-            }
-        }
     }
 
-    fn queue_untranslated_turns(&mut self) {
-        for index in 0..self.turns.len() {
-            if self.turns[index].translation.is_some()
-                || self
-                    .pending_translations
-                    .values()
-                    .any(|pending| *pending == index)
-            {
-                continue;
-            }
-            let source = self.turns[index].original.clone();
-            match self.translator.submit(source, &self.settings.translation) {
-                Submission::Cached(value) => self.turns[index].translation = Some(Ok(value)),
-                Submission::Queued(id) => {
-                    self.pending_translations.insert(id, index);
-                }
-            }
+    fn publish_story(&mut self, context: &egui::Context) {
+        let Some(vm) = &self.vm else {
+            return;
+        };
+        let revision = vm.presentation_revision();
+        let state = vm.state();
+        if revision == self.presented_revision
+            && (state == RunState::Running || state == self.presented_state)
+        {
+            return;
         }
+        self.presented_revision = revision;
+        self.presented_state = state;
+        self.presented_views = vm.window_views().into();
+        self.dirty_graphics.clear();
+        for canvas in self.graphics.values_mut() {
+            canvas.use_cpu(!self.gpu_canvas);
+            canvas.prepare(context);
+        }
+        self.presented_graphics = self
+            .graphics
+            .iter()
+            .map(|(&id, canvas)| (id, std::sync::Arc::new(canvas.clone())))
+            .collect();
+        crate::diagnostics::record(format_args!(
+            "present revision={revision} state={state:?} windows={}",
+            self.presented_views.len()
+        ));
     }
 
     fn submit_input(&mut self) {
@@ -678,8 +872,14 @@ impl PlayerApp {
                         self.show_story_info = true;
                         ui.close();
                     }
-                    if ui.button(language.text("ui.scrollback")).clicked() {
-                        self.show_scrollback = true;
+                    if ui
+                        .add(
+                            egui::Button::new(language.text("ui.log_and_input_window"))
+                                .shortcut_text("Ctrl+Shift+L"),
+                        )
+                        .clicked()
+                    {
+                        self.settings.show_log_window = true;
                         ui.close();
                     }
                     if ui.button(language.text("ui.options")).clicked() {
@@ -687,8 +887,8 @@ impl PlayerApp {
                         ui.close();
                     }
                     ui.checkbox(
-                        &mut self.settings.translation.enabled,
-                        language.text("ui.translation_panel"),
+                        &mut self.settings.show_translation_window,
+                        language.text("ui.translation_window"),
                     );
                 });
                 ui.menu_button(language.text("ui.help"), |ui| {
@@ -731,15 +931,20 @@ impl PlayerApp {
                     vm.stop();
                 }
                 ui.separator();
+                ui.toggle_value(&mut self.settings.show_log_window, language.text("ui.log"))
+                    .on_hover_text(language.text("ui.show_or_hide_log_and_input_window"));
+                ui.toggle_value(
+                    &mut self.settings.show_translation_window,
+                    language.text("ui.translation"),
+                )
+                .on_hover_text(language.text("ui.show_or_hide_translation_window"));
                 if ui
-                    .selectable_label(
-                        self.settings.translation.enabled,
-                        language.text("ui.translate"),
-                    )
-                    .on_hover_text(language.text("ui.show_translated_turns"))
+                    .toggle_value(&mut self.show_options, language.text("ui.settings"))
+                    .on_hover_text(language.text("ui.show_or_hide_settings_window"))
                     .clicked()
+                    && !self.show_options
                 {
-                    self.settings.translation.enabled = !self.settings.translation.enabled;
+                    self.settings_file.save(&self.settings);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(RichText::new(&self.story_title).strong());
@@ -753,46 +958,6 @@ impl PlayerApp {
         let context = root.ctx().clone();
         let accept_input = !self.dialog_open(&context);
         let background = rgb(self.settings.background_color);
-        if self.settings.translation.enabled {
-            egui::Panel::right("translation")
-                .default_size(360.0)
-                .size_range(240.0..=640.0)
-                .frame(
-                    egui::Frame::new()
-                        .fill(Color32::from_rgb(242, 245, 247))
-                        .inner_margin(16.0),
-                )
-                .show(root, |ui| {
-                    ui.heading(language.text("ui.translation"));
-                    ui.separator();
-                    egui::ScrollArea::vertical()
-                        .stick_to_bottom(true)
-                        .show(ui, |ui| {
-                            for turn in &self.turns {
-                                ui.collapsing(language.text("ui.original"), |ui| {
-                                    ui.weak(turn.original.trim());
-                                });
-                                match &turn.translation {
-                                    Some(Ok(value)) => {
-                                        ui.label(
-                                            RichText::new(value).size(self.settings.font_size),
-                                        );
-                                    }
-                                    Some(Err(error)) => {
-                                        ui.colored_label(
-                                            Color32::from_rgb(170, 50, 45),
-                                            language.message(error),
-                                        );
-                                    }
-                                    None => {
-                                        ui.weak(language.text("ui.translating_legacy"));
-                                    }
-                                }
-                                ui.add_space(14.0);
-                            }
-                        });
-                });
-        }
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
@@ -814,20 +979,22 @@ impl PlayerApp {
                     return;
                 }
                 let bounds = ui.available_rect_before_wrap();
-                let views = if let Some(vm) = &mut self.vm {
+                if let Some(vm) = &mut self.vm {
                     vm.resize_windows(
                         bounds.width().max(0.0) as u32,
                         bounds.height().max(0.0) as u32,
                     );
-                    vm.window_views()
-                } else {
-                    Vec::new()
-                };
+                }
                 self.poll_graphics(&context);
+                self.publish_story(&context);
+                let views = self.presented_views.clone();
+                if views.is_empty() {
+                    ui.weak(language.text("ui.preparing_game_display"));
+                }
                 let mut click = None;
                 let mut hyperlink = None;
                 let mut grid_submitted = false;
-                for view in views {
+                for view in views.iter() {
                     let rect = egui::Rect::from_min_size(
                         bounds.min + egui::vec2(view.rect[0] as f32, view.rect[1] as f32),
                         egui::vec2(view.rect[2] as f32, view.rect[3] as f32),
@@ -856,7 +1023,7 @@ impl PlayerApp {
                                         |ui| {
                                             if let Some(value) = text_buffer::show(
                                                 ui,
-                                                &view,
+                                                view,
                                                 &self.settings,
                                                 self.vm.as_ref().unwrap(),
                                                 &mut self.buffer_images,
@@ -869,6 +1036,7 @@ impl PlayerApp {
                                 4 => {
                                     let editor = self.vm.as_ref().and_then(|vm| {
                                         (accept_input
+                                            && !self.settings.show_log_window
                                             && vm.is_grid_line_input()
                                             && vm.input_window() == view.id)
                                             .then_some(text_grid::GridEditor {
@@ -877,7 +1045,7 @@ impl PlayerApp {
                                             })
                                     });
                                     let response =
-                                        text_grid::show(ui, rect, &view, &self.settings, editor);
+                                        text_grid::show(ui, rect, view, &self.settings, editor);
                                     if let Some([x, y]) = response.cell {
                                         click = Some((view.id, x, y));
                                     }
@@ -889,27 +1057,13 @@ impl PlayerApp {
                                     {
                                         let _ = vm.update_line_input(&self.input);
                                     }
-                                    grid_submitted |= response.submitted;
+                                    grid_submitted |= response.submitted
+                                        && self.vm.as_ref().and_then(Vm::input_request).is_some();
                                 }
                                 5 => {
                                     let response = ui.allocate_rect(rect, egui::Sense::click());
-                                    if let Some(graphics) = self.graphics.get(&view.id) {
-                                        let destination = egui::Rect::from_min_size(
-                                            rect.min,
-                                            egui::vec2(
-                                                graphics.pixels.width() as f32,
-                                                graphics.pixels.height() as f32,
-                                            ),
-                                        );
-                                        ui.painter().image(
-                                            graphics.texture.id(),
-                                            destination,
-                                            egui::Rect::from_min_max(
-                                                egui::Pos2::ZERO,
-                                                egui::pos2(1.0, 1.0),
-                                            ),
-                                            Color32::WHITE,
-                                        );
+                                    if let Some(graphics) = self.presented_graphics.get(&view.id) {
+                                        graphics.paint(ui.painter(), rect.min);
                                     }
                                     if response.clicked()
                                         && let Some(pos) = response.interact_pointer_pos()
@@ -942,10 +1096,8 @@ impl PlayerApp {
 
     fn dialog_open(&self, context: &egui::Context) -> bool {
         self.show_resources
-            || self.show_options
             || self.show_about
             || self.show_story_info
-            || self.show_scrollback
             || self.file_browser.open
             || self.error.is_some()
             || egui::Popup::is_any_open(context)
@@ -992,17 +1144,21 @@ impl PlayerApp {
     fn input_bar(&mut self, root: &mut egui::Ui) {
         let language = self.settings.language.resolve();
         let accept_input = !self.dialog_open(root.ctx());
-        let request = self.vm.as_ref().and_then(Vm::input_request);
-        if request.is_none() {
-            return;
-        }
+        let can_submit = self.vm.as_ref().and_then(Vm::input_request).is_some();
+        let request = self.vm.as_ref().and_then(Vm::pending_input_request);
         egui::Panel::bottom("input")
+            .min_size(51.0)
             .frame(
                 egui::Frame::new()
                     .fill(Color32::from_rgb(235, 237, 238))
                     .inner_margin(10.0),
             )
             .show(root, |ui| {
+                ui.set_min_height(30.0);
+                if request.is_none() {
+                    ui.weak(language.message(&self.status));
+                    return;
+                }
                 if !accept_input {
                     ui.disable();
                 }
@@ -1035,67 +1191,69 @@ impl PlayerApp {
                         }
                     }
                     // Changing the window can also change the input kind.
-                    let request = self.vm.as_ref().and_then(Vm::input_request);
+                    let request = self.vm.as_ref().and_then(Vm::pending_input_request);
                     if matches!(request, Some(InputRequest::Character)) {
                         ui.label(language.text("ui.press_a_key"));
-                        if ui.button(language.text("ui.return")).clicked() {
+                        if ui
+                            .add_enabled(can_submit, egui::Button::new(language.text("ui.return")))
+                            .clicked()
+                        {
                             self.submit_key(0xffff_fffa);
                         }
                         return;
                     }
-                    let grid_line = self.vm.as_ref().is_some_and(Vm::is_grid_line_input);
-                    let mut enter = false;
-                    if !grid_line {
-                        ui.label(match request {
-                            Some(InputRequest::Line { .. }) => ">",
-                            Some(InputRequest::File { writing: true }) => {
-                                language.text("ui.save_file")
-                            }
-                            Some(InputRequest::File { writing: false }) => {
-                                language.text("ui.open_file")
-                            }
-                            _ => "",
-                        });
-                        let limit = match request {
-                            Some(InputRequest::Line { maximum_length }) => maximum_length as usize,
-                            _ => usize::MAX,
-                        };
-                        let response = ui.add_sized(
-                            [ui.available_width() - 72.0, 30.0],
-                            egui::TextEdit::singleline(&mut self.input)
-                                .char_limit(limit)
-                                .font(egui::TextStyle::Monospace),
-                        );
-                        if response.changed()
-                            && let Some(vm) = &mut self.vm
-                        {
-                            let _ = vm.update_line_input(&self.input);
+                    ui.label(match request {
+                        Some(InputRequest::Line { .. }) => ">",
+                        Some(InputRequest::File { writing: true }) => language.text("ui.save_file"),
+                        Some(InputRequest::File { writing: false }) => {
+                            language.text("ui.open_file")
                         }
-                        enter = accept_input
-                            && (response.has_focus() || response.lost_focus())
-                            && ui.input(|input| input.key_pressed(egui::Key::Enter));
-                        // Re-requesting an existing focus interrupts IME in
-                        // egui 0.36 and can create a native IME/repaint loop.
-                        if accept_input && !ui.memory(|memory| memory.has_focus(response.id)) {
-                            response.request_focus();
-                        }
-                    } else {
-                        ui.label(language.text("ui.type_in_highlighted_field"));
+                        _ => "",
+                    });
+                    let limit = match request {
+                        Some(InputRequest::Line { maximum_length }) => maximum_length as usize,
+                        _ => usize::MAX,
+                    };
+                    let response = ui.add_sized(
+                        [ui.available_width() - 72.0, 30.0],
+                        egui::TextEdit::singleline(&mut self.input)
+                            .char_limit(limit)
+                            .font(egui::TextStyle::Monospace),
+                    );
+                    if response.changed()
+                        && let Some(vm) = &mut self.vm
+                    {
+                        let _ = vm.update_line_input(&self.input);
                     }
-                    let terminator =
-                        if accept_input && matches!(request, Some(InputRequest::Line { .. })) {
-                            self.vm.as_ref().and_then(|vm| {
-                                vm.line_terminators().iter().copied().find(|code| {
-                                    glk_terminator_key(*code)
-                                        .is_some_and(|key| ui.input(|input| input.key_pressed(key)))
-                                })
+                    let enter = accept_input
+                        && can_submit
+                        && (response.has_focus() || response.lost_focus())
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                    // Re-requesting an existing focus interrupts IME in
+                    // egui 0.36 and can create a native IME/repaint loop.
+                    if accept_input && !ui.memory(|memory| memory.has_focus(response.id)) {
+                        response.request_focus();
+                    }
+                    let terminator = if accept_input
+                        && can_submit
+                        && matches!(request, Some(InputRequest::Line { .. }))
+                    {
+                        self.vm.as_ref().and_then(|vm| {
+                            vm.line_terminators().iter().copied().find(|code| {
+                                glk_terminator_key(*code)
+                                    .is_some_and(|key| ui.input(|input| input.key_pressed(key)))
                             })
-                        } else {
-                            None
-                        };
+                        })
+                    } else {
+                        None
+                    };
                     if let Some(terminator) = terminator {
                         self.submit_terminated_input(terminator);
-                    } else if ui.button(language.text("ui.send")).clicked() || enter {
+                    } else if ui
+                        .add_enabled(can_submit, egui::Button::new(language.text("ui.send")))
+                        .clicked()
+                        || enter
+                    {
                         self.submit_input();
                     }
                 });
@@ -1109,10 +1267,22 @@ impl PlayerApp {
         }
         egui::Panel::bottom("status").show(root, |ui| {
             ui.horizontal(|ui| {
-                ui.small(language.message(&self.status));
+                ui.add(
+                    egui::Label::new(RichText::new(language.message(&self.status)).small())
+                        .truncate(),
+                );
+                if self.desktop_snapshot_too_large() {
+                    ui.small(language.text("ui.session_restore_off"))
+                        .on_hover_text(
+                            language.text("ui.this_story_is_too_large_for_automatic_session"),
+                        );
+                }
                 if let Some(path) = &self.story_path {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.small(path.display().to_string());
+                        ui.add(
+                            egui::Label::new(RichText::new(path.display().to_string()).small())
+                                .truncate(),
+                        );
                     });
                 }
             });
@@ -1123,7 +1293,7 @@ impl PlayerApp {
         let language = self.settings.language.resolve();
         let mut resource_selection = None;
         egui::Window::new(language.text("ui.story_resources"))
-            .id(egui::Id::new("ui.story_resources"))
+            .id(egui::Id::new("story-resources"))
             .open(&mut self.show_resources)
             .collapsible(false)
             .default_width(540.0)
@@ -1191,7 +1361,7 @@ impl PlayerApp {
                 ));
             }
             egui::Window::new(language.text("ui.story_information"))
-                .id(egui::Id::new("ui.story_information"))
+                .id(egui::Id::new("story-info"))
                 .open(&mut self.show_story_info)
                 .show(context, |ui| {
                     ui.heading(vm.story_title());
@@ -1236,7 +1406,7 @@ impl PlayerApp {
         if let Some(error) = self.error.clone() {
             let mut open = true;
             egui::Window::new(language.text("ui.glulx_error"))
-                .id(egui::Id::new("ui.glulx_error"))
+                .id(egui::Id::new("glulx-error"))
                 .collapsible(false)
                 .resizable(true)
                 .open(&mut open)
@@ -1250,109 +1420,17 @@ impl PlayerApp {
                 self.error = None;
             }
         }
-        egui::Window::new(language.text("ui.options_window"))
-            .id(egui::Id::new("ui.options"))
-            .open(&mut self.show_options)
-            .resizable(true)
-            .default_width(520.0)
-            .show(context, |ui| {
-                ui.label(language.text("ui.interface_language"));
-                egui::ComboBox::from_id_salt("interface-language")
-                    .selected_text(match self.settings.language {
-                        LanguagePreference::System => language.text("ui.follow_system"),
-                        LanguagePreference::English => language.text("language.english"),
-                        LanguagePreference::Chinese => language.text("language.chinese"),
-                    })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut self.settings.language,
-                            LanguagePreference::System,
-                            language.text("ui.follow_system"),
-                        );
-                        ui.selectable_value(
-                            &mut self.settings.language,
-                            LanguagePreference::English,
-                            language.text("language.english"),
-                        );
-                        ui.selectable_value(
-                            &mut self.settings.language,
-                            LanguagePreference::Chinese,
-                            language.text("language.chinese"),
-                        );
-                    });
-                ui.heading(language.text("ui.display"));
-                ui.add(
-                    egui::Slider::new(&mut self.settings.font_size, 12.0..=32.0)
-                        .text(language.text("ui.text_size")),
-                );
-                ui.label(language.text("ui.extra_fallback_font"));
-                ui.text_edit_singleline(&mut self.settings.fallback_font);
-                if ui.button(language.text("ui.apply_font")).clicked() {
-                    self.fonts = fonts::Fonts::new(context, &self.settings.fallback_font);
-                }
-                ui.weak(language.format("ui.fallback_fonts_loaded", &[&self.fonts.fallback_count]));
-                if let Some(error) = &self.fonts.error {
-                    ui.colored_label(Color32::from_rgb(170, 50, 45), language.message(error));
-                }
-                color_setting(ui, language.text("ui.text"), &mut self.settings.text_color);
-                color_setting(
-                    ui,
-                    language.text("ui.background"),
-                    &mut self.settings.background_color,
-                );
-                color_setting(
-                    ui,
-                    language.text("ui.hyperlinks"),
-                    &mut self.settings.hyperlink_color,
-                );
-                ui.checkbox(
-                    &mut self.settings.window_borders,
-                    language.text("ui.borders_between_game_windows"),
-                );
-                ui.checkbox(
-                    &mut self.settings.show_chrome,
-                    language.text("ui.menus_toolbar_and_status_bar"),
-                );
-                ui.separator();
-                ui.heading(language.text("ui.translation"));
-                ui.checkbox(
-                    &mut self.settings.translation.enabled,
-                    language.text("ui.enable_turn_translation"),
-                );
-                ui.label(language.text("ui.openai_compatible_endpoint"));
-                ui.text_edit_singleline(&mut self.settings.translation.endpoint);
-                ui.label(language.text("ui.model"));
-                ui.text_edit_singleline(&mut self.settings.translation.model);
-                ui.label(language.text("ui.target_language"));
-                ui.text_edit_singleline(&mut self.settings.translation.target_language);
-                ui.label(language.text("ui.api_key_kept_in_local_app_settings"));
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.settings.translation.api_key)
-                        .password(true),
-                );
-                ui.label(language.text("ui.system_prompt"));
-                ui.add(
-                    egui::TextEdit::multiline(&mut self.settings.translation.system_prompt)
-                        .desired_rows(4),
-                );
-            });
-        egui::Window::new(language.text("ui.scrollback"))
-            .id(egui::Id::new("ui.scrollback"))
-            .open(&mut self.show_scrollback)
-            .default_size([720.0, 560.0])
-            .show(context, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.label(&self.transcript);
-                });
-            });
         egui::Window::new(language.text("ui.about_glulx_player"))
-            .id(egui::Id::new("ui.about_glulx_player"))
+            .id(egui::Id::new("about-player"))
             .open(&mut self.show_about)
             .collapsible(false)
             .resizable(false)
             .show(context, |ui| {
                 ui.heading("Glulx Player 0.1.0");
-                ui.label(language.text("ui.a_pure_rust_glulx_vm_with_a_cross"));
+                ui.label(
+                    language
+                        .text("A pure Rust Glulx VM with a cross-platform graphical interface."),
+                );
                 ui.label(language.text("ui.vm_behavior_is_based_on_the_glulx_specification"));
                 ui.label(language.text("ui.the_interface_follows_the_windows_git_player_workflow"));
             });
@@ -1361,21 +1439,28 @@ impl PlayerApp {
 
 impl eframe::App for PlayerApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        eframe::set_value(storage, STORAGE_KEY, &self.settings);
+        let _stage = crate::diagnostics::stage("session-save");
+        crate::diagnostics::record(format_args!("session-save begin"));
+        if self.settings_file.save(&self.settings) {
+            storage.remove_string(STORAGE_KEY);
+        } else if self.settings_file.path.is_none() {
+            eframe::set_value(storage, STORAGE_KEY, &self.settings);
+        }
         if let Some(vm) = &self.vm {
             let _ = vm.flush_streams();
         }
         if let Some(vm) = &self.vm
             && vm.state() != RunState::Halted
+            && !self.desktop_snapshot_too_large()
         {
             let canvases = self
                 .graphics
                 .iter()
                 .map(|(&window, canvas)| SavedCanvas {
                     window,
-                    width: canvas.pixels.width(),
-                    height: canvas.pixels.height(),
-                    pixels: canvas.pixels.as_raw().clone(),
+                    width: canvas.size[0],
+                    height: canvas.size[1],
+                    pixels: canvas.rasterize().into_raw(),
                 })
                 .collect();
             eframe::set_value(
@@ -1391,8 +1476,14 @@ impl eframe::App for PlayerApp {
                 },
             );
         } else {
+            if self.desktop_snapshot_too_large() {
+                crate::diagnostics::record(format_args!(
+                    "session-save skipped: large snapshot; in-game saves remain available"
+                ));
+            }
             storage.set_string("glulx-session-v1", String::new());
         }
+        crate::diagnostics::record(format_args!("session-save end"));
     }
 
     fn auto_save_interval(&self) -> std::time::Duration {
@@ -1416,11 +1507,33 @@ impl eframe::App for PlayerApp {
     }
 
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let _stage = crate::diagnostics::stage("ui");
         let context = root.ctx().clone();
+        if self.pending_font_metrics {
+            // The new font definitions are active at this UI pass, after the
+            // settings window queued them in the preceding pass.
+            if let Some(vm) = &mut self.vm {
+                vm.set_text_metrics(self.fonts.metrics.clone());
+            }
+            self.pending_font_metrics = false;
+        }
+        if context.input_mut(|input| {
+            input.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::L)
+        }) {
+            self.settings.show_log_window = true;
+        }
+        if context.input_mut(|input| {
+            input.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::T)
+        }) {
+            self.settings.show_translation_window = true;
+        }
         if context.input(|input| {
             input.modifiers.ctrl && input.modifiers.alt && input.key_pressed(egui::Key::L)
         }) {
             self.settings.translation.enabled = !self.settings.translation.enabled;
+            if self.settings.translation.enabled {
+                self.settings.show_translation_window = true;
+            }
         }
         for path in context.input(|input| {
             input
@@ -1436,13 +1549,12 @@ impl eframe::App for PlayerApp {
             }
         }
         self.character_input(&context);
-        self.poll_graphics(&context);
         self.menu_bar(root);
 
         self.status_bar(root);
-        self.input_bar(root);
         self.story_view(root);
         self.dialogs(&context);
+        self.auxiliary_windows(&context);
         if let Some(path) = self
             .file_browser
             .show(&context, self.settings.language.resolve())
@@ -1461,6 +1573,23 @@ impl eframe::App for PlayerApp {
             .is_some_and(|vm| vm.state() == RunState::Running)
         {
             context.request_repaint();
+        }
+    }
+}
+
+/// Spend a short time budget advancing the story before presenting a frame.
+/// A fixed instruction quota makes faster builds/hardware waste most of each
+/// frame and exposes partially drawn game screens for many frames.
+fn run_vm_slice(vm: &mut Vm) -> Result<RunState, crate::VmError> {
+    let started = std::time::Instant::now();
+    let revision = vm.presentation_revision();
+    loop {
+        let state = vm.run_presentation_steps(1024)?;
+        if state != RunState::Running
+            || vm.presentation_revision() != revision
+            || started.elapsed() >= std::time::Duration::from_millis(8)
+        {
+            return Ok(state);
         }
     }
 }
@@ -1484,25 +1613,16 @@ fn rgb(value: [u8; 3]) -> Color32 {
 }
 
 fn ensure_canvas<'a>(
-    context: &egui::Context,
+    _context: &egui::Context,
     graphics: &'a mut BTreeMap<u32, DisplayedGraphics>,
     window: u32,
     size: [u32; 2],
     background: u32,
 ) -> &'a mut DisplayedGraphics {
-    let canvas = graphics.entry(window).or_insert_with(|| {
-        let mut canvas = DisplayedGraphics::new(context, window, size);
-        for pixel in canvas.pixels.pixels_mut() {
-            *pixel = rgba(background);
-        }
-        canvas
-    });
-    if canvas.pixels.dimensions() != (size[0].max(1), size[1].max(1)) {
-        let mut resized =
-            image::RgbaImage::from_pixel(size[0].max(1), size[1].max(1), rgba(background));
-        image::imageops::overlay(&mut resized, &canvas.pixels, 0, 0);
-        canvas.pixels = resized;
-    }
+    let canvas = graphics
+        .entry(window)
+        .or_insert_with(|| DisplayedGraphics::new(size, background));
+    canvas.resize(size, background);
     canvas
 }
 
@@ -1631,6 +1751,309 @@ mod tests {
     use super::*;
 
     #[test]
+    fn translation_views_append_until_clear_and_discard_unsubmitted_cleared_text() {
+        use crate::vm::TextBufferEvent::{Clear, Text};
+        let context = egui::Context::default();
+        let mut app = PlayerApp::new(&eframe::CreationContext::_new_kittest(context), None);
+        app.capture_translation_events(vec![Text {
+            window: 1,
+            text: "Tutorial.\n".into(),
+        }]);
+        app.finish_turn();
+        app.capture_translation_events(vec![Text {
+            window: 1,
+            text: "Action result.\n".into(),
+        }]);
+        app.finish_turn();
+        assert_eq!(
+            app.turns.iter().map(|turn| turn.view).collect::<Vec<_>>(),
+            [0, 0]
+        );
+        app.capture_translation_events(vec![
+            Text {
+                window: 1,
+                text: "Obsolete unseen output".into(),
+            },
+            Text {
+                window: 2,
+                text: "Other window.\n".into(),
+            },
+            Clear { window: 1 },
+            Text {
+                window: 1,
+                text: "Next screen.\n".into(),
+            },
+        ]);
+        app.finish_turn();
+        assert_eq!(app.turns[2].view, 1);
+        assert_eq!(app.turns[2].original, "Other window.\nNext screen.\n");
+        // An identical redraw is the same visible view, without extra history.
+        app.capture_translation_events(vec![
+            Clear { window: 1 },
+            Text {
+                window: 1,
+                text: app.turns[2].original.clone(),
+            },
+        ]);
+        app.finish_turn();
+        assert_eq!(app.turns.len(), 3);
+        app.capture_translation_events(vec![Text {
+            window: 1,
+            text: "More on this screen.\n".into(),
+        }]);
+        app.finish_turn();
+        assert_eq!(app.turns[3].view, 1);
+    }
+
+    #[test]
+    fn enabling_translation_does_not_backfill_history_or_buffered_old_text() {
+        let context = egui::Context::default();
+        let mut app = PlayerApp::new(&eframe::CreationContext::_new_kittest(context), None);
+        // Invalid URL prevents any network access if the regression submits.
+        app.settings.translation.endpoint.clear();
+        app.turn_buffer = "An old paragraph.".into();
+        app.finish_turn();
+        assert_eq!(app.turns[0].translation, TurnTranslation::NotRequested);
+        app.turn_buffer = "Old output before the next input wait.".into();
+        app.settings.translation.enabled = true;
+        app.poll_translations();
+        assert!(
+            app.pending_translations.is_empty(),
+            "enabling must not submit historical paragraphs"
+        );
+        assert!(
+            app.turn_buffer.is_empty(),
+            "pre-enable output must not enter the next request"
+        );
+        assert_eq!(app.turns[0].translation, TurnTranslation::NotRequested);
+        app.turn_buffer = "A new paragraph.".into();
+        app.finish_turn();
+        assert_eq!(app.turns[1].translation, TurnTranslation::Pending);
+        assert_eq!(
+            app.pending_translations
+                .values()
+                .copied()
+                .collect::<Vec<_>>(),
+            [1]
+        );
+    }
+
+    #[test]
+    fn toggling_capture_preserves_completed_and_pending_history() {
+        let context = egui::Context::default();
+        let mut app = PlayerApp::new(&eframe::CreationContext::_new_kittest(context), None);
+        app.turns = vec![
+            Turn {
+                view: 0,
+                original: "Earlier text".into(),
+                translation: TurnTranslation::Complete(Ok("Earlier translation".into())),
+            },
+            Turn {
+                view: 0,
+                original: "Not requested".into(),
+                translation: TurnTranslation::NotRequested,
+            },
+            Turn {
+                view: 0,
+                original: "Submitted text".into(),
+                translation: TurnTranslation::Pending,
+            },
+        ];
+        app.pending_translations.insert(7, 2);
+        let history = app.turns.clone();
+        for enabled in [true, false, true, false] {
+            app.settings.translation.enabled = enabled;
+            app.poll_translations();
+            assert_eq!(app.turns, history);
+            assert_eq!(app.pending_translations.get(&7), Some(&2));
+        }
+    }
+
+    #[test]
+    fn partial_story_output_stays_hidden_until_the_next_select_boundary() {
+        fn glk(code: &mut Vec<u8>, selector: u16, args: &[u32]) {
+            for arg in args.iter().rev() {
+                code.extend([0x40, 0x83]);
+                code.extend(arg.to_be_bytes());
+            }
+            code.extend([0x81, 0x30, 0x12, 0]);
+            code.extend(selector.to_be_bytes());
+            code.push(args.len() as u8);
+        }
+        let mut code = Vec::new();
+        glk(&mut code, 0x23, &[0, 0, 0, 3, 0]);
+        glk(&mut code, 0x2f, &[1]);
+        code.extend([0x81, 0x49, 0x11, 2, 0]); // Glk output
+        code.extend([0x70, 0x01, b'A']);
+        glk(&mut code, 0xc0, &[0x110]);
+        code.extend([0x70, 0x01, b'B']);
+        glk(&mut code, 0xc0, &[0x110]);
+        code.extend([0x81, 0x20]);
+        let context = egui::Context::default();
+        let mut app = PlayerApp::new(
+            &eframe::CreationContext::_new_kittest(context.clone()),
+            None,
+        );
+        app.vm = Some(
+            Vm::new(Story::from_bytes(&crate::vm::tests::image_with_program(&code), None).unwrap())
+                .unwrap(),
+        );
+        let text = |app: &PlayerApp| {
+            app.presented_views
+                .iter()
+                .flat_map(|view| &view.runs)
+                .map(|run| run.text.as_str())
+                .collect::<String>()
+        };
+        app.vm
+            .as_mut()
+            .unwrap()
+            .run_presentation_steps(200)
+            .unwrap();
+        app.publish_story(&context);
+        assert_eq!(text(&app), "A");
+        let vm = app.vm.as_mut().unwrap();
+        vm.resize_windows(900, 600); // deliver Arrange, then produce part of the next frame
+        assert_eq!(vm.run_steps(1).unwrap(), RunState::Running);
+        assert!(
+            vm.window_views()[0]
+                .runs
+                .iter()
+                .any(|run| run.text.contains('B'))
+        );
+        app.publish_story(&context);
+        assert_eq!(
+            text(&app),
+            "A",
+            "an execution budget is not a display boundary"
+        );
+        app.vm
+            .as_mut()
+            .unwrap()
+            .run_presentation_steps(200)
+            .unwrap();
+        app.publish_story(&context);
+        assert_eq!(text(&app), "AB");
+    }
+
+    #[test]
+    fn timed_vm_slice_yields_for_busy_stories_and_stops_at_halt() {
+        let story = |program: &[u8]| {
+            Story::from_bytes(&crate::vm::tests::image_with_program(program), None).unwrap()
+        };
+        let mut busy = Vm::new(story(&[0x81, 0x04, 0x02, 0, 0x43])).unwrap();
+        assert_eq!(run_vm_slice(&mut busy).unwrap(), RunState::Running);
+        let mut finished = Vm::new(story(&[0x81, 0x20])).unwrap();
+        assert_eq!(run_vm_slice(&mut finished).unwrap(), RunState::Halted);
+    }
+
+    #[test]
+    fn arrange_processing_keeps_input_and_story_geometry_stable() {
+        for submitted in [false, true] {
+            let program = [
+                0x40, 0x80, 0x40, 0x81, 3, 0x40, 0x80, 0x40, 0x80, 0x40, 0x80, 0x81, 0x30, 0x11, 0,
+                0x23, 5, // open text buffer
+                0x40, 0x80, 0x40, 0x81, 16, 0x40, 0x82, 1, 0x40, 0x40, 0x81, 1, 0x81, 0x30, 0x12,
+                0, 0, 0xd0, 4, // request line
+                0x40, 0x82, 1, 0x10, 0x81, 0x30, 0x12, 0, 0, 0xc0, 1, // select
+                0, 0, 0, 0, 0, // event handling spans multiple host frames
+                0x81, 0x20,
+            ];
+            let story =
+                Story::from_bytes(&crate::vm::tests::image_with_program(&program), None).unwrap();
+            let context = egui::Context::default();
+            let creation = eframe::CreationContext::_new_kittest(context.clone());
+            let mut app = PlayerApp::new(&creation, None);
+            let mut vm = Vm::new(story).unwrap();
+            // Drain the initial window-open Arrange, then stop at the line wait.
+            for _ in 0..40 {
+                if vm.run_steps(1).unwrap() == RunState::WaitingForLine {
+                    break;
+                }
+            }
+            assert_eq!(vm.state(), RunState::WaitingForLine);
+            app.vm = Some(vm);
+            let render = |app: &mut PlayerApp| {
+                let mut output = context.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(1100.0, 760.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |root| {
+                        eframe::App::ui(app, root, &mut eframe::Frame::_new_kittest());
+                    },
+                );
+                output.textures_delta.clear();
+                app.vm.as_ref().unwrap().window_views()[0].rect
+            };
+            let _ = render(&mut app);
+            let waiting_rect = render(&mut app);
+            if submitted {
+                app.vm.as_mut().unwrap().provide_input("look").unwrap();
+            }
+            assert_eq!(
+                app.vm.as_mut().unwrap().run_steps(0).unwrap(),
+                RunState::Running
+            );
+            for _ in 0..3 {
+                assert_eq!(
+                    render(&mut app),
+                    waiting_rect,
+                    "processing Arrange must not hide the input panel"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn large_blorb_does_not_serialize_a_blocking_desktop_snapshot() {
+        use eframe::{App, Storage};
+        #[derive(Default)]
+        struct Store(BTreeMap<String, String>);
+        impl Storage for Store {
+            fn get_string(&self, key: &str) -> Option<String> {
+                self.0.get(key).cloned()
+            }
+            fn set_string(&mut self, key: &str, value: String) {
+                self.0.insert(key.into(), value);
+            }
+            fn remove_string(&mut self, key: &str) {
+                self.0.remove(key);
+            }
+            fn flush(&mut self) {}
+        }
+        let image = crate::vm::tests::image_with_program(&[0x81, 0x20]);
+        let resources = vec![0; 16 * 1024 * 1024];
+        let blorb = crate::story::tests::resource_blorb(&[
+            ((*b"GLUL", Some((*b"Exec", 0))), &image),
+            ((*b"PNG ", Some((*b"Pict", 1))), &resources),
+        ]);
+        let context = egui::Context::default();
+        let mut app = PlayerApp::new(&eframe::CreationContext::_new_kittest(context), None);
+        app.vm = Some(Vm::new(Story::from_bytes(&blorb, None).unwrap()).unwrap());
+        let mut store = Store::default();
+        store.set_string("glulx-session-v1", "stale previous game".into());
+        app.save(&mut store);
+        assert!(
+            store.get_string("glulx-session-v1").unwrap().is_empty(),
+            "large snapshots must be skipped before serialization"
+        );
+        assert!(
+            store.get_string(STORAGE_KEY).is_some(),
+            "settings still persist"
+        );
+        assert_eq!(app.vm.as_ref().unwrap().state(), RunState::Running);
+        // Small stories retain the existing self-contained desktop format.
+        app.vm = Some(Vm::new(Story::from_bytes(&image, None).unwrap()).unwrap());
+        app.save(&mut store);
+        let session: Session = eframe::get_value(&store, "glulx-session-v1").unwrap();
+        assert!(session.vm.validate_session().is_ok());
+    }
+
+    #[test]
     fn recognizes_windows_git_story_extensions_case_insensitively() {
         assert!(is_story_path(Path::new("story.ULX")));
         assert!(is_story_path(Path::new("story.gblorb")));
@@ -1686,15 +2109,16 @@ mod tests {
         let context = egui::Context::default();
         let mut graphics = BTreeMap::new();
         let canvas = ensure_canvas(&context, &mut graphics, 1, [4, 3], 0x112233);
-        canvas.pixels.put_pixel(0, 0, rgba(0xabcdef));
-        canvas.pixels.put_pixel(3, 2, rgba(0x334455));
+        canvas.fill(&context, [0, 0, 1, 1], 0xabcdef);
+        canvas.fill(&context, [3, 2, 1, 1], 0x334455);
         // Resize twice without an intervening draw; clipped pixels must not
         // reappear, and only the newly exposed region gets the new background.
         ensure_canvas(&context, &mut graphics, 1, [2, 1], 0x556677);
         let canvas = ensure_canvas(&context, &mut graphics, 1, [4, 3], 0x778899);
-        assert_eq!(*canvas.pixels.get_pixel(0, 0), rgba(0xabcdef));
-        assert_eq!(*canvas.pixels.get_pixel(1, 0), rgba(0x112233));
-        assert_eq!(*canvas.pixels.get_pixel(2, 0), rgba(0x778899));
-        assert_eq!(*canvas.pixels.get_pixel(3, 2), rgba(0x778899));
+        let pixels = canvas.rasterize();
+        assert_eq!(*pixels.get_pixel(0, 0), rgba(0xabcdef));
+        assert_eq!(*pixels.get_pixel(1, 0), rgba(0x112233));
+        assert_eq!(*pixels.get_pixel(2, 0), rgba(0x778899));
+        assert_eq!(*pixels.get_pixel(3, 2), rgba(0x778899));
     }
 }

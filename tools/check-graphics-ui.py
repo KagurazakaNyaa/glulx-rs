@@ -71,7 +71,7 @@ def main():
     harness = module('check-input-ui')
     read_fd, write_fd = os.pipe()
     with (root / 'xvfb.log').open('w') as log:
-        xserver = subprocess.Popen(['Xvfb', '-displayfd', str(write_fd), '-screen', '0', '1280x900x24'],
+        xserver = subprocess.Popen(['Xvfb', '-noreset', '-displayfd', str(write_fd), '-screen', '0', '1280x900x24'],
                                    pass_fds=(write_fd,), stdout=log, stderr=log)
         os.close(write_fd)
         try:

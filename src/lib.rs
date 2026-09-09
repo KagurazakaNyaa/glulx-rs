@@ -1,4 +1,5 @@
 pub mod app;
+pub mod diagnostics;
 pub mod memory;
 mod picture;
 pub mod story;

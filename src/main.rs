@@ -5,19 +5,21 @@ use std::{ffi::OsString, path::PathBuf};
 use glulx_rs::app::PlayerApp;
 use glulx_rs::{ResourceSelection, Story, Vm};
 
-const USAGE: &str = "Usage: glulx-rs [--headless] [--resources PATH] [--no-auto-resources] [STORY]\n\n--headless          Play in the terminal (plain text when input or output is piped)\n--resources PATH    Use this Blorb archive or loose resource directory\n--no-auto-resources Disable discovery of same-name external resource archives\n--help              Show this help\n\nAn explicit --resources path takes priority over --no-auto-resources.";
+const USAGE: &str = "Usage: glulx-rs [--headless] [--diagnostics LOG] [--resources PATH] [--no-auto-resources] [STORY]\n\n--headless          Play in the terminal (plain text when input or output is piped)\n--diagnostics LOG   Write diagnostic heartbeats and slow operations to LOG\n--resources PATH    Use this Blorb archive or loose resource directory\n--no-auto-resources Disable discovery of same-name external resource archives\n--help              Show this help\n\nDebug builds default to ./glulx-debug.log; --diagnostics overrides it.\n\nAn explicit --resources path takes priority over --no-auto-resources.";
 
 #[derive(Debug)]
 struct Arguments {
     headless: bool,
     story: Option<PathBuf>,
     resources: ResourceSelection,
+    diagnostics: Option<PathBuf>,
 }
 
 fn parse_arguments(
     arguments: impl IntoIterator<Item = OsString>,
 ) -> Result<Option<Arguments>, String> {
     let mut arguments = arguments.into_iter();
+    let mut diagnostics = None;
     let (mut headless, mut story, mut explicit, mut automatic, mut positional) =
         (false, None, None, true, false);
     while let Some(argument) = arguments.next() {
@@ -27,6 +29,13 @@ fn parse_arguments(
             positional = true;
         } else if !positional && argument == "--headless" {
             headless = true;
+        } else if !positional && argument == "--diagnostics" {
+            let path = arguments
+                .next()
+                .ok_or("--diagnostics requires a log path")?;
+            if diagnostics.replace(PathBuf::from(path)).is_some() {
+                return Err("Specify --diagnostics only once".to_owned());
+            }
         } else if !positional && argument == "--no-auto-resources" {
             automatic = false;
         } else if !positional && argument == "--resources" {
@@ -48,6 +57,8 @@ fn parse_arguments(
     }
     Ok(Some(Arguments {
         headless,
+        diagnostics: diagnostics
+            .or_else(|| cfg!(debug_assertions).then(|| PathBuf::from("glulx-debug.log"))),
         story,
         resources: explicit.map_or_else(
             || {
@@ -76,6 +87,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("{USAGE}");
         return Ok(());
     };
+    if let Some(path) = &arguments.diagnostics {
+        glulx_rs::diagnostics::start(path)?;
+    }
     if arguments.headless {
         let story = Story::open_with_resources(arguments.story.unwrap(), arguments.resources)?;
         return glulx_rs::terminal::run(Vm::new(story)?);
@@ -124,6 +138,25 @@ mod tests {
 
     fn parse(arguments: &[&str]) -> Result<Option<Arguments>, String> {
         parse_arguments(arguments.iter().map(OsString::from))
+    }
+
+    #[test]
+    fn debug_builds_default_to_a_log_in_the_working_directory() {
+        let args = parse(&["game.gblorb"]).unwrap().unwrap();
+        let expected = cfg!(debug_assertions).then(|| PathBuf::from("glulx-debug.log"));
+        assert_eq!(args.diagnostics, expected);
+    }
+
+    #[test]
+    fn diagnostics_accepts_a_log_path_and_rejects_ambiguous_options() {
+        let args = parse(&["--diagnostics", "player log.txt", "game.gblorb"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(args.diagnostics, Some(PathBuf::from("player log.txt")));
+        assert_eq!(args.story, Some(PathBuf::from("game.gblorb")));
+        assert!(!args.headless);
+        assert!(parse(&["--diagnostics"]).is_err());
+        assert!(parse(&["--diagnostics", "a", "--diagnostics", "b"]).is_err());
     }
 
     #[test]
