@@ -5,19 +5,28 @@ use image::{ImageReader, RgbaImage};
 
 // Glk permits unavailable resources to fail. Bound decoded resources, not the
 // requested draw size: a huge scaled image may have a tiny visible portion.
-const MAX_PIXELS: u64 = 16 * 1024 * 1024;
 
+#[cfg(test)]
 pub(crate) fn decode(data: &[u8]) -> image::ImageResult<RgbaImage> {
+    decode_with_limit(data, 64 * 1024 * 1024)
+}
+
+pub(crate) fn decode_with_limit(data: &[u8], maximum: u64) -> image::ImageResult<RgbaImage> {
     let reader = || ImageReader::new(Cursor::new(data)).with_guessed_format();
     let (width, height) = reader()?.into_dimensions()?;
-    if width == 0 || height == 0 || u64::from(width) * u64::from(height) > MAX_PIXELS {
+    if width == 0
+        || height == 0
+        || (u64::from(width) * u64::from(height))
+            .checked_mul(4)
+            .is_none_or(|bytes| bytes > maximum)
+    {
         return Err(image::ImageError::Limits(
             image::error::LimitError::from_kind(image::error::LimitErrorKind::InsufficientMemory),
         ));
     }
     let mut reader = reader()?;
     let mut limits = image::Limits::default();
-    limits.max_alloc = Some(MAX_PIXELS * 8);
+    limits.max_alloc = Some(maximum.saturating_mul(2));
     reader.limits(limits);
     Ok(reader.decode()?.to_rgba8())
 }
@@ -102,6 +111,16 @@ pub(crate) fn draw_scaled_clipped(
 mod tests {
     use super::*;
     use image::Rgba;
+
+    #[test]
+    fn decoded_image_limit_checks_rgba_size_before_decoding() {
+        let pixels = RgbaImage::new(4, 4);
+        let mut data = Cursor::new(Vec::new());
+        pixels.write_to(&mut data, image::ImageFormat::Png).unwrap();
+        assert!(decode_with_limit(data.get_ref(), 63).is_err());
+        assert_eq!(decode_with_limit(data.get_ref(), 64).unwrap().len(), 64);
+        assert!(decode_with_limit(data.get_ref(), 0).is_err());
+    }
 
     #[test]
     fn huge_scaled_images_clip_to_visible_pixels_and_blend_alpha() {

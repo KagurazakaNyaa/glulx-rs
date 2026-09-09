@@ -213,7 +213,14 @@ impl Vm {
     pub(super) fn picture_dimensions(&mut self, resource: u32) -> Option<[u32; 2]> {
         *self.image_info.entry(resource).or_insert_with(|| {
             let data = self.story.resource(*b"Pict", resource)?;
-            let decoded = std::sync::Arc::new(crate::picture::decode(data).ok()?);
+            let decoded = std::sync::Arc::new(
+                crate::picture::decode_with_limit(
+                    data,
+                    crate::memory::ResourceLimits::bytes(self.resource_limits.decoded_image_mib)
+                        as u64,
+                )
+                .ok()?,
+            );
             let size = [decoded.width(), decoded.height()];
             // Keep only the most recent validation result, not every image
             // queried by a game that scans its resource catalog at startup.

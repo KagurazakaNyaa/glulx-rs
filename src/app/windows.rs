@@ -185,6 +185,83 @@ impl PlayerApp {
             self.settings.text_color,
             self.settings.background_color,
         );
+        match startup_snapshot() {
+            Ok(snapshot) => {
+                ui.label(language.format(
+                    "ui.memory_startup_base",
+                    &[
+                        &language.text(snapshot.source),
+                        &format!(
+                            "{:.1}",
+                            snapshot.bytes as f64 / crate::memory_budget::MIB as f64
+                        ),
+                    ],
+                ));
+            }
+            Err(error) => {
+                ui.weak(error);
+            }
+        }
+        memory_budget_editor(
+            ui,
+            language,
+            "ui.max_memory_mib",
+            &mut self.settings.max_memory_mib,
+            true,
+            self.memory_overrides.game,
+        );
+        for (label, flag, value) in [
+            (
+                "ui.undo_memory_mib",
+                "--max-undo-memory",
+                &mut self.settings.resource_limits.undo_mib,
+            ),
+            (
+                "ui.graphics_cache_mib",
+                "--max-graphics-cache",
+                &mut self.settings.resource_limits.graphics_cache_mib,
+            ),
+            (
+                "ui.text_image_cache_mib",
+                "--max-text-image-cache",
+                &mut self.settings.resource_limits.text_image_cache_mib,
+            ),
+            (
+                "ui.decoded_image_mib",
+                "--max-decoded-image",
+                &mut self.settings.resource_limits.decoded_image_mib,
+            ),
+            (
+                "ui.audio_resource_mib",
+                "--max-audio-resource",
+                &mut self.settings.resource_limits.audio_resource_mib,
+            ),
+            (
+                "ui.song_pcm_mib",
+                "--max-song-pcm",
+                &mut self.settings.resource_limits.song_pcm_mib,
+            ),
+        ] {
+            memory_budget_editor(
+                ui,
+                language,
+                label,
+                value,
+                false,
+                self.memory_overrides.resources.get(flag).copied(),
+            );
+        }
+        ui.weak(language.text("ui.max_memory_hint"));
+        memory_budget_editor(
+            ui,
+            language,
+            "ui.process_memory_mib",
+            &mut self.settings.max_process_memory_mib,
+            false,
+            self.memory_overrides.process,
+        );
+        ui.weak(language.text("ui.process_memory_hint"));
+        ui.separator();
         ui.heading(language.text("ui.display"));
         ui.add(
             egui::Slider::new(&mut self.settings.font_size, 12.0..=32.0)
@@ -434,6 +511,89 @@ fn optional_translation_parameter<T: egui::emath::Numeric>(
                     .range(range)
                     .speed(if T::INTEGRAL { 1.0 } else { 0.01 }),
             );
+        }
+    });
+}
+
+fn memory_budget_editor(
+    ui: &mut egui::Ui,
+    language: Language,
+    label: &str,
+    budget: &mut Budget,
+    game: bool,
+    override_value: Option<Budget>,
+) {
+    ui.push_id(label, |ui| {
+        ui.label(language.text(label));
+        ui.horizontal(|ui| {
+            let mut percentage = matches!(budget, Budget::Percent { .. });
+            egui::ComboBox::from_id_salt("mode")
+                .selected_text(language.text(if percentage {
+                    "ui.memory_percentage"
+                } else {
+                    "ui.memory_fixed"
+                }))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut percentage, false, language.text("ui.memory_fixed"));
+                    ui.selectable_value(
+                        &mut percentage,
+                        true,
+                        language.text("ui.memory_percentage"),
+                    );
+                });
+            if percentage != matches!(budget, Budget::Percent { .. }) {
+                *budget = if percentage {
+                    Budget::Percent { percent: 25 }
+                } else {
+                    Budget::Fixed(
+                        (budget
+                            .resolve(startup_snapshot())
+                            .unwrap_or(1024 * crate::memory_budget::MIB)
+                            / crate::memory_budget::MIB)
+                            .min(u64::from(u32::MAX)) as u32,
+                    )
+                };
+            }
+            match budget {
+                Budget::Fixed(mib) => {
+                    ui.add(
+                        egui::DragValue::new(mib)
+                            .range(u32::from(game)..=if game { 4096 } else { u32::MAX })
+                            .suffix(" MiB"),
+                    );
+                }
+                Budget::Percent { percent } => {
+                    ui.add(egui::DragValue::new(percent).range(1..=100).suffix(" %"));
+                }
+            }
+        });
+        let effective = override_value.unwrap_or(*budget);
+        let resolved = if game {
+            effective.vm_bytes(startup_snapshot()).map(u64::from)
+        } else if label == "ui.process_memory_mib" {
+            effective.resolve(startup_snapshot())
+        } else {
+            effective
+                .resource_mib(startup_snapshot())
+                .map(|mib| u64::from(mib) * crate::memory_budget::MIB)
+        };
+        match resolved {
+            Ok(bytes) => {
+                ui.weak(language.format(
+                    if override_value.is_some() {
+                        "ui.memory_cli_effective"
+                    } else {
+                        "ui.memory_effective"
+                    },
+                    &[&format!(
+                        "{:.1}",
+                        bytes as f64 / crate::memory_budget::MIB as f64
+                    )],
+                ));
+            }
+            Err(error) => {
+                ui.colored_label(egui::Color32::RED, error);
+            }
         }
     });
 }

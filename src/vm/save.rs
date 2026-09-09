@@ -95,7 +95,7 @@ impl Vm {
             .or_else(|| chunks.get(b"UMem".as_slice()))
             .ok_or(VmError::InvalidSave)?;
         let size = word(bytes, 0)?;
-        let mut memory = Memory::new(&self.story);
+        let mut memory = Memory::new_with_limit(&self.story, self.memory.maximum())?;
         if !memory.resize(size)? {
             return Err(VmError::InvalidSave);
         }
@@ -207,7 +207,7 @@ impl Vm {
             }
             _ => {}
         }
-        self.memory.restore(&memory, self.protection);
+        self.memory.restore(&memory, self.protection)?;
         self.stack = stack;
         self.pc = pc;
         self.heap_next = heap_next;

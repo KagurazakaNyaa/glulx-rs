@@ -51,9 +51,10 @@ terminal column display as `?` and report CannotPrint; Unicode input/file data i
 
 ## Limits
 
-VM memory is limited to 256 MiB. Undo retains at most 16 snapshots within a
-64 MiB estimated budget counting memory, stack and story image; heap-index and
-allocator overhead are excluded. Older snapshots are evicted and an oversized save
+VM memory defaults to 1024 MiB and is configurable. Undo retains at most 16 snapshots
+within a configurable payload budget (default 256 MiB), counting memory, initial images,
+stacks and heap records; allocator/container overhead is excluded. See the
+[separate resource and process limits](../README.md#performance-and-memory-limits). Older snapshots are evicted and an oversized save
 fails. setmemsize/malloc handle their configured limits and memory reservation
 failures; this is not a general promise of recovering from every process allocation failure.
 Portable IFZS excludes Glk, RNG, I/O system and string-table state as required;
@@ -64,8 +65,8 @@ Text buffers support all five image alignments, margin flow breaks, image hyperl
 and Glk 0.7.6 dynamic width/aspect/maximum-width rules. Graphics-window images retain
 their dimensions at draw time; scaling samples only visible canvas pixels, including
 very large unsigned target sizes. PNG/JPEG resources are fully decoded before a
-successful Glk image result. Decoded sources are limited to 16 megapixels with a
-128 MiB decoder allocation budget; unavailable images report failure. RDes text
+successful Glk image result. Decoded sources default to a configurable 256 MiB RGBA output limit, with a
+decoder allocation budget twice the output limit; unavailable images report failure. RDes text
 alternatives are available in Story information. Text-buffer style hints 0–9 are supported; paragraph
 indentation/hanging indents and all four justification modes are implemented. Grid
 cells retain style and hyperlinks; grid layout hints 0–3/6 are ignored to keep equal
@@ -89,7 +90,7 @@ codec/encoding combination has a fixture. The optional legacy SONG format resolv
 shared `SND<number>` AIFF samples, including SSND offsets and MARK/INST sustain loops
 (no loop, forward and ping-pong). Samples become 16-bit mono (channels averaged,
 low bits discarded for higher bit depths); pitch follows MOD period/finetune.
-SONG structure is limited to 1 MiB and distinct decoded samples to 32 MiB total.
+SONG uses the configurable encoded audio-resource limit (default 256 MiB) and PCM budget (default 128 MiB).
 Missing/invalid references fail; repeat, pause, notification and restore use the common audio path.
 
 File streams preserve encoded-byte positions and Unicode overwrite semantics, with

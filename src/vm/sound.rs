@@ -47,6 +47,7 @@ impl Source for AlignedSounds {
     }
 }
 
+#[cfg(test)]
 fn decode_sound<'a>(
     bytes: &[u8],
     format: [u8; 4],
@@ -54,9 +55,37 @@ fn decode_sound<'a>(
     offset_ms: u64,
     resource: impl FnMut(u32) -> Option<&'a [u8]>,
 ) -> Option<Box<dyn Source<Item = f32> + Send>> {
+    decode_sound_with_limits(
+        bytes,
+        format,
+        repeats,
+        offset_ms,
+        resource,
+        Default::default(),
+    )
+}
+
+fn decode_sound_with_limits<'a>(
+    bytes: &[u8],
+    format: [u8; 4],
+    repeats: u32,
+    offset_ms: u64,
+    resource: impl FnMut(u32) -> Option<&'a [u8]>,
+    limits: crate::memory::ResourceLimits,
+) -> Option<Box<dyn Source<Item = f32> + Send>> {
+    if bytes.len() > crate::memory::ResourceLimits::bytes(limits.audio_resource_mib) {
+        return None;
+    }
     if matches!(&format, b"MOD " | b"SONG") {
         let mut source = if format == *b"SONG" {
-            tracker::ModSource::from_module(song::assemble(bytes, resource)?, repeats)
+            tracker::ModSource::from_module(
+                song::assemble_with_limit(
+                    bytes,
+                    resource,
+                    crate::memory::ResourceLimits::bytes(limits.song_pcm_mib),
+                )?,
+                repeats,
+            )
         } else {
             tracker::ModSource::new(bytes, repeats)?
         };
@@ -223,12 +252,24 @@ impl Vm {
         }
         let bytes = self.story.sound_resource(resource).ok_or(())?;
         let format = self.story.resource_type(*b"Snd ", resource).ok_or(())?;
-        let source = decode_sound(bytes, format, repeats, offset_ms, |number| {
-            if self.story.resource_type(*b"Snd ", number)? != *b"FORM" {
-                return None;
-            }
-            self.story.sound_resource(number)
-        })
+        let source = decode_sound_with_limits(
+            bytes,
+            format,
+            repeats,
+            offset_ms,
+            |number| {
+                if self.story.resource_type(*b"Snd ", number)? != *b"FORM" {
+                    return None;
+                }
+                self.story.sound_resource(number).filter(|data| {
+                    data.len()
+                        <= crate::memory::ResourceLimits::bytes(
+                            self.resource_limits.audio_resource_mib,
+                        )
+                })
+            },
+            self.resource_limits,
+        )
         .ok_or(())?;
         let (sink, output) = Sink::new();
         sink.set_volume(channel.volume as f32 / 65536.0);

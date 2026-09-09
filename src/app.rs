@@ -1,3 +1,4 @@
+use crate::memory_budget::{Budget, MemoryPolicy, Overrides, ResourceBudgets, startup_snapshot};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
@@ -34,6 +35,9 @@ const MAX_DESKTOP_SNAPSHOT_BYTES: usize = 16 * 1024 * 1024;
 #[serde(default)]
 pub struct PlayerSettings {
     pub language: LanguagePreference,
+    pub max_memory_mib: Budget,
+    pub max_process_memory_mib: Budget,
+    pub resource_limits: ResourceBudgets,
     pub font_size: f32,
     pub fallback_font: String,
     pub system_font: String,
@@ -51,6 +55,9 @@ impl Default for PlayerSettings {
     fn default() -> Self {
         Self {
             language: LanguagePreference::System,
+            max_memory_mib: MemoryPolicy::default().max_memory_mib,
+            max_process_memory_mib: Budget::Fixed(0),
+            resource_limits: ResourceBudgets::default(),
             font_size: 18.0,
             fallback_font: String::new(),
             system_font: String::new(),
@@ -207,6 +214,7 @@ impl FileBrowser {
 
 pub struct PlayerApp {
     settings: PlayerSettings,
+    memory_overrides: Overrides,
     settings_file: settings_file::SettingsFile,
     vm: Option<Vm>,
     story_path: Option<PathBuf>,
@@ -280,6 +288,16 @@ impl PlayerApp {
         initial_story: Option<PathBuf>,
         selection: ResourceSelection,
     ) -> Self {
+        Self::new_with_memory_policy(creation, initial_story, selection, Overrides::default())
+    }
+
+    pub fn new_with_memory_policy(
+        creation: &eframe::CreationContext<'_>,
+        initial_story: Option<PathBuf>,
+        selection: ResourceSelection,
+        memory_overrides: Overrides,
+    ) -> Self {
+        let _ = startup_snapshot();
         let _stage = crate::diagnostics::stage("create-app-or-restore-session");
         let mut gpu_canvas = false;
         if let Some(gl) = &creation.gl {
@@ -314,6 +332,7 @@ impl PlayerApp {
         let mut app = Self {
             translation_capture_enabled: settings.translation.enabled,
             settings,
+            memory_overrides,
             settings_file,
             vm: None,
             story_path: None,
@@ -362,7 +381,14 @@ impl PlayerApp {
             .and_then(|storage| eframe::get_value::<Session>(storage, "glulx-session-v1"))
             && session.version == 1
         {
-            match session.vm.validate_session() {
+            match (|| {
+                let mut vm = session.vm;
+                let policy = app.memory_policy();
+                vm.set_resource_limits(policy.resource_limits.resolve(startup_snapshot())?);
+                vm.set_memory_limit(policy.max_memory_mib.vm_bytes(startup_snapshot())?)
+                    .map_err(|error| error.to_string())?;
+                vm.validate_session().map_err(|error| error.to_string())
+            })() {
                 Ok(mut vm) => {
                     vm.enable_audio();
                     vm.resume_timer(session.timer);
@@ -392,15 +418,31 @@ impl PlayerApp {
         app
     }
 
+    fn memory_policy(&self) -> MemoryPolicy {
+        self.memory_overrides.apply(MemoryPolicy {
+            max_memory_mib: self.settings.max_memory_mib,
+            max_process_memory_mib: self.settings.max_process_memory_mib,
+            resource_limits: self.settings.resource_limits,
+        })
+    }
+
     fn load_story(&mut self, path: PathBuf) {
         self.load_story_with_resources(path, ResourceSelection::Auto);
     }
 
     fn load_story_with_resources(&mut self, path: PathBuf, selection: ResourceSelection) {
         let _stage = crate::diagnostics::stage("load-story");
-        let loaded = Story::open_with_resources(&path, selection)
-            .map_err(|error| error.to_string())
-            .and_then(|story| Vm::new(story).map_err(|error| error.to_string()));
+        let loaded = (|| -> Result<Vm, String> {
+            let policy = self.memory_policy();
+            let maximum = policy.max_memory_mib.vm_bytes(startup_snapshot())?;
+            let resources = policy.resource_limits.resolve(startup_snapshot())?;
+            let story =
+                Story::open_with_resources(&path, selection).map_err(|error| error.to_string())?;
+            let mut vm =
+                Vm::new_with_memory_limit(story, maximum).map_err(|error| error.to_string())?;
+            vm.set_resource_limits(resources);
+            Ok(vm)
+        })();
         match loaded {
             Ok(mut vm) => {
                 vm.enable_audio();
@@ -632,6 +674,11 @@ impl PlayerApp {
 
     fn poll_graphics(&mut self, context: &egui::Context) {
         let _stage = crate::diagnostics::stage("graphics");
+        let limits = self
+            .vm
+            .as_ref()
+            .map(Vm::resource_limits)
+            .unwrap_or_default();
         let requests = self.vm.as_mut().map(Vm::take_graphics).unwrap_or_default();
         let dirty = &mut self.dirty_graphics;
         for request in requests {
@@ -661,7 +708,12 @@ impl PlayerApp {
                             source.clone()
                         } else {
                             match request.decoded.map(Ok).unwrap_or_else(|| {
-                                crate::picture::decode(&request.data).map(std::sync::Arc::new)
+                                crate::picture::decode_with_limit(
+                                    &request.data,
+                                    crate::memory::ResourceLimits::bytes(limits.decoded_image_mib)
+                                        as u64,
+                                )
+                                .map(std::sync::Arc::new)
                             }) {
                                 Ok(decoded) => {
                                     let source = canvas::ImageAsset::new(context, decoded);
@@ -670,9 +722,11 @@ impl PlayerApp {
                                     while self
                                         .image_cache
                                         .values()
-                                        .map(|(asset, _)| asset.pixels.as_raw().len())
+                                        .map(|(asset, _)| asset.byte_len())
                                         .sum::<usize>()
-                                        > 128 * 1024 * 1024
+                                        > crate::memory::ResourceLimits::bytes(
+                                            limits.graphics_cache_mib,
+                                        )
                                     {
                                         let oldest = *self
                                             .image_cache
@@ -1354,7 +1408,11 @@ impl PlayerApp {
             let metadata = vm.metadata();
             if self.cover.is_none()
                 && let Some(data) = vm.cover()
-                && let Ok(pixels) = crate::picture::decode(data)
+                && let Ok(pixels) = crate::picture::decode_with_limit(
+                    data,
+                    crate::memory::ResourceLimits::bytes(vm.resource_limits().decoded_image_mib)
+                        as u64,
+                )
             {
                 self.cover = Some(context.load_texture(
                     "story-cover",
@@ -1751,6 +1809,36 @@ fn glk_terminator_key(code: u32) -> Option<egui::Key> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gui_cli_memory_overrides_do_not_change_persisted_settings() {
+        let context = egui::Context::default();
+        let overrides = Overrides {
+            game: Some(Budget::Fixed(2048)),
+            process: Some(Budget::Percent { percent: 75 }),
+            resources: [("--max-undo-memory".to_owned(), Budget::Fixed(8192))].into(),
+        };
+        let app = PlayerApp::new_with_memory_policy(
+            &eframe::CreationContext::_new_kittest(context),
+            None,
+            ResourceSelection::Auto,
+            overrides,
+        );
+        let effective = app.memory_policy();
+        assert_eq!(effective.max_memory_mib, Budget::Fixed(2048));
+        assert_eq!(effective.resource_limits.undo_mib, Budget::Fixed(8192));
+        assert_eq!(
+            app.settings.max_memory_mib,
+            MemoryPolicy::default().max_memory_mib
+        );
+        assert_eq!(app.settings.max_process_memory_mib, Budget::Fixed(0));
+        let saved: PlayerSettings =
+            serde_json::from_slice(&serde_json::to_vec(&app.settings).unwrap()).unwrap();
+        assert_eq!(
+            saved.resource_limits.undo_mib,
+            ResourceBudgets::default().undo_mib
+        );
+    }
 
     #[test]
     fn translation_views_append_until_clear_and_discard_unsubmitted_cleared_text() {

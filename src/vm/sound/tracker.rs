@@ -229,6 +229,20 @@ mod tests {
     fn blorb_mod_chunk_uses_the_tracker_decoder() {
         let bytes = module();
         assert!(super::super::decode_sound(&bytes, *b"MOD ", 1, 0, |_| None).is_some());
+        assert!(
+            super::super::decode_sound_with_limits(
+                &bytes,
+                *b"MOD ",
+                1,
+                0,
+                |_| None,
+                crate::memory::ResourceLimits {
+                    audio_resource_mib: 0,
+                    ..Default::default()
+                }
+            )
+            .is_none()
+        );
         assert!(super::super::decode_sound(&bytes, *b"OGGV", 1, 0, |_| None).is_none());
         assert!(super::super::decode_sound(&bytes[..600], *b"MOD ", 1, 0, |_| None).is_none());
     }

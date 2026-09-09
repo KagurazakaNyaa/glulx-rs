@@ -8,26 +8,48 @@ use super::{PlayerSettings, color_word, rgb, texture_image};
 use crate::{Vm, vm::WindowView};
 
 #[derive(Default)]
-pub(super) struct ImageCache(HashMap<u32, Option<egui::TextureHandle>>);
+pub(super) struct ImageCache {
+    entries: HashMap<u32, (egui::TextureHandle, u64)>,
+    bytes: usize,
+    tick: u64,
+}
 
 impl ImageCache {
     pub fn clear(&mut self) {
-        self.0.clear();
+        self.entries.clear();
+        self.bytes = 0;
     }
 
-    fn get(&mut self, ui: &egui::Ui, vm: &Vm, resource: u32) -> Option<&egui::TextureHandle> {
-        self.0
-            .entry(resource)
-            .or_insert_with(|| {
-                let bytes = vm.image_resource(resource)?;
-                let pixels = crate::picture::decode(bytes).ok()?;
-                Some(ui.ctx().load_texture(
-                    format!("glk-buffer-image-{resource}"),
-                    texture_image(ui.ctx(), &pixels),
-                    egui::TextureOptions::LINEAR,
-                ))
-            })
-            .as_ref()
+    fn get(&mut self, ui: &egui::Ui, vm: &Vm, resource: u32) -> Option<egui::TextureHandle> {
+        self.tick += 1;
+        if let Some((texture, used)) = self.entries.get_mut(&resource) {
+            *used = self.tick;
+            return Some(texture.clone());
+        }
+        let limits = vm.resource_limits();
+        let bytes = vm.image_resource(resource)?;
+        let pixels = crate::picture::decode_with_limit(
+            bytes,
+            crate::memory::ResourceLimits::bytes(limits.decoded_image_mib) as u64,
+        )
+        .ok()?;
+        let texture = ui.ctx().load_texture(
+            format!("glk-buffer-image-{resource}"),
+            texture_image(ui.ctx(), &pixels),
+            egui::TextureOptions::LINEAR,
+        );
+        let cost = texture.size()[0] * texture.size()[1] * 4;
+        let budget = crate::memory::ResourceLimits::bytes(limits.text_image_cache_mib);
+        if cost <= budget {
+            while self.bytes + cost > budget {
+                let oldest = *self.entries.iter().min_by_key(|(_, (_, used))| *used)?.0;
+                let (removed, _) = self.entries.remove(&oldest)?;
+                self.bytes -= removed.size()[0] * removed.size()[1] * 4;
+            }
+            self.bytes += cost;
+            self.entries.insert(resource, (texture.clone(), self.tick));
+        }
+        Some(texture)
     }
 }
 
@@ -896,5 +918,53 @@ mod tests {
             });
         });
         output.drop_without_applying_deltas();
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    #[test]
+    fn text_image_cache_evicts_payloads_and_zero_disables_retention() {
+        let image = crate::vm::tests::image_with_program(&[0x81, 0x20]);
+        let pixels = image::RgbaImage::new(512, 512);
+        let mut png = std::io::Cursor::new(Vec::new());
+        pixels.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let blorb = crate::story::tests::resource_blorb(&[
+            ((*b"GLUL", Some((*b"Exec", 0))), &image),
+            ((*b"PNG ", Some((*b"Pict", 1))), png.get_ref()),
+            ((*b"PNG ", Some((*b"Pict", 2))), png.get_ref()),
+        ]);
+        let mut vm = Vm::new(crate::Story::from_bytes(&blorb, None).unwrap()).unwrap();
+        vm.set_resource_limits(crate::memory::ResourceLimits {
+            text_image_cache_mib: 1,
+            ..Default::default()
+        });
+        let context = egui::Context::default();
+        let mut cache = ImageCache::default();
+        let mut output = context.run_ui(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                assert!(cache.get(ui, &vm, 1).is_some());
+                assert!(cache.get(ui, &vm, 2).is_some());
+                assert_eq!(cache.bytes, 1024 * 1024);
+                assert!(!cache.entries.contains_key(&1));
+                assert!(cache.entries.contains_key(&2));
+            });
+        });
+        output.textures_delta.clear();
+        cache.clear();
+        vm.set_resource_limits(crate::memory::ResourceLimits {
+            text_image_cache_mib: 0,
+            ..Default::default()
+        });
+        let mut output = context.run_ui(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                assert!(cache.get(ui, &vm, 1).is_some());
+                assert_eq!(cache.bytes, 0);
+                assert!(cache.entries.is_empty());
+            });
+        });
+        output.textures_delta.clear();
     }
 }

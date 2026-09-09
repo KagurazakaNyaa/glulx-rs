@@ -9,7 +9,9 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use xmrs::prelude::{InstrumentType, LoopType, Module, SampleDataType};
 
+#[cfg(test)]
 const MAX_SONG_BYTES: usize = 1024 * 1024;
+#[cfg(test)]
 const MAX_PCM_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Clone)]
@@ -20,13 +22,22 @@ struct AiffSample {
     loop_length: u32,
 }
 
+#[cfg(test)]
 pub(super) fn assemble<'a>(
     bytes: &[u8],
+    resource: impl FnMut(u32) -> Option<&'a [u8]>,
+) -> Option<Module> {
+    assemble_with_limit(bytes, resource, MAX_PCM_BYTES)
+}
+
+pub(super) fn assemble_with_limit<'a>(
+    bytes: &[u8],
     mut resource: impl FnMut(u32) -> Option<&'a [u8]>,
+    maximum: usize,
 ) -> Option<Module> {
     let (mut module, references) = template(bytes)?;
     let mut samples = BTreeMap::<u32, AiffSample>::new();
-    let mut budget = MAX_PCM_BYTES;
+    let mut budget = maximum;
     for (instrument, reference) in module.instrument.iter_mut().zip(references) {
         let Some(number) = reference else { continue };
         if let std::collections::btree_map::Entry::Vacant(entry) = samples.entry(number) {
@@ -74,9 +85,6 @@ fn reference(name: &[u8]) -> Option<Option<u32>> {
 }
 
 fn template(bytes: &[u8]) -> Option<(Module, Vec<Option<u32>>)> {
-    if bytes.len() > MAX_SONG_BYTES {
-        return None;
-    }
     // Try tagged 31-sample and original 15-sample MOD layouts. The importer
     // validates the actual signature, order table and pattern lengths; its
     // instrument count must agree with the header fields we cleared.
@@ -268,6 +276,41 @@ mod tests {
     }
 
     #[test]
+    fn song_larger_than_old_file_cap_uses_configured_resource_budget() {
+        let mut song = fixtures::song(&[("SND42", 0, 64)]);
+        song.resize(1024 * 1024 + 1, 0);
+        let instrument = fixtures::aiff(16, 1, &points(&waveform()), None, 0);
+        assert!(
+            super::super::decode_sound_with_limits(
+                &song,
+                *b"SONG",
+                1,
+                0,
+                |_| Some(instrument.as_slice()),
+                crate::memory::ResourceLimits {
+                    audio_resource_mib: 2,
+                    ..Default::default()
+                }
+            )
+            .is_some()
+        );
+        assert!(
+            super::super::decode_sound_with_limits(
+                &song,
+                *b"SONG",
+                1,
+                0,
+                |_| Some(instrument.as_slice()),
+                crate::memory::ResourceLimits {
+                    audio_resource_mib: 1,
+                    ..Default::default()
+                }
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn song_matches_assembled_mod_pcm_pitch_volume_and_repetition() {
         let pcm = waveform();
         for (mode, start, end) in [(0, 0, 64), (1, 4, 52)] {
@@ -304,6 +347,7 @@ mod tests {
             .collect();
         let song = fixtures::song(&[("SND42", 0, 64)]);
         let instrument = fixtures::aiff(8, 1, &points(&pcm), Some((2, 4, 12)), 0);
+        assert!(assemble_with_limit(&song, |_| Some(instrument.as_slice()), 0).is_none());
         let module = assemble(&song, |_| Some(instrument.as_slice())).unwrap();
         assert_eq!(sample(&module, 0).loop_flag, LoopType::PingPong);
         let mut unfolded = pcm[..12].to_vec();

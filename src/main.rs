@@ -3,13 +3,17 @@
 use std::{ffi::OsString, path::PathBuf};
 
 use glulx_rs::app::PlayerApp;
+use glulx_rs::memory_budget::{Budget, MemoryPolicy, Overrides, startup_snapshot};
 use glulx_rs::{ResourceSelection, Story, Vm};
 
-const USAGE: &str = "Usage: glulx-rs [--headless] [--diagnostics LOG] [--resources PATH] [--no-auto-resources] [STORY]\n\n--headless          Play in the terminal (plain text when input or output is piped)\n--diagnostics LOG   Write diagnostic heartbeats and slow operations to LOG\n--resources PATH    Use this Blorb archive or loose resource directory\n--no-auto-resources Disable discovery of same-name external resource archives\n--help              Show this help\n\nDebug builds default to ./glulx-debug.log; --diagnostics overrides it.\n\nAn explicit --resources path takes priority over --no-auto-resources.";
+const USAGE: &str = "Usage: glulx-rs [--headless] [--max-memory MIB] [--max-process-memory MIB] [--diagnostics LOG] [--resources PATH] [--no-auto-resources] [STORY]\n\n--headless          Play in the terminal (plain text when input or output is piped)\n--max-memory MIB   Game VM limit: MiB or percentage (e.g. 1024 or 25%)\n--max-process-memory MIB  OS hard limit: MiB or percentage (0 disables)\n--max-undo-memory SIZE       Undo payload budget\n--max-graphics-cache SIZE    Graphics cache budget\n--max-text-image-cache SIZE  Text image cache budget\n--max-decoded-image SIZE     Per-picture RGBA budget\n--max-audio-resource SIZE    Per-audio encoded budget\n--max-song-pcm SIZE          SONG PCM budget\nAll SIZE values accept MiB or 1%–100%. CLI overrides JSON for this run only.\n--diagnostics LOG   Write diagnostic heartbeats and slow operations to LOG\n--resources PATH    Use this Blorb archive or loose resource directory\n--no-auto-resources Disable discovery of same-name external resource archives\n--help              Show this help\n\nDebug builds default to ./glulx-debug.log; --diagnostics overrides it.\n\nAn explicit --resources path takes priority over --no-auto-resources.";
 
 #[derive(Debug)]
 struct Arguments {
     headless: bool,
+    max_memory_mib: Option<Budget>,
+    max_process_memory_mib: Option<Budget>,
+    resource_overrides: std::collections::BTreeMap<String, Budget>,
     story: Option<PathBuf>,
     resources: ResourceSelection,
     diagnostics: Option<PathBuf>,
@@ -20,6 +24,9 @@ fn parse_arguments(
 ) -> Result<Option<Arguments>, String> {
     let mut arguments = arguments.into_iter();
     let mut diagnostics = None;
+    let mut resource_overrides = std::collections::BTreeMap::new();
+    let mut max_memory_mib = None;
+    let mut max_process_memory_mib = None;
     let (mut headless, mut story, mut explicit, mut automatic, mut positional) =
         (false, None, None, true, false);
     while let Some(argument) = arguments.next() {
@@ -29,6 +36,37 @@ fn parse_arguments(
             positional = true;
         } else if !positional && argument == "--headless" {
             headless = true;
+        } else if !positional
+            && matches!(
+                argument.to_str(),
+                Some(
+                    "--max-memory"
+                        | "--max-process-memory"
+                        | "--max-undo-memory"
+                        | "--max-graphics-cache"
+                        | "--max-text-image-cache"
+                        | "--max-decoded-image"
+                        | "--max-audio-resource"
+                        | "--max-song-pcm"
+                )
+            )
+        {
+            let name = argument.to_str().unwrap();
+            let value = arguments
+                .next()
+                .ok_or_else(|| format!("{name} requires a MiB value or percentage"))?;
+            let value: Budget = value.to_str().ok_or("invalid memory value")?.parse()?;
+            if name == "--max-memory" && matches!(value, Budget::Fixed(0)) {
+                return Err("game memory limit must be positive".to_owned());
+            }
+            let duplicate = match name {
+                "--max-memory" => max_memory_mib.replace(value).is_some(),
+                "--max-process-memory" => max_process_memory_mib.replace(value).is_some(),
+                _ => resource_overrides.insert(name.to_owned(), value).is_some(),
+            };
+            if duplicate {
+                return Err(format!("Specify {name} only once"));
+            }
         } else if !positional && argument == "--diagnostics" {
             let path = arguments
                 .next()
@@ -57,6 +95,9 @@ fn parse_arguments(
     }
     Ok(Some(Arguments {
         headless,
+        max_memory_mib,
+        resource_overrides,
+        max_process_memory_mib,
         diagnostics: diagnostics
             .or_else(|| cfg!(debug_assertions).then(|| PathBuf::from("glulx-debug.log"))),
         story,
@@ -87,12 +128,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("{USAGE}");
         return Ok(());
     };
+    // Snapshot before limiting our own address space or initializing the GUI.
+    let snapshot = startup_snapshot();
+    let overrides = Overrides {
+        game: arguments.max_memory_mib,
+        process: arguments.max_process_memory_mib,
+        resources: arguments.resource_overrides,
+    };
+    let policy = overrides.apply(MemoryPolicy::load()?);
+    let game_limit = policy.max_memory_mib.vm_bytes(snapshot)?;
+    let resources = policy.resource_limits.resolve(snapshot)?;
+    let process_limit = policy.max_process_memory_mib.resolve(snapshot)?;
+    glulx_rs::process_memory::apply_limit_bytes(process_limit)
+        .map_err(|error| format!("Could not enforce process memory limit: {error}"))?;
     if let Some(path) = &arguments.diagnostics {
         glulx_rs::diagnostics::start(path)?;
     }
     if arguments.headless {
         let story = Story::open_with_resources(arguments.story.unwrap(), arguments.resources)?;
-        return glulx_rs::terminal::run(Vm::new(story)?);
+        let mut vm = Vm::new_with_memory_limit(story, game_limit)?;
+        vm.set_resource_limits(resources);
+        return glulx_rs::terminal::run(vm);
     }
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
@@ -109,10 +165,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Glulx Player",
         options,
         Box::new(move |creation| {
-            Ok(Box::new(PlayerApp::new_with_resources(
+            Ok(Box::new(PlayerApp::new_with_memory_policy(
                 creation,
                 arguments.story,
                 arguments.resources,
+                overrides,
             )))
         }),
     )?;
@@ -138,6 +195,86 @@ mod tests {
 
     fn parse(arguments: &[&str]) -> Result<Option<Arguments>, String> {
         parse_arguments(arguments.iter().map(OsString::from))
+    }
+
+    #[test]
+    fn memory_limit_accepts_mib_and_rejects_invalid_values() {
+        assert_eq!(
+            parse(&["--max-memory", "512"])
+                .unwrap()
+                .unwrap()
+                .max_memory_mib,
+            Some(Budget::Fixed(512))
+        );
+        assert_eq!(parse(&[]).unwrap().unwrap().max_memory_mib, None);
+        for value in ["0", "-1", "1.5", "garbage", "4294967296"] {
+            assert!(parse(&["--max-memory", value]).is_err());
+        }
+        assert_eq!(
+            parse(&["--max-process-memory", "2048"])
+                .unwrap()
+                .unwrap()
+                .max_process_memory_mib,
+            Some(Budget::Fixed(2048))
+        );
+        assert_eq!(
+            parse(&["--max-process-memory", "0"])
+                .unwrap()
+                .unwrap()
+                .max_process_memory_mib,
+            Some(Budget::Fixed(0))
+        );
+        assert!(parse(&["--max-process-memory", "101%"]).is_err());
+        assert!(parse(&["--max-process-memory", "1", "--max-process-memory", "2"]).is_err());
+        assert!(parse(&["--max-process-memory"]).is_err());
+        assert!(parse(&["--max-memory"]).is_err());
+        assert!(parse(&["--max-memory", "1", "--max-memory", "2"]).is_err());
+    }
+
+    #[test]
+    fn command_line_percentages_override_all_memory_categories() {
+        let arguments = parse(&[
+            "--headless",
+            "game.ulx",
+            "--max-memory",
+            "25%",
+            "--max-process-memory",
+            "75%",
+            "--max-undo-memory",
+            "10%",
+            "--max-graphics-cache",
+            "8192",
+            "--max-text-image-cache",
+            "5%",
+            "--max-decoded-image",
+            "2048",
+            "--max-audio-resource",
+            "4096",
+            "--max-song-pcm",
+            "1%",
+        ])
+        .unwrap()
+        .unwrap();
+        let policy = Overrides {
+            game: arguments.max_memory_mib,
+            process: arguments.max_process_memory_mib,
+            resources: arguments.resource_overrides,
+        }
+        .apply(MemoryPolicy::default());
+        assert_eq!(policy.max_memory_mib, Budget::Percent { percent: 25 });
+        assert_eq!(
+            policy.max_process_memory_mib,
+            Budget::Percent { percent: 75 }
+        );
+        assert_eq!(
+            policy.resource_limits.graphics_cache_mib,
+            Budget::Fixed(8192)
+        );
+        assert_eq!(
+            policy.resource_limits.undo_mib,
+            Budget::Percent { percent: 10 }
+        );
+        assert!(parse(&["--max-undo-memory", "1", "--max-undo-memory", "2%"]).is_err());
     }
 
     #[test]

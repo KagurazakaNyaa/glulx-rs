@@ -117,10 +117,25 @@ mod tests {
             SettingsFile::load(Some(path.clone()), PlayerSettings::default());
         assert!(!loaded.show_log_window);
         loaded.font_size = 26.0;
+        loaded.max_memory_mib = crate::memory_budget::Budget::Fixed(512);
+        loaded.max_process_memory_mib = crate::memory_budget::Budget::Percent { percent: 75 };
+        loaded.resource_limits.undo_mib = crate::memory_budget::Budget::Fixed(16);
         loaded.language = super::super::LanguagePreference::Chinese;
         assert!(file.save(&loaded));
         let (_, loaded) = SettingsFile::load(Some(path), PlayerSettings::default());
         assert_eq!(loaded.font_size, 26.0);
+        assert_eq!(
+            loaded.max_memory_mib,
+            crate::memory_budget::Budget::Fixed(512)
+        );
+        assert_eq!(
+            loaded.max_process_memory_mib,
+            crate::memory_budget::Budget::Percent { percent: 75 }
+        );
+        assert_eq!(
+            loaded.resource_limits.undo_mib,
+            crate::memory_budget::Budget::Fixed(16)
+        );
         assert_eq!(loaded.language, super::super::LanguagePreference::Chinese);
     }
 

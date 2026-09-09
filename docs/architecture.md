@@ -37,7 +37,7 @@ mouse, hyperlink and file-selection results. Native companion viewports contain 
 canvas determines Glk dimensions. Graphics retain clipped image/rectangle primitives, published with shared window
 views at event boundaries. Hardware OpenGL scales and blends them on the GPU.
 Software drivers use an incremental CPU bitmap. Opaque draws remove covered
-commands; long histories compact, and the recent-image cache is capped at 128 MiB.
+commands; long histories compact, and the recent-image cache has a configurable pixel-payload budget (default 512 MiB).
 CPU rasterization also preserves the existing desktop snapshot format.
 Waiting states distinguish line,
 character, file (including overwrite confirmation) and general events. The pipe adapter reads stdin on a worker

@@ -12,6 +12,10 @@ pub(super) struct ImageAsset {
     opaque: bool,
 }
 impl ImageAsset {
+    pub fn byte_len(&self) -> usize {
+        self.pixels.len() + self.texture.size()[0] * self.texture.size()[1] * 4
+    }
+
     pub fn new(context: &egui::Context, pixels: Arc<image::RgbaImage>) -> Arc<Self> {
         let opaque = pixels.pixels().all(|pixel| pixel[3] == 255);
         let texture = context.load_texture(

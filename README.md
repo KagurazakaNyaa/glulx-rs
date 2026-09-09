@@ -81,6 +81,76 @@ input windows and Ctrl+C exits. SONG audio and available light font faces are su
 
 The interface supports English and Chinese. **Settings → Interface language** defaults to **Follow system**; unsupported or unavailable system locales fall back to English. Selecting **English** or **中文** takes effect immediately and is saved as `language` (`auto`, `en`, or `zh`) in `glulx-settings.json`. Interface language is independent of story translation. Native system dialog controls follow the operating system language. Translation catalogs and contributor instructions: [assets/locales](assets/locales/README.md).
 
+## Performance and memory limits
+
+Use release or diagnostic builds for gameplay performance. Operand decoding and search comparisons
+now avoid temporary heap allocations. Local optimized microbenchmarks improved from roughly
+140 to 100 ms for five million branch instructions and from 270 to 18–19 ms for 1,000 searches
+through 16,384 records. These measurements do not predict whole-game speedups.
+
+Every budget in Settings supports **fixed MiB** or **1%–100% of startup memory**, saved beside the executable in `glulx-settings.json`. New configurations use these fixed defaults; existing numeric settings retain their fixed-MiB meaning:
+
+| Setting | Default MiB | What is counted |
+| --- | ---: | --- |
+| Game memory | 1024 | VM address space including the game heap; excludes stack, original story copies and undo; capped by Glulx at 4 GiB minus 256 bytes |
+| Undo snapshots | 256 | Retained memory, initial images, stacks and heap-record payloads; oldest snapshots are evicted; an oversized snapshot fails |
+| Graphics image cache | 512 | Cached RGBA and texture pixel payloads, evicted by least recent use |
+| Text image cache | 256 | Cached texture pixel payloads, evicted by least recent use |
+| Each decoded image | 256 | RGBA output for one picture; oversized resources fail |
+| Each encoded audio resource | 256 | Encoded bytes of each playback resource and SONG reference, not total decoder memory |
+| SONG sample data per playback | 128 | Unique PCM sample payloads for one playback |
+| Process hard limit | 0 | 0 adds no limit; committed process memory on Windows, virtual address space on Linux |
+
+Category budgets are not a total process limit. Displayed images can remain referenced by canvases;
+drivers, decoders, containers and allocators consume additional memory. Zero disables cache/undo
+retention; zero image/audio budgets make those resources unavailable. Game, undo and media limits
+apply on the next game open or session restore; the process limit requires an **application restart**.
+Saves and sessions exceeding the configured game limit are rejected; saves cannot override it.
+
+All percentages share one memory snapshot captured at startup; they do not fluctuate during play:
+
+- With cgroup v1/v2 limits, Linux uses the smallest finite **total limit** in the current group and visible ancestors, without subtracting usage.
+- Without a cgroup limit, Linux uses `/proc/meminfo`'s `MemAvailable`.
+- Windows uses available physical memory (`GlobalMemoryStatusEx.ullAvailPhys`).
+
+Settings shows the source, base and resolved budget. Game limits round down to 256-byte alignment and the Glulx address-space maximum; resource budgets round down to MiB; process budgets use bytes.
+Resources no longer have a blanket 4095 MiB ceiling. SONG uses the configured audio-resource budget instead of a separate 1 MiB file limit.
+If detection fails, fixed limits still work and percentage limits report an error. Percentage detection is currently unsupported on macOS.
+
+**CLI > configuration file > defaults** applies in both GUI and terminal modes. CLI overrides affect only the current run and never rewrite the settings file. Every memory argument accepts fixed MiB or a percentage:
+
+```sh
+cargo run --release -- --max-memory 25% --max-process-memory 75% --max-undo-memory 10% path/to/story.gblorb
+cargo run --release -- --headless --max-memory 2048 --max-graphics-cache 8192 path/to/story.gblorb
+```
+
+Other flags are `--max-text-image-cache`, `--max-decoded-image`, `--max-audio-resource` and `--max-song-pcm`.
+JSON can mix numeric and percentage settings:
+
+```json
+{
+  "max_memory_mib": {"percent": 25},
+  "max_process_memory_mib": {"percent": 75},
+  "resource_limits": {
+    "undo_mib": {"percent": 10},
+    "graphics_cache_mib": 512
+  }
+}
+```
+
+Linux uses `RLIMIT_AS`, including mappings, shared libraries and reserved thread stacks; it is not
+an RSS limit. Windows uses a Job Object process commit limit. A nonzero process limit is currently
+unsupported on macOS and produces an error. Failure to install an OS limit aborts startup rather
+than silently ignoring it. A limit that is too low may prevent startup or fail subsequent allocations
+without a chance to save progress. Recover with `--max-process-memory 0` or edit the JSON file.
+Stricter inherited system limits remain in effect.
+
+Run the microbenchmarks with:
+
+```sh
+cargo test --release --lib benchmark_ -- --ignored --nocapture --test-threads=1
+```
+
 ## Translation
 
 Turn translation is optional and disabled by default. Enable it from

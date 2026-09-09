@@ -54,9 +54,6 @@ impl StoryHeader {
         if !(0x0002_0000..=0x0003_01ff).contains(&self.version) {
             return Err(StoryError::UnsupportedVersion(self.version));
         }
-        if self.end_mem > crate::memory::MAX_MEMORY_SIZE {
-            return Err(StoryError::MemoryLimit(self.end_mem));
-        }
         if self.ram_start < 0x100
             || !self.ram_start.is_multiple_of(0x100)
             || !self.ext_start.is_multiple_of(0x100)
@@ -516,8 +513,6 @@ pub enum StoryError {
     ResourceIdentityMismatch,
     #[error("unsupported loose resource filename or format: {0}")]
     UnsupportedResourceFile(PathBuf),
-    #[error("story requests {0} bytes, exceeding the 256 MiB VM memory limit")]
-    MemoryLimit(u32),
     #[error("cannot read story file: {0}")]
     Io(#[from] std::io::Error),
     #[error("file is too small to contain a Glulx header")]

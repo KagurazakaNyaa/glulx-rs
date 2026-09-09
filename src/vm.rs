@@ -144,6 +144,12 @@ struct UndoState {
     heap_blocks: BTreeMap<u32, u32>,
 }
 
+impl UndoState {
+    fn byte_len(&self) -> usize {
+        self.memory.snapshot_byte_len() + self.stack.bytes.len() + self.heap_blocks.len() * 8
+    }
+}
+
 const WINTYPE_TEXT_BUFFER: u32 = 3;
 const WINTYPE_TEXT_GRID: u32 = 4;
 const WINTYPE_GRAPHICS: u32 = 5;
@@ -406,6 +412,8 @@ impl Stack {
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Vm {
     #[serde(skip)]
+    resource_limits: crate::memory::ResourceLimits,
+    #[serde(skip)]
     glyph_support: Option<GlyphSupport>,
     #[serde(skip)]
     text_metrics: Option<TextMetrics>,
@@ -467,12 +475,62 @@ pub struct Vm {
 }
 
 impl Vm {
+    pub fn resource_limits(&self) -> crate::memory::ResourceLimits {
+        self.resource_limits
+    }
+
+    pub fn set_resource_limits(&mut self, limits: crate::memory::ResourceLimits) {
+        self.resource_limits = limits.normalized();
+        self.image_info.clear();
+        self.decoded_picture = None;
+        self.trim_undo(0);
+    }
+
+    fn undo_cost(&self) -> usize {
+        self.undo.iter().map(UndoState::byte_len).sum()
+    }
+
+    fn trim_undo(&mut self, incoming: usize) {
+        let budget = crate::memory::ResourceLimits::bytes(self.resource_limits.undo_mib);
+        while !self.undo.is_empty()
+            && ((self.undo.len() >= 16 && incoming != 0)
+                || self.undo_cost().saturating_add(incoming) > budget)
+        {
+            self.undo.pop_front();
+        }
+    }
+
+    /// Apply a host policy to the live memory and every retained undo snapshot.
+    pub fn set_memory_limit(&mut self, maximum: u32) -> Result<(), VmError> {
+        let required = self
+            .undo
+            .iter()
+            .map(|undo| undo.memory.len())
+            .chain(std::iter::once(self.memory.len()))
+            .max()
+            .unwrap();
+        if required > maximum {
+            return Err(VmError::MemoryLimit { required, maximum });
+        }
+        self.memory.set_maximum(maximum)?;
+        for undo in &mut self.undo {
+            undo.memory.set_maximum(maximum)?;
+        }
+        Ok(())
+    }
+
     pub fn new(story: Story) -> Result<Self, VmError> {
-        let memory = Memory::new(&story);
+        Self::new_with_memory_limit(story, crate::memory::MAX_MEMORY_SIZE)
+    }
+
+    /// Maximum game address-space size in bytes; excludes stack, undo and host resources.
+    pub fn new_with_memory_limit(story: Story, maximum: u32) -> Result<Self, VmError> {
+        let memory = Memory::new_with_limit(&story, maximum)?;
         let heap_next = memory.len();
         let stack_size = story.header.stack_size;
         let start_func = story.header.start_func;
         let mut vm = Self {
+            resource_limits: crate::memory::ResourceLimits::default(),
             glyph_support: None,
             text_metrics: None,
             acceleration: acceleration::Acceleration::default(),
@@ -1016,29 +1074,15 @@ impl Vm {
             }
             0x125 => {
                 let destination = self.destination(&operands[0])?;
-                let cost = self.memory.len() as usize
+                let cost = self.memory.snapshot_byte_len()
                     + self.stack.bytes.len()
-                    + self.story.image.len() * 2;
-                const UNDO_BUDGET: usize = 64 * 1024 * 1024;
-                if cost > UNDO_BUDGET {
+                    + self.heap_blocks.len() * 8;
+                let budget = crate::memory::ResourceLimits::bytes(self.resource_limits.undo_mib);
+                if cost > budget {
                     self.store_destination(&destination, 1, Width::Word)?;
                     return Ok(());
                 }
-                while self.undo.len() >= 16
-                    || self
-                        .undo
-                        .iter()
-                        .map(|state| {
-                            state.memory.len() as usize
-                                + state.stack.bytes.len()
-                                + self.story.image.len() * 2
-                        })
-                        .sum::<usize>()
-                        + cost
-                        > UNDO_BUDGET
-                {
-                    self.undo.pop_front();
-                }
+                self.trim_undo(cost);
                 self.undo.push_back(UndoState {
                     memory: self.memory.clone(),
                     stack: self.stack.clone(),
@@ -1052,7 +1096,7 @@ impl Vm {
             0x126 => {
                 let failure_destination = self.destination(&operands[0])?;
                 if let Some(undo) = self.undo.pop_back() {
-                    self.memory.restore(&undo.memory, self.protection);
+                    self.memory.restore(&undo.memory, self.protection)?;
                     self.stack = undo.stack;
                     self.pc = undo.pc;
                     self.pending_select = None;
@@ -1381,19 +1425,19 @@ impl Vm {
         }
     }
 
-    fn fetch_operands(&mut self, count: usize) -> Result<Vec<Operand>, VmError> {
-        let mut modes = Vec::with_capacity(count);
-        for index in 0..count.div_ceil(2) {
-            let byte = self.fetch8()?;
-            modes.push(byte & 0x0f);
-            if index * 2 + 1 < count {
-                modes.push(byte >> 4);
-            }
+    fn fetch_operands(&mut self, count: usize) -> Result<[Operand; 8], VmError> {
+        // Glulx instructions have at most eight operands. Read every mode byte
+        // before reading operand data, including the unused high nibble.
+        let mut modes = [0u8; 4];
+        for mode in modes.iter_mut().take(count.div_ceil(2)) {
+            *mode = self.fetch8()?;
         }
-        modes
-            .into_iter()
-            .map(|mode| self.fetch_operand(mode))
-            .collect()
+        let mut operands = [const { Operand::Zero }; 8];
+        for (index, operand) in operands.iter_mut().enumerate().take(count) {
+            let mode = (modes[index / 2] >> ((index % 2) * 4)) & 0xf;
+            *operand = self.fetch_operand(mode)?;
+        }
+        Ok(operands)
     }
 
     fn fetch_operand(&mut self, mode: u8) -> Result<Operand, VmError> {
@@ -2459,7 +2503,8 @@ impl Vm {
         key_offset: u32,
         options: u32,
     ) -> Result<u32, VmError> {
-        let key = self.search_key(key, key_size, options)?;
+        let key_bytes = key.to_be_bytes();
+        let key = self.search_key(&key_bytes, key_size, options)?;
         let mut index = 0u32;
         while structure_count == u32::MAX || index < structure_count {
             let structure = start.wrapping_add(index.wrapping_mul(structure_size));
@@ -2486,14 +2531,15 @@ impl Vm {
         key_offset: u32,
         options: u32,
     ) -> Result<u32, VmError> {
-        let key = self.search_key(key, key_size, options)?;
+        let key_bytes = key.to_be_bytes();
+        let key = self.search_key(&key_bytes, key_size, options)?;
         let mut low = 0u32;
         let mut high = structure_count;
         while low < high {
             let index = low + (high - low) / 2;
             let structure = start.wrapping_add(index.wrapping_mul(structure_size));
             let candidate = self.memory_key(structure.wrapping_add(key_offset), key_size)?;
-            match candidate.cmp(&key) {
+            match candidate.cmp(key) {
                 Ordering::Less => low = index + 1,
                 Ordering::Greater => high = index,
                 Ordering::Equal => return Ok(search_result(structure, index, options)),
@@ -2511,7 +2557,8 @@ impl Vm {
         next_offset: u32,
         options: u32,
     ) -> Result<u32, VmError> {
-        let key = self.search_key(key, key_size, options)?;
+        let key_bytes = key.to_be_bytes();
+        let key = self.search_key(&key_bytes, key_size, options)?;
         let mut remaining = self.memory.len() / 4 + 1;
         while structure != 0 && remaining > 0 {
             let candidate = self.memory_key(structure.wrapping_add(key_offset), key_size)?;
@@ -2530,21 +2577,26 @@ impl Vm {
         Ok(0)
     }
 
-    fn search_key(&self, key: u32, key_size: u32, options: u32) -> Result<Vec<u8>, VmError> {
+    fn search_key<'a>(
+        &'a self,
+        key: &'a [u8; 4],
+        key_size: u32,
+        options: u32,
+    ) -> Result<&'a [u8], VmError> {
         if options & 0x01 != 0 {
-            return self.memory_key(key, key_size);
+            return self.memory_key(u32::from_be_bytes(*key), key_size);
         }
         if !matches!(key_size, 1 | 2 | 4) {
             return Err(VmError::InvalidSearchKeySize(key_size));
         }
-        let bytes = key.to_be_bytes();
-        Ok(bytes[4 - key_size as usize..].to_vec())
+        Ok(&key[4 - key_size as usize..])
     }
 
-    fn memory_key(&self, address: u32, key_size: u32) -> Result<Vec<u8>, VmError> {
-        (0..key_size)
-            .map(|offset| self.memory.read8(address.wrapping_add(offset)))
-            .collect()
+    fn memory_key(&self, address: u32, key_size: u32) -> Result<&[u8], VmError> {
+        if key_size == 0 {
+            return Ok(&[]);
+        }
+        self.memory.slice(address, key_size)
     }
 }
 
@@ -2690,6 +2742,14 @@ fn operand_count(opcode: u32) -> Option<usize> {
 
 #[derive(Debug, Error)]
 pub enum VmError {
+    #[error("memory limit {0} must be nonzero and a multiple of 256 bytes")]
+    InvalidMemoryLimit(u32),
+    #[error(
+        "game needs {required} bytes, exceeding the configured VM memory limit of {maximum} bytes"
+    )]
+    MemoryLimit { required: u32, maximum: u32 },
+    #[error("could not allocate {0} bytes of game memory")]
+    MemoryAllocation(u32),
     #[error("invalid or incompatible save file")]
     InvalidSave,
     #[error("invalid or unrepresentable date/time")]
@@ -3005,6 +3065,136 @@ pub(crate) mod tests {
         let mut vm = Vm::new(story).unwrap();
         assert_eq!(vm.run_steps(16).unwrap(), RunState::Halted);
         assert_eq!(vm.take_output(), "B");
+    }
+
+    #[test]
+    #[ignore = "manual performance measurement"]
+    fn benchmark_instruction_dispatch() {
+        let story = Story::from_bytes(&image_with_program(&[0x20, 0x01, 0xff]), None).unwrap();
+        let mut vm = Vm::new(story).unwrap();
+        let started = std::time::Instant::now();
+        assert_eq!(
+            vm.run_steps(std::hint::black_box(5_000_000)).unwrap(),
+            RunState::Running
+        );
+        assert_eq!(vm.pc, 0x43);
+        eprintln!("instruction benchmark: {:?}", started.elapsed());
+    }
+
+    // Run optimized, single-threaded; optionally enforce a local timing budget.
+    #[test]
+    #[ignore = "manual performance measurement"]
+    fn benchmark_search_records() {
+        let story = Story::from_bytes(&image_with_program(&[0x81, 0x20]), None).unwrap();
+        let mut vm = Vm::new(story).unwrap();
+        let records = 16_384;
+        vm.memory.resize(0x100 + records * 8).unwrap();
+        for index in 0..records {
+            vm.memory.write32(0x100 + index * 8, index + 1).unwrap();
+        }
+        let started = std::time::Instant::now();
+        for _ in 0..1000 {
+            assert_eq!(
+                std::hint::black_box(&vm)
+                    .linear_search(std::hint::black_box(records), 4, 0x100, 8, records, 0, 0,)
+                    .unwrap(),
+                0x100 + (records - 1) * 8
+            );
+        }
+        let elapsed = started.elapsed();
+        eprintln!("search benchmark: {elapsed:?}");
+        if let Ok(budget) = std::env::var("GLULX_SEARCH_BUDGET_MS") {
+            assert!(elapsed.as_secs_f64() * 1000.0 <= budget.parse::<f64>().unwrap());
+        }
+    }
+
+    #[test]
+    fn searches_handle_indirect_keys_zero_termination_and_invalid_memory() {
+        let story = Story::from_bytes(&image_with_program(&[0x81, 0x20]), None).unwrap();
+        let mut vm = Vm::new(story).unwrap();
+        vm.memory.write32(0x100, 0x11223344).unwrap();
+        vm.memory.write32(0x108, 0x55667788).unwrap();
+        vm.memory.write32(0x104, 0x108).unwrap();
+        vm.memory.write32(0x10c, 0).unwrap();
+        for size in [1, 2, 4] {
+            assert_eq!(
+                vm.linear_search(0x108, size, 0x100, 8, 2, 0, 1).unwrap(),
+                0x108
+            );
+            assert_eq!(vm.binary_search(0x108, size, 0x100, 8, 2, 0, 5).unwrap(), 1);
+            assert_eq!(
+                vm.linked_search(0x108, size, 0x100, 0, 4, 1).unwrap(),
+                0x108
+            );
+        }
+        assert_eq!(
+            vm.linear_search(99, 4, 0x110, 8, u32::MAX, 0, 2).unwrap(),
+            0
+        );
+        assert!(vm.binary_search(0, 3, 0x100, 8, 2, 0, 0).is_err());
+        assert!(
+            vm.linear_search(0, 4, vm.memory.len() - 2, 8, 1, 0, 0)
+                .is_err()
+        );
+        assert!(vm.linear_search(u32::MAX, 4, 0x100, 8, 1, 0, 1).is_err());
+    }
+
+    #[test]
+    fn large_story_requirement_is_checked_by_vm_policy_not_parser() {
+        let mut image = image_with_program(&[0x81, 0x20]);
+        image[16..20].copy_from_slice(&(2048u32 * 1024 * 1024).to_be_bytes());
+        update_checksum(&mut image);
+        let story = Story::from_bytes(&image, None).unwrap();
+        assert!(matches!(Vm::new(story), Err(VmError::MemoryLimit { .. })));
+    }
+
+    #[test]
+    fn undo_budget_can_disable_snapshots_and_evict_oldest() {
+        let story = Story::from_bytes(
+            &image_with_program(&[0x81, 0x25, 0x0d, 0x20, 0x81, 0x20]),
+            None,
+        )
+        .unwrap();
+        let mut vm = Vm::new(story).unwrap();
+        vm.set_resource_limits(crate::memory::ResourceLimits {
+            undo_mib: 0,
+            ..Default::default()
+        });
+        vm.run_steps(1).unwrap();
+        assert!(vm.undo.is_empty());
+        assert_eq!(vm.memory.read32(0x120).unwrap(), 1);
+        vm.pc = 0x43;
+        vm.set_resource_limits(crate::memory::ResourceLimits {
+            undo_mib: 1,
+            ..Default::default()
+        });
+        vm.run_steps(1).unwrap();
+        assert_eq!(vm.undo.len(), 1);
+        assert_eq!(vm.memory.read32(0x120).unwrap(), 0);
+        vm.set_resource_limits(crate::memory::ResourceLimits {
+            undo_mib: 0,
+            ..Default::default()
+        });
+        assert!(vm.undo.is_empty());
+    }
+
+    #[test]
+    fn saves_and_sessions_obey_the_host_memory_limit() {
+        let story = Story::from_bytes(&image_with_program(&[0x81, 0x20]), None).unwrap();
+        let mut vm = Vm::new_with_memory_limit(story.clone(), 0x400).unwrap();
+        assert!(vm.memory.resize(0x400).unwrap());
+        let save = vm.encode_save(&Destination::Discard).unwrap();
+        let mut small = Vm::new_with_memory_limit(story, 0x300).unwrap();
+        assert!(small.decode_save(&save).is_err());
+        assert_eq!(small.memory.len(), 0x300);
+        small.set_memory_limit(0x400).unwrap();
+        small.decode_save(&save).unwrap();
+        assert_eq!(small.memory.maximum(), 0x400);
+        let serialized = serde_json::to_vec(&vm).unwrap();
+        let mut restored: Vm = serde_json::from_slice(&serialized).unwrap();
+        assert!(restored.set_memory_limit(0x200).is_err());
+        restored.set_memory_limit(0x400).unwrap();
+        assert_eq!(restored.validate_session().unwrap().memory.maximum(), 0x400);
     }
 
     #[test]

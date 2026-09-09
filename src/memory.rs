@@ -1,10 +1,59 @@
 use crate::{Story, VmError};
 
 /// Per-VM allocation ceiling; failed growth is reported through setmemsize/malloc.
-pub const MAX_MEMORY_SIZE: u32 = 256 * 1024 * 1024;
+pub const MAX_MEMORY_SIZE: u32 = 1024 * 1024 * 1024;
+
+/// Independent payload budgets. Allocator and third-party decoder overhead is
+/// not included; these are not a process RSS limit. Zero disables retention.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ResourceLimits {
+    pub undo_mib: u32,
+    pub graphics_cache_mib: u32,
+    pub text_image_cache_mib: u32,
+    pub decoded_image_mib: u32,
+    pub audio_resource_mib: u32,
+    pub song_pcm_mib: u32,
+}
+impl Default for ResourceLimits {
+    fn default() -> Self {
+        Self {
+            undo_mib: 256,
+            graphics_cache_mib: 512,
+            text_image_cache_mib: 256,
+            decoded_image_mib: 256,
+            audio_resource_mib: 256,
+            song_pcm_mib: 128,
+        }
+    }
+}
+impl ResourceLimits {
+    pub fn normalized(mut self) -> Self {
+        for value in [
+            &mut self.undo_mib,
+            &mut self.graphics_cache_mib,
+            &mut self.text_image_cache_mib,
+            &mut self.decoded_image_mib,
+            &mut self.audio_resource_mib,
+            &mut self.song_pcm_mib,
+        ] {
+            *value = (*value).min((usize::MAX / (1024 * 1024)).min(u32::MAX as usize) as u32);
+        }
+        self
+    }
+    pub fn bytes(mib: u32) -> usize {
+        (u64::from(mib) * 1024 * 1024).min(usize::MAX as u64) as usize
+    }
+}
+
+fn default_memory_limit() -> u32 {
+    MAX_MEMORY_SIZE
+}
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct Memory {
+    #[serde(skip, default = "default_memory_limit")]
+    maximum: u32,
     bytes: Vec<u8>,
     initial: Vec<u8>,
     ram_start: u32,
@@ -18,7 +67,8 @@ impl Memory {
     }
 
     pub(crate) fn validate_session(&self, story: &Story) -> Result<(), VmError> {
-        if self.ram_start != story.header.ram_start
+        if self.bytes.len() > self.maximum as usize
+            || self.ram_start != story.header.ram_start
             || self.ext_start != story.header.ext_start
             || self.original_end != story.header.end_mem
             || self.initial != story.image
@@ -33,15 +83,51 @@ impl Memory {
     }
 
     pub fn new(story: &Story) -> Self {
-        let mut bytes = story.image.clone();
+        Self::new_with_limit(story, MAX_MEMORY_SIZE).expect("story exceeds default memory limit")
+    }
+
+    pub fn new_with_limit(story: &Story, maximum: u32) -> Result<Self, VmError> {
+        if maximum == 0 || !maximum.is_multiple_of(256) {
+            return Err(VmError::InvalidMemoryLimit(maximum));
+        }
+        if story.header.end_mem > maximum {
+            return Err(VmError::MemoryLimit {
+                required: story.header.end_mem,
+                maximum,
+            });
+        }
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(story.header.end_mem as usize)
+            .map_err(|_| VmError::MemoryAllocation(story.header.end_mem))?;
+        bytes.extend_from_slice(&story.image);
         bytes.resize(story.header.end_mem as usize, 0);
-        Self {
+        Ok(Self {
+            maximum,
             bytes,
             initial: story.image.clone(),
             ram_start: story.header.ram_start,
             ext_start: story.header.ext_start,
             original_end: story.header.end_mem,
+        })
+    }
+
+    pub fn maximum(&self) -> u32 {
+        self.maximum
+    }
+
+    pub(crate) fn set_maximum(&mut self, maximum: u32) -> Result<(), VmError> {
+        if maximum == 0 || !maximum.is_multiple_of(256) {
+            return Err(VmError::InvalidMemoryLimit(maximum));
         }
+        if self.len() > maximum {
+            return Err(VmError::MemoryLimit {
+                required: self.len(),
+                maximum,
+            });
+        }
+        self.maximum = maximum;
+        Ok(())
     }
 
     pub fn len(&self) -> u32 {
@@ -115,7 +201,7 @@ impl Memory {
 
     pub fn resize(&mut self, new_size: u32) -> Result<bool, VmError> {
         if new_size < self.original_end
-            || new_size > MAX_MEMORY_SIZE
+            || new_size > self.maximum
             || !new_size.is_multiple_of(0x100)
         {
             return Ok(false);
@@ -141,10 +227,23 @@ impl Memory {
         self.restore_protected(protected_bytes);
     }
 
-    pub fn restore(&mut self, snapshot: &Self, protected: Option<(u32, u32)>) {
+    pub fn restore(
+        &mut self,
+        snapshot: &Self,
+        protected: Option<(u32, u32)>,
+    ) -> Result<(), VmError> {
+        if snapshot.len() > self.maximum {
+            return Err(VmError::MemoryLimit {
+                required: snapshot.len(),
+                maximum: self.maximum,
+            });
+        }
         let protected_bytes = self.protected_bytes(protected, snapshot.len());
+        let maximum = self.maximum;
         *self = snapshot.clone();
+        self.maximum = maximum;
         self.restore_protected(protected_bytes);
+        Ok(())
     }
 
     pub fn c_string(&self, address: u32) -> Result<String, VmError> {
@@ -160,7 +259,7 @@ impl Memory {
         }
     }
 
-    fn slice(&self, address: u32, length: u32) -> Result<&[u8], VmError> {
+    pub(crate) fn slice(&self, address: u32, length: u32) -> Result<&[u8], VmError> {
         let end = address
             .checked_add(length)
             .filter(|end| *end <= self.len())
@@ -230,6 +329,38 @@ mod tests {
             .fold(0u32, u32::wrapping_add);
         bytes[32..36].copy_from_slice(&checksum.to_be_bytes());
         Story::from_bytes(&bytes, None).unwrap()
+    }
+
+    #[test]
+    fn configured_limit_controls_initial_allocation_growth_and_restore() {
+        let story = story();
+        assert!(matches!(
+            Memory::new_with_limit(&story, 0x100),
+            Err(VmError::MemoryLimit { .. })
+        ));
+        for limit in [0, 511] {
+            assert!(matches!(
+                Memory::new_with_limit(&story, limit),
+                Err(VmError::InvalidMemoryLimit(_))
+            ));
+        }
+        let mut memory = Memory::new_with_limit(&story, 0x300).unwrap();
+        assert!(memory.resize(0x300).unwrap());
+        assert!(!memory.resize(0x400).unwrap());
+        assert_eq!(memory.len(), 0x300);
+        assert!(!memory.resize(0x301).unwrap());
+        let snapshot = memory.clone();
+        let mut smaller = Memory::new_with_limit(&story, 0x200).unwrap();
+        assert!(smaller.restore(&snapshot, None).is_err());
+        assert_eq!(smaller.len(), 0x200);
+        memory.set_maximum(0x400).unwrap();
+        memory.restore(&snapshot, None).unwrap();
+        assert_eq!(memory.maximum(), 0x400);
+        memory.restart(None);
+        assert_eq!(memory.maximum(), 0x400);
+        assert!(memory.resize(0x400).unwrap());
+        let larger = Memory::new_with_limit(&story, MAX_MEMORY_SIZE * 2).unwrap();
+        assert_eq!(larger.maximum(), MAX_MEMORY_SIZE * 2);
     }
 
     #[test]

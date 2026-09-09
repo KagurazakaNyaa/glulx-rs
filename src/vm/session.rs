@@ -29,6 +29,9 @@ impl Vm {
             return Err(VmError::InvalidSave);
         }
         self.memory.validate_session(&original)?;
+        for undo in &self.undo {
+            undo.memory.validate_session(&original)?;
+        }
         save::validate_stack(&self.stack, self.memory.len())?;
         for (&id, window) in &self.glk_windows {
             if window.kind == 4
