@@ -85,7 +85,9 @@ The interface supports English and Chinese. **Settings → Interface language** 
 
 Turn translation is optional and disabled by default. Enable it from
 `View -> Translation window`, enable translation there, then configure an OpenAI-compatible endpoint,
-model, target language, and system prompt in `View -> Options`.
+model, target language, prompts, and sampling parameters using **Translation settings…**
+in the translation window. These controls open in a dedicated window, separate
+from general settings. Both settings windows save when closed.
 
 Text is collected from narrative output and submitted asynchronously when the
 VM waits for player input. The original text remains authoritative and appears
@@ -97,6 +99,19 @@ requests can finish after it is switched off. Current source and translation are
 shown directly; older views are under a collapsed History control. Output appends
 to the current view until the game clears its text buffer. Identical redraws do
 not add duplicate history, and text cleared before submission is discarded.
+
+Configure the endpoint, model identifier, prompts, and sampling parameters for
+any model served through a compatible Chat Completions API, including HY-MT2,
+DeepSeek, and GPT models. Follow the selected model's supported roles and
+parameters; there are no model-specific presets or automatic overrides.
+
+System messages can be disabled or left blank. User templates support `{target}`
+and `{text}`; without `{text}`, the source is appended after a blank line.
+An empty user template sends the source unchanged. Uncheck any sampling parameter
+to omit it and use the server default; `top_k` and `repetition_penalty` require
+endpoint support. Maximum output tokens uses the `max_tokens` API field.
+Existing settings retain system messages, raw user text, and temperature 0.2
+until changed. Prompt and sampling changes are included in the session cache key.
 
 The default model name is `tencent/Hy-MT2-1.8B`; any compatible local or remote
 endpoint can be used. Credentials remain in the desktop application's local

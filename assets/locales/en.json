@@ -153,5 +153,13 @@
   "ui.apply_font": "Apply font",
   "ui.enable_turn_translation": "Enable turn translation",
   "ui.type_in_highlighted_field": "Type in the highlighted field",
-  "ui.options_window": "Options"
+  "ui.options_window": "Options",
+  "ui.use_system_prompt": "Send system prompt",
+  "ui.user_prompt": "User prompt template",
+  "ui.prompt_template_help": "Use {0} for the target language and {1} for source text in the user template. Without {1}, source text is appended after a blank line.",
+  "ui.sampling_parameters": "Sampling and output limits",
+  "ui.sampling_parameters_help": "Unchecked parameters are omitted (server defaults). top_k and repetition_penalty require endpoint support.",
+  "ui.temperature": "Temperature",
+  "ui.max_tokens": "Maximum output tokens (max_tokens)",
+  "ui.glulx_player_translation_settings": "Glulx Player — Translation settings"
 }

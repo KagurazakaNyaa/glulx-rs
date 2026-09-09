@@ -7,7 +7,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TranslationSettings {
     pub enabled: bool,
@@ -16,6 +16,13 @@ pub struct TranslationSettings {
     pub model: String,
     pub target_language: String,
     pub system_prompt: String,
+    pub use_system_prompt: bool,
+    pub user_prompt: String,
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub top_k: Option<u32>,
+    pub repetition_penalty: Option<f64>,
+    pub max_tokens: Option<u32>,
 }
 
 impl Default for TranslationSettings {
@@ -26,6 +33,13 @@ impl Default for TranslationSettings {
             api_key: String::new(),
             model: "tencent/Hy-MT2-1.8B".to_owned(),
             target_language: "zh-CN".to_owned(),
+            use_system_prompt: true,
+            user_prompt: "{text}".to_owned(),
+            temperature: Some(0.2),
+            top_p: None,
+            top_k: None,
+            repetition_penalty: None,
+            max_tokens: None,
             system_prompt: "Translate interactive-fiction prose into {target}. Preserve paragraphs, names, punctuation, and game commands. Return only the translation.".to_owned(),
         }
     }
@@ -55,22 +69,16 @@ struct TranslationKey {
     text: String,
     endpoint: String,
     api_key: String,
-    model: String,
-    target_language: String,
-    system_prompt: String,
+    body: String,
 }
 
 impl TranslationKey {
     fn new(text: String, settings: &TranslationSettings) -> Self {
         Self {
+            body: build_request_body(settings, &text).to_string(),
             text,
             endpoint: settings.endpoint.clone(),
             api_key: settings.api_key.trim().to_owned(),
-            model: settings.model.clone(),
-            target_language: settings.target_language.clone(),
-            system_prompt: settings
-                .system_prompt
-                .replace("{target}", &settings.target_language),
         }
     }
 }
@@ -186,18 +194,48 @@ fn translate(client: &reqwest::blocking::Client, request: &Request) -> Result<St
 }
 
 fn request_body(request: &Request) -> serde_json::Value {
-    let prompt = request
-        .settings
-        .system_prompt
-        .replace("{target}", &request.settings.target_language);
-    json!({
-        "model": request.settings.model,
-        "temperature": 0.2,
-        "messages": [
-            { "role": "system", "content": prompt },
-            { "role": "user", "content": request.text }
-        ]
-    })
+    build_request_body(&request.settings, &request.text)
+}
+
+fn build_request_body(settings: &TranslationSettings, text: &str) -> serde_json::Value {
+    let mut messages = Vec::new();
+    if settings.use_system_prompt && !settings.system_prompt.trim().is_empty() {
+        messages.push(json!({ "role": "system", "content": settings.system_prompt.replace("{target}", &settings.target_language) }));
+    }
+    // Expand template fragments before inserting source text, so placeholders in
+    // the story itself remain literal. A template without {text} is a prefix.
+    let fragments: Vec<_> = settings
+        .user_prompt
+        .split("{text}")
+        .map(|part| part.replace("{target}", &settings.target_language))
+        .collect();
+    let user = if fragments.len() > 1 {
+        fragments.join(text)
+    } else if fragments[0].trim().is_empty() {
+        text.to_owned()
+    } else {
+        format!("{}\n\n{text}", fragments[0])
+    };
+    messages.push(json!({ "role": "user", "content": user }));
+    let mut body = json!({ "model": settings.model, "messages": messages });
+    for (key, value) in [
+        ("temperature", settings.temperature),
+        ("top_p", settings.top_p),
+        ("repetition_penalty", settings.repetition_penalty),
+    ] {
+        if let Some(value) = value {
+            body[key] = json!(value);
+        }
+    }
+    for (key, value) in [
+        ("top_k", settings.top_k),
+        ("max_tokens", settings.max_tokens),
+    ] {
+        if let Some(value) = value {
+            body[key] = json!(value);
+        }
+    }
+    body
 }
 
 fn parse_response(value: &serde_json::Value) -> Result<String, String> {
@@ -336,6 +374,38 @@ mod tests {
 
         let variants = [
             TranslationSettings {
+                use_system_prompt: false,
+                ..settings.clone()
+            },
+            TranslationSettings {
+                user_prompt: "Translate: {text}".into(),
+                ..settings.clone()
+            },
+            TranslationSettings {
+                temperature: None,
+                ..settings.clone()
+            },
+            TranslationSettings {
+                temperature: Some(0.7),
+                ..settings.clone()
+            },
+            TranslationSettings {
+                top_p: Some(0.6),
+                ..settings.clone()
+            },
+            TranslationSettings {
+                top_k: Some(20),
+                ..settings.clone()
+            },
+            TranslationSettings {
+                repetition_penalty: Some(1.05),
+                ..settings.clone()
+            },
+            TranslationSettings {
+                max_tokens: Some(4096),
+                ..settings.clone()
+            },
+            TranslationSettings {
                 endpoint: "http://localhost:9090/v1/chat/completions".to_owned(),
                 ..settings.clone()
             },
@@ -433,6 +503,114 @@ mod tests {
             translator.submit("Hello".to_owned(), &settings),
             Submission::Cached(text) if text == "你好"
         ));
+        assert!(requests.try_recv().is_err());
+    }
+
+    #[test]
+    fn user_only_translation_and_sampling_reach_the_request() {
+        let settings: TranslationSettings = serde_json::from_value(json!({
+            "use_system_prompt": false,
+            "user_prompt": "Translate to {target}: {text}",
+            "target_language": "中文",
+            "temperature": 0.7, "top_p": 0.6, "top_k": 20,
+            "repetition_penalty": 1.05, "max_tokens": 4096
+        }))
+        .unwrap();
+        let body = request_body(&Request {
+            id: 1,
+            text: "Hello".into(),
+            settings,
+        });
+        assert_eq!(
+            body["messages"],
+            json!([
+                {"role": "user", "content": "Translate to 中文: Hello"}
+            ])
+        );
+        for (key, expected) in [
+            ("temperature", json!(0.7)),
+            ("top_p", json!(0.6)),
+            ("top_k", json!(20)),
+            ("repetition_penalty", json!(1.05)),
+            ("max_tokens", json!(4096)),
+        ] {
+            assert_eq!(body[key], expected, "{key}");
+        }
+    }
+
+    #[test]
+    fn omitted_parameters_and_empty_system_are_not_sent() {
+        let settings: TranslationSettings = serde_json::from_value(json!({
+            "system_prompt": "  ", "temperature": null
+        }))
+        .unwrap();
+        let body = build_request_body(&settings, "Hello");
+        assert_eq!(
+            body,
+            json!({"model": settings.model, "messages": [
+                {"role": "user", "content": "Hello"}
+            ]})
+        );
+    }
+
+    #[test]
+    fn user_prefix_and_literal_source_placeholders_are_preserved() {
+        let mut settings = TranslationSettings {
+            use_system_prompt: false,
+            user_prompt: "Into {target}:".into(),
+            ..TranslationSettings::default()
+        };
+        assert_eq!(
+            build_request_body(&settings, "{target} {text}")["messages"][0]["content"],
+            "Into zh-CN:\n\n{target} {text}"
+        );
+        settings.user_prompt = "Into {target}: {text}".into();
+        assert_eq!(
+            build_request_body(&settings, "{target} {text}")["messages"][0]["content"],
+            "Into zh-CN: {target} {text}"
+        );
+        settings.user_prompt.clear();
+        assert_eq!(
+            build_request_body(&settings, "Hello")["messages"][0]["content"],
+            "Hello"
+        );
+    }
+
+    #[test]
+    fn legacy_settings_round_trip() {
+        let settings: TranslationSettings = serde_json::from_value(json!({
+            "model": "local-alias", "system_prompt": "Custom {target}",
+            "endpoint": "http://localhost:8000/v1/chat/completions", "api_key": "test-key"
+        }))
+        .unwrap();
+        assert!(settings.use_system_prompt);
+        assert_eq!(settings.user_prompt, "{text}");
+        assert_eq!(settings.temperature, Some(0.2));
+        let restored: TranslationSettings =
+            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(settings, restored);
+        let body = build_request_body(&restored, "Hello");
+        assert_eq!(
+            body["messages"],
+            json!([
+                {"role": "system", "content": "Custom zh-CN"},
+                {"role": "user", "content": "Hello"}
+            ])
+        );
+        assert_eq!(body["temperature"], 0.2);
+    }
+
+    #[test]
+    fn disabled_system_prompt_edits_do_not_split_pending_requests() {
+        let (mut translator, requests, _) = translator_channels();
+        let mut settings = TranslationSettings {
+            use_system_prompt: false,
+            ..TranslationSettings::default()
+        };
+        queued_id(translator.submit("Hello".into(), &settings));
+        settings.system_prompt = "Ignored".into();
+        queued_id(translator.submit("Hello".into(), &settings));
+        assert!(requests.try_recv().is_ok());
         assert!(requests.try_recv().is_err());
     }
 

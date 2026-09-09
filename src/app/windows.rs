@@ -65,9 +65,9 @@ impl PlayerApp {
                                 .button(language.text("ui.translation_settings"))
                                 .clicked()
                             {
-                                self.show_options = true;
+                                self.show_translation_settings = true;
                                 context.send_viewport_cmd_to(
-                                    egui::ViewportId::from_hash_of("player-settings"),
+                                    egui::ViewportId::from_hash_of("player-translation-settings"),
                                     egui::ViewportCommand::Focus,
                                 );
                             }
@@ -116,6 +116,32 @@ impl PlayerApp {
                 self.settings_file.save(&self.settings);
             }
         }
+        if self.show_translation_settings {
+            let mut open = true;
+            context.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("player-translation-settings"),
+                egui::ViewportBuilder::default()
+                    .with_title(language.text("ui.glulx_player_translation_settings"))
+                    .with_inner_size([540.0, 660.0])
+                    .with_min_inner_size([380.0, 280.0]),
+                |root, _| {
+                    if root.input(|input| input.viewport().close_requested()) {
+                        open = false;
+                        return;
+                    }
+                    egui::CentralPanel::default().show(root, |ui| {
+                        ui.push_id("player-translation-settings-controls", |ui| {
+                            egui::ScrollArea::vertical()
+                                .show(ui, |ui| self.translation_settings_contents(ui));
+                        });
+                    });
+                },
+            );
+            self.show_translation_settings = open;
+            if !open {
+                self.settings_file.save(&self.settings);
+            }
+        }
     }
     fn settings_contents(&mut self, ui: &mut egui::Ui) {
         let before = self.settings.language;
@@ -152,19 +178,7 @@ impl PlayerApp {
         }
         let language = self.settings.language.resolve();
         let context = ui.ctx().clone();
-        if let Some(path) = &self.settings_file.path {
-            ui.add(
-                egui::Label::new(language.format("ui.settings_file", &[&path.display()]))
-                    .truncate(),
-            )
-            .on_hover_text(path.display().to_string());
-        }
-        if ui.button(language.text("ui.save_settings")).clicked() {
-            self.settings_file.save(&self.settings);
-        }
-        if let Some(error) = &self.settings_file.error {
-            ui.colored_label(Color32::from_rgb(170, 50, 45), language.message(error));
-        }
+        self.settings_save_controls(ui);
         ui.separator();
         let appearance = (
             self.settings.font_size,
@@ -243,6 +257,39 @@ impl PlayerApp {
             &mut self.settings.show_chrome,
             language.text("ui.menus_toolbar_and_status_bar"),
         );
+        if appearance
+            != (
+                self.settings.font_size,
+                self.settings.text_color,
+                self.settings.background_color,
+            )
+        {
+            // Refresh an idle presentation after the next logic pass applies
+            // host colors/fonts. A running story still waits for its boundary.
+            self.presented_state = RunState::Running;
+        }
+    }
+
+    fn settings_save_controls(&mut self, ui: &mut egui::Ui) {
+        let language = self.settings.language.resolve();
+        if let Some(path) = &self.settings_file.path {
+            ui.add(
+                egui::Label::new(language.format("ui.settings_file", &[&path.display()]))
+                    .truncate(),
+            )
+            .on_hover_text(path.display().to_string());
+        }
+        if ui.button(language.text("ui.save_settings")).clicked() {
+            self.settings_file.save(&self.settings);
+        }
+        if let Some(error) = &self.settings_file.error {
+            ui.colored_label(Color32::from_rgb(170, 50, 45), language.message(error));
+        }
+    }
+
+    fn translation_settings_contents(&mut self, ui: &mut egui::Ui) {
+        let language = self.settings.language.resolve();
+        self.settings_save_controls(ui);
         ui.separator();
         ui.heading(language.text("ui.translation"));
         ui.checkbox(
@@ -257,21 +304,48 @@ impl PlayerApp {
         ui.text_edit_singleline(&mut self.settings.translation.target_language);
         ui.label(language.text("ui.api_key_kept_in_local_app_settings"));
         ui.add(egui::TextEdit::singleline(&mut self.settings.translation.api_key).password(true));
-        ui.label(language.text("ui.system_prompt"));
-        ui.add(
-            egui::TextEdit::multiline(&mut self.settings.translation.system_prompt).desired_rows(4),
+        ui.checkbox(
+            &mut self.settings.translation.use_system_prompt,
+            language.text("ui.use_system_prompt"),
         );
-        if appearance
-            != (
-                self.settings.font_size,
-                self.settings.text_color,
-                self.settings.background_color,
-            )
-        {
-            // Refresh an idle presentation after the next logic pass applies
-            // host colors/fonts. A running story still waits for its boundary.
-            self.presented_state = RunState::Running;
-        }
+        ui.add_enabled_ui(self.settings.translation.use_system_prompt, |ui| {
+            ui.label(language.text("ui.system_prompt"));
+            ui.add(
+                egui::TextEdit::multiline(&mut self.settings.translation.system_prompt)
+                    .desired_rows(4),
+            );
+        });
+        ui.label(language.text("ui.user_prompt"));
+        ui.add(
+            egui::TextEdit::multiline(&mut self.settings.translation.user_prompt).desired_rows(4),
+        );
+        ui.weak(language.format("ui.prompt_template_help", &[&"{target}", &"{text}"]));
+        ui.label(language.text("ui.sampling_parameters"));
+        ui.weak(language.text("ui.sampling_parameters_help"));
+        let settings = &mut self.settings.translation;
+        optional_translation_parameter(
+            ui,
+            language.text("ui.temperature"),
+            &mut settings.temperature,
+            0.7,
+            0.0..=2.0,
+        );
+        optional_translation_parameter(ui, "top_p", &mut settings.top_p, 0.6, 0.0..=1.0);
+        optional_translation_parameter(ui, "top_k", &mut settings.top_k, 20, 0..=u32::MAX);
+        optional_translation_parameter(
+            ui,
+            "repetition_penalty",
+            &mut settings.repetition_penalty,
+            1.05,
+            0.01..=100.0,
+        );
+        optional_translation_parameter(
+            ui,
+            language.text("ui.max_tokens"),
+            &mut settings.max_tokens,
+            4096,
+            1..=u32::MAX,
+        );
     }
 
     fn apply_selected_font(&mut self, context: &egui::Context) {
@@ -338,6 +412,28 @@ fn translation_view(ui: &mut egui::Ui, turns: &[Turn], font_size: f32, language:
                 }
                 ui.add_space(14.0);
             });
+        }
+    });
+}
+
+fn optional_translation_parameter<T: egui::emath::Numeric>(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut Option<T>,
+    initial: T,
+    range: std::ops::RangeInclusive<T>,
+) {
+    ui.horizontal(|ui| {
+        let mut enabled = value.is_some();
+        if ui.checkbox(&mut enabled, label).changed() {
+            *value = enabled.then_some(initial);
+        }
+        if let Some(value) = value {
+            ui.add(
+                egui::DragValue::new(value)
+                    .range(range)
+                    .speed(if T::INTEGRAL { 1.0 } else { 0.01 }),
+            );
         }
     });
 }

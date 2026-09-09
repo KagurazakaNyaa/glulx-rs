@@ -153,5 +153,13 @@
   "ui.apply_font": "应用字体",
   "ui.enable_turn_translation": "启用回合翻译",
   "ui.type_in_highlighted_field": "请在高亮字段中输入",
-  "ui.options_window": "选项"
+  "ui.options_window": "选项",
+  "ui.use_system_prompt": "发送系统提示词",
+  "ui.user_prompt": "用户提示词模板",
+  "ui.prompt_template_help": "{0} 表示目标语言，用户模板中的 {1} 表示原文。不含 {1} 时，原文自动追加在空行之后。",
+  "ui.sampling_parameters": "采样与输出限制",
+  "ui.sampling_parameters_help": "未勾选的参数不发送，使用服务端默认值。top_k 和 repetition_penalty 需要服务端支持。",
+  "ui.temperature": "温度",
+  "ui.max_tokens": "最大输出 token 数（max_tokens）",
+  "ui.glulx_player_translation_settings": "Glulx 播放器 — 翻译设置"
 }
