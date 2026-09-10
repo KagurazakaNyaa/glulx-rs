@@ -25,9 +25,9 @@
 - [x] `accelfunc/accelparam` 与 Inform 加速函数 1–13；未知函数取消注册，未知参数合法忽略。属性、类、隐私和旧/新对象布局与 Glulxe 差分一致。
 - [x] Glulx gestalt 与实现对齐：3.1.3、Float、Double、ExtUndo、加速设置；加速函数 1–13 均声明支持。
 - [x] 启动和 `setrandom(0)` 使用系统熵；非零 seed 可复现，正/负/零范围有回归。
-- [x] 多级 undo、hasundo/discardundo 正确结果；最多 16 个状态且共用 64 MiB 估算预算。
+- [x] 多级 undo、hasundo/discardundo 正确结果；最多 16 个状态且共用 256 MiB 估算预算。
 - [x] restore/undo/restart 不回滚 RNG、I/O system、字符串表、Glk 对象及保护区定义；restart 保留 undo。
-- [x] 堆分配、碎片合并、释放回缩、存档/undo 所有权；256 MiB 内存上限、失败分配及保护区跨扩展内存回归。
+- [x] 堆分配、碎片合并、释放回缩、存档/undo 所有权；1 GiB 内存上限、失败分配及保护区跨扩展内存回归。
 
 ## Glk
 
@@ -92,4 +92,4 @@
 
 ## 现有限制与规范范围
 
-网格按规范保持统一格尺寸，忽略改变格布局的 hints 0–3/6；存在对应 light 字体时使用真实细字重，缺失时回退常规并如实报告。缺少字形返回 CannotPrint，可加载备用字体。MOD/XM/S3M/IT 均支持，未宣称全部历史方言或与特定硬件位精确重放。Blorb 的 Rect/Reso/APal/Loop 属于 Z-machine 范围。VM 内存上限为 256 MiB，undo 最多 16 个状态且共用 64 MiB 估算预算。图片源超过 16 megapixels 或 decoder 128 MiB 分配预算时返回不可用；绘制目标尺寸不受此源图像限制。上述资源限额是当前实现策略；undo 估算包含内存/栈/故事映像，未计堆索引及分配器开销，未作为缺失功能勾选。容器读取仍容忍非零 padding 和未索引 GLUL 回退，详见复核文档，不宣称拒绝全部非法容器。
+网格按规范保持统一格尺寸，忽略改变格布局的 hints 0–3/6；存在对应 light 字体时使用真实细字重，缺失时回退常规并如实报告。缺少字形返回 CannotPrint，可加载备用字体。MOD/XM/S3M/IT 均支持，未宣称全部历史方言或与特定硬件位精确重放。Blorb 的 Rect/Reso/APal/Loop 属于 Z-machine 范围。VM 内存上限默认为 1 GiB，undo 最多 16 个状态且共用 256 MiB 估算预算。图片 RGBA 输出受可配置上限约束，默认 256 MiB；解码器分配预算为该上限的两倍。绘制目标尺寸不受此源图像限制。上述资源限额是当前实现策略；undo 估算包含内存/栈/故事映像，未计堆索引及分配器开销，未作为缺失功能勾选。容器读取仍容忍非零 padding 和未索引 GLUL 回退，详见复核文档，不宣称拒绝全部非法容器。
