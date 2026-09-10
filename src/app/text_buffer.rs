@@ -1,15 +1,20 @@
 //! Flowing text and images share one layout so resizing preserves Glk's stream order.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use eframe::egui::{self, Color32, RichText};
 
-use super::{PlayerSettings, color_word, rgb, texture_image};
+use super::{PlayerSettings, color_word, media::ImageDecodeWorker, rgb, texture_image};
 use crate::{Vm, vm::WindowView};
 
 #[derive(Default)]
 pub(super) struct ImageCache {
     entries: HashMap<u32, (egui::TextureHandle, u64)>,
+    pending: HashMap<u32, u64>,
+    failed: HashSet<u32>,
     bytes: usize,
     tick: u64,
 }
@@ -17,26 +22,55 @@ pub(super) struct ImageCache {
 impl ImageCache {
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.pending.clear();
+        self.failed.clear();
         self.bytes = 0;
     }
 
-    fn get(&mut self, ui: &egui::Ui, vm: &Vm, resource: u32) -> Option<egui::TextureHandle> {
+    fn get(
+        &mut self,
+        ui: &egui::Ui,
+        vm: &Vm,
+        decoder: &mut ImageDecodeWorker,
+        results: &mut HashMap<u64, Result<Arc<image::RgbaImage>, String>>,
+        resource: u32,
+    ) -> Option<egui::TextureHandle> {
         self.tick += 1;
         if let Some((texture, used)) = self.entries.get_mut(&resource) {
             *used = self.tick;
             return Some(texture.clone());
         }
-        let _stage = crate::diagnostics::stage("text-image");
+        if self.failed.contains(&resource) {
+            return None;
+        }
         let limits = vm.resource_limits();
-        let bytes = vm.image_resource(resource)?;
-        let pixels = crate::picture::decode_with_limit(
-            bytes,
-            crate::memory::ResourceLimits::bytes(limits.decoded_image_mib) as u64,
-        )
-        .ok()?;
+        let pixels = if let Some(id) = self.pending.get(&resource).copied() {
+            let Some(result) = results.remove(&id) else {
+                ui.ctx().request_repaint();
+                return None;
+            };
+            self.pending.remove(&resource);
+            let _stage = crate::diagnostics::stage("text-image");
+            match result {
+                Ok(pixels) => pixels,
+                Err(_) => {
+                    self.failed.insert(resource);
+                    return None;
+                }
+            }
+        } else {
+            let bytes = vm.image_resource(resource)?;
+            let id = decoder.submit(
+                bytes.to_vec(),
+                crate::memory::ResourceLimits::bytes(limits.decoded_image_mib) as u64,
+            )?;
+            self.pending.insert(resource, id);
+            ui.ctx().request_repaint();
+            return None;
+        };
         let texture = ui.ctx().load_texture(
             format!("glk-buffer-image-{resource}"),
-            texture_image(ui.ctx(), &pixels),
+            texture_image(ui.ctx(), pixels.as_ref()),
             egui::TextureOptions::LINEAR,
         );
         let cost = texture.size()[0] * texture.size()[1] * 4;
@@ -552,12 +586,15 @@ impl LayoutCache {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn show(
     ui: &mut egui::Ui,
     view: &WindowView,
     settings: &PlayerSettings,
     vm: Option<&Vm>,
     images: &mut ImageCache,
+    decoder: &mut ImageDecodeWorker,
+    results: &mut HashMap<u64, Result<Arc<image::RgbaImage>, String>>,
     layouts: &mut LayoutCache,
     revision: u64,
 ) -> Option<u32> {
@@ -615,7 +652,7 @@ pub(super) fn show(
             }
             Paint::Image(resource) => {
                 let texture = if let Some(vm) = vm {
-                    images.get(ui, vm, *resource)
+                    images.get(ui, vm, decoder, results, *resource)
                 } else {
                     images
                         .entries
@@ -1098,6 +1135,8 @@ mod cache_tests {
             hints: Default::default(),
         };
         let mut images = ImageCache::default();
+        let mut decoder = ImageDecodeWorker::default();
+        let mut results = HashMap::new();
         let mut layouts = LayoutCache::default();
         let settings = PlayerSettings::default();
         let mut render = |width, view: &WindowView, revision| {
@@ -1117,6 +1156,8 @@ mod cache_tests {
                             &settings,
                             None,
                             &mut images,
+                            &mut decoder,
+                            &mut results,
                             &mut layouts,
                             revision,
                         );
@@ -1152,10 +1193,38 @@ mod cache_tests {
         });
         let context = egui::Context::default();
         let mut cache = ImageCache::default();
+        let mut decoder = ImageDecodeWorker::default();
+        let mut results = HashMap::new();
         let mut output = context.run_ui(Default::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                assert!(cache.get(ui, &vm, 1).is_some());
-                assert!(cache.get(ui, &vm, 2).is_some());
+                assert!(cache.get(ui, &vm, &mut decoder, &mut results, 1).is_none());
+            });
+        });
+        output.textures_delta.clear();
+        for _ in 0..1000 {
+            results.extend(decoder.poll().map(|result| (result.id, result.image)));
+            if !results.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let mut output = context.run_ui(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                assert!(cache.get(ui, &vm, &mut decoder, &mut results, 1).is_some());
+                assert!(cache.get(ui, &vm, &mut decoder, &mut results, 2).is_none());
+            });
+        });
+        output.textures_delta.clear();
+        for _ in 0..1000 {
+            results.extend(decoder.poll().map(|result| (result.id, result.image)));
+            if !results.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let mut output = context.run_ui(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                assert!(cache.get(ui, &vm, &mut decoder, &mut results, 2).is_some());
                 assert_eq!(cache.bytes, 1024 * 1024);
                 assert!(!cache.entries.contains_key(&1));
                 assert!(cache.entries.contains_key(&2));
@@ -1169,7 +1238,7 @@ mod cache_tests {
         });
         let mut output = context.run_ui(Default::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                assert!(cache.get(ui, &vm, 1).is_some());
+                assert!(cache.get(ui, &vm, &mut decoder, &mut results, 1).is_none());
                 assert_eq!(cache.bytes, 0);
                 assert!(cache.entries.is_empty());
             });

@@ -50,8 +50,8 @@ pub enum InputRequest {
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct ImageRequest {
-    /// Reuse validation's decode for the first host draw. Desktop snapshots
-    /// retain `data` instead, so this cache is never serialized.
+    /// A host may provide a predecoded image; desktop snapshots retain `data`
+    /// instead, so this cache is never serialized.
     #[serde(skip)]
     pub decoded: Option<std::sync::Arc<image::RgbaImage>>,
     pub window: u32,
@@ -495,8 +495,6 @@ pub struct Vm {
     #[serde(skip)]
     image_info: BTreeMap<u32, Option<[u32; 2]>>,
     #[serde(skip)]
-    decoded_picture: Option<(u32, std::sync::Arc<image::RgbaImage>)>,
-    #[serde(skip)]
     presentation_revision: u64,
     #[serde(skip)]
     presentation_pending: bool,
@@ -559,7 +557,6 @@ impl Vm {
     pub fn set_resource_limits(&mut self, limits: crate::memory::ResourceLimits) {
         self.resource_limits = limits.normalized();
         self.image_info.clear();
-        self.decoded_picture = None;
         self.trim_undo(0);
     }
 
@@ -621,7 +618,6 @@ impl Vm {
             accelerated_return: None,
             text_appearance: TextAppearance::default(),
             image_info: BTreeMap::new(),
-            decoded_picture: None,
             presentation_revision: 0,
             presentation_pending: false,
             instructions_executed: 0,

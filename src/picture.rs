@@ -12,8 +12,18 @@ pub(crate) fn decode(data: &[u8]) -> image::ImageResult<RgbaImage> {
 }
 
 pub(crate) fn decode_with_limit(data: &[u8], maximum: u64) -> image::ImageResult<RgbaImage> {
+    dimensions_with_limit(data, maximum)?;
     let reader = || ImageReader::new(Cursor::new(data)).with_guessed_format();
-    let (width, height) = reader()?.into_dimensions()?;
+    let mut reader = reader()?;
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(maximum.saturating_mul(2));
+    reader.limits(limits);
+    Ok(reader.decode()?.to_rgba8())
+}
+
+pub(crate) fn dimensions_with_limit(data: &[u8], maximum: u64) -> image::ImageResult<[u32; 2]> {
+    let reader = ImageReader::new(Cursor::new(data)).with_guessed_format()?;
+    let (width, height) = reader.into_dimensions()?;
     if width == 0
         || height == 0
         || (u64::from(width) * u64::from(height))
@@ -24,11 +34,7 @@ pub(crate) fn decode_with_limit(data: &[u8], maximum: u64) -> image::ImageResult
             image::error::LimitError::from_kind(image::error::LimitErrorKind::InsufficientMemory),
         ));
     }
-    let mut reader = reader()?;
-    let mut limits = image::Limits::default();
-    limits.max_alloc = Some(maximum.saturating_mul(2));
-    reader.limits(limits);
-    Ok(reader.decode()?.to_rgba8())
+    Ok([width, height])
 }
 
 pub(crate) fn draw_scaled(

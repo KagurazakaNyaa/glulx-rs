@@ -21,6 +21,7 @@ mod canvas;
 mod font_dialog;
 use canvas::Canvas as DisplayedGraphics;
 mod fonts;
+mod media;
 mod settings_file;
 mod text_buffer;
 mod text_grid;
@@ -119,6 +120,11 @@ struct Session {
     input: String,
     timer: Option<u32>,
     canvases: Vec<SavedCanvas>,
+}
+
+struct PendingImageDecode {
+    id: u64,
+    request: crate::vm::ImageRequest,
 }
 
 struct FileBrowser {
@@ -251,6 +257,10 @@ pub struct PlayerApp {
     presented_state: RunState,
     image_cache: HashMap<u32, (std::sync::Arc<canvas::ImageAsset>, u64)>,
     image_cache_tick: u64,
+    image_decoder: media::ImageDecodeWorker,
+    image_results: HashMap<u64, Result<std::sync::Arc<image::RgbaImage>, String>>,
+    pending_graphics: VecDeque<GraphicsRequest>,
+    pending_image: Option<PendingImageDecode>,
     gpu_canvas: bool,
     buffer_images: text_buffer::ImageCache,
     status: String,
@@ -283,6 +293,13 @@ impl PlayerApp {
         self.presented_revision = 0;
         self.text_layout_revisions.clear();
         self.presented_state = RunState::Running;
+    }
+
+    fn clear_media(&mut self) {
+        self.image_cache.clear();
+        self.image_results.clear();
+        self.pending_graphics.clear();
+        self.pending_image = None;
     }
 
     fn rebuild_transcript_index(&mut self) {
@@ -417,6 +434,10 @@ impl PlayerApp {
             presented_state: RunState::Running,
             image_cache: HashMap::new(),
             image_cache_tick: 0,
+            image_decoder: Default::default(),
+            image_results: HashMap::new(),
+            pending_graphics: VecDeque::new(),
+            pending_image: None,
             gpu_canvas,
             buffer_images: text_buffer::ImageCache::default(),
             status: "ui.open_a_ulx_or_gblorb_story_to_begin".to_owned(),
@@ -533,7 +554,7 @@ impl PlayerApp {
                 self.game_status.clear();
                 self.graphics.clear();
                 self.clear_presentation();
-                self.image_cache.clear();
+                self.clear_media();
                 self.buffer_images.clear();
                 self.cover = None;
                 self.error = None;
@@ -557,7 +578,7 @@ impl PlayerApp {
                     self.game_status.clear();
                     self.graphics.clear();
                     self.clear_presentation();
-                    self.image_cache.clear();
+                    self.clear_media();
                     self.buffer_images.clear();
                     self.error = None;
                     self.status = "ui.story_restarted".to_owned();
@@ -787,6 +808,68 @@ impl PlayerApp {
         self.new_translation_view = false;
     }
 
+    fn apply_draw_request(
+        &mut self,
+        context: &egui::Context,
+        request: crate::vm::ImageRequest,
+        decoded: Option<Result<std::sync::Arc<image::RgbaImage>, String>>,
+        limits: crate::memory::ResourceLimits,
+    ) {
+        if request.canvas_size.contains(&0) {
+            return;
+        }
+        self.image_cache_tick += 1;
+        let tick = self.image_cache_tick;
+        let source = if let Some((source, used)) = self.image_cache.get_mut(&request.resource) {
+            *used = tick;
+            source.clone()
+        } else {
+            let Some(decoded) = decoded else {
+                return;
+            };
+            match decoded {
+                Ok(decoded) => {
+                    let source = canvas::ImageAsset::new(context, decoded);
+                    self.image_cache
+                        .insert(request.resource, (source.clone(), tick));
+                    while self
+                        .image_cache
+                        .values()
+                        .map(|(asset, _)| asset.byte_len())
+                        .sum::<usize>()
+                        > crate::memory::ResourceLimits::bytes(limits.graphics_cache_mib)
+                    {
+                        let oldest = *self
+                            .image_cache
+                            .iter()
+                            .min_by_key(|(_, (_, used))| *used)
+                            .unwrap()
+                            .0;
+                        self.image_cache.remove(&oldest);
+                    }
+                    source
+                }
+                Err(error) => {
+                    self.status = format!("Could not decode picture {}: {error}", request.resource);
+                    return;
+                }
+            }
+        };
+        let size = request
+            .requested_size
+            .unwrap_or([source.pixels.width(), source.pixels.height()]);
+        let canvas = ensure_canvas(
+            context,
+            &mut self.graphics,
+            request.window,
+            request.canvas_size,
+            0xffffff,
+        );
+        canvas.use_cpu(!self.gpu_canvas);
+        canvas.draw_hyperlinked(context, source, request.position, size, request.hyperlink);
+        self.dirty_graphics.insert(request.window);
+    }
+
     fn poll_graphics(&mut self, context: &egui::Context) {
         let _stage = crate::diagnostics::stage("graphics");
         let limits = self
@@ -794,9 +877,23 @@ impl PlayerApp {
             .as_ref()
             .map(Vm::resource_limits)
             .unwrap_or_default();
-        let requests = self.vm.as_mut().map(Vm::take_graphics).unwrap_or_default();
-        let dirty = &mut self.dirty_graphics;
-        for request in requests {
+        let results: Vec<_> = self.image_decoder.poll().collect();
+        for result in results {
+            self.image_results.insert(result.id, result.image);
+        }
+        self.pending_graphics
+            .extend(self.vm.as_mut().map(Vm::take_graphics).unwrap_or_default());
+
+        if let Some(pending) = self.pending_image.take() {
+            let Some(decoded) = self.image_results.remove(&pending.id) else {
+                self.pending_image = Some(pending);
+                context.request_repaint();
+                return;
+            };
+            self.apply_draw_request(context, pending.request, Some(decoded), limits);
+        }
+
+        while let Some(request) = self.pending_graphics.pop_front() {
             match request {
                 GraphicsRequest::Resize {
                     window,
@@ -805,83 +902,39 @@ impl PlayerApp {
                 } => {
                     if canvas_size.contains(&0) {
                         self.graphics.remove(&window);
-                        dirty.insert(window);
+                        self.dirty_graphics.insert(window);
                     } else {
                         ensure_canvas(context, &mut self.graphics, window, canvas_size, background)
                             .use_cpu(!self.gpu_canvas);
-                        dirty.insert(window);
+                        self.dirty_graphics.insert(window);
                     }
                 }
-                GraphicsRequest::Draw(request) => {
+                GraphicsRequest::Draw(mut request) => {
                     if request.canvas_size.contains(&0) {
                         continue;
                     }
-                    self.image_cache_tick += 1;
-                    let tick = self.image_cache_tick;
-                    let source =
-                        if let Some((source, used)) = self.image_cache.get_mut(&request.resource) {
-                            *used = tick;
-                            source.clone()
-                        } else {
-                            match request.decoded.map(Ok).unwrap_or_else(|| {
-                                crate::picture::decode_with_limit(
-                                    &request.data,
-                                    crate::memory::ResourceLimits::bytes(limits.decoded_image_mib)
-                                        as u64,
-                                )
-                                .map(std::sync::Arc::new)
-                            }) {
-                                Ok(decoded) => {
-                                    let source = canvas::ImageAsset::new(context, decoded);
-                                    self.image_cache
-                                        .insert(request.resource, (source.clone(), tick));
-                                    while self
-                                        .image_cache
-                                        .values()
-                                        .map(|(asset, _)| asset.byte_len())
-                                        .sum::<usize>()
-                                        > crate::memory::ResourceLimits::bytes(
-                                            limits.graphics_cache_mib,
-                                        )
-                                    {
-                                        let oldest = *self
-                                            .image_cache
-                                            .iter()
-                                            .min_by_key(|(_, (_, used))| *used)
-                                            .unwrap()
-                                            .0;
-                                        self.image_cache.remove(&oldest);
-                                    }
-                                    source
-                                }
-                                Err(error) => {
-                                    self.status = format!(
-                                        "Could not decode picture {}: {error}",
-                                        request.resource
-                                    );
-                                    continue;
-                                }
-                            }
-                        };
-                    let size = request
-                        .requested_size
-                        .unwrap_or([source.pixels.width(), source.pixels.height()]);
-                    let canvas = ensure_canvas(
-                        context,
-                        &mut self.graphics,
-                        request.window,
-                        request.canvas_size,
-                        0xffffff,
-                    );
-                    canvas.use_cpu(!self.gpu_canvas);
-                    canvas.draw_hyperlinked(
-                        context,
-                        source,
-                        request.position,
-                        size,
-                        request.hyperlink,
-                    );
-                    dirty.insert(request.window);
+                    if self.image_cache.contains_key(&request.resource) {
+                        self.apply_draw_request(context, request, None, limits);
+                        continue;
+                    }
+                    if let Some(decoded) = request.decoded.take() {
+                        self.apply_draw_request(context, request, Some(Ok(decoded)), limits);
+                        continue;
+                    }
+                    let data = std::mem::take(&mut request.data);
+                    let Some(id) = self.image_decoder.submit(
+                        data,
+                        crate::memory::ResourceLimits::bytes(limits.decoded_image_mib) as u64,
+                    ) else {
+                        self.status = format!(
+                            "Could not decode picture {}: worker unavailable",
+                            request.resource
+                        );
+                        continue;
+                    };
+                    self.pending_image = Some(PendingImageDecode { id, request });
+                    context.request_repaint();
+                    break;
                 }
                 GraphicsRequest::Fill {
                     window,
@@ -896,7 +949,7 @@ impl PlayerApp {
                         ensure_canvas(context, &mut self.graphics, window, canvas_size, 0xffffff);
                     canvas.use_cpu(!self.gpu_canvas);
                     canvas.fill(context, rect, color);
-                    dirty.insert(window);
+                    self.dirty_graphics.insert(window);
                 }
                 GraphicsRequest::Clear {
                     window,
@@ -910,11 +963,11 @@ impl PlayerApp {
                         ensure_canvas(context, &mut self.graphics, window, canvas_size, color);
                     canvas.use_cpu(!self.gpu_canvas);
                     canvas.clear(color);
-                    dirty.insert(window);
+                    self.dirty_graphics.insert(window);
                 }
                 GraphicsRequest::Close { window } => {
                     self.graphics.remove(&window);
-                    dirty.insert(window);
+                    self.dirty_graphics.insert(window);
                 }
             }
         }
@@ -1293,6 +1346,8 @@ impl PlayerApp {
                                                 &self.settings,
                                                 self.vm.as_ref(),
                                                 &mut self.buffer_images,
+                                                &mut self.image_decoder,
+                                                &mut self.image_results,
                                                 &mut self.text_layouts,
                                                 self.text_layout_revisions
                                                     .get(&view.id)

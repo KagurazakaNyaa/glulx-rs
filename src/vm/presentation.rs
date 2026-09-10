@@ -237,19 +237,11 @@ impl Vm {
     pub(super) fn picture_dimensions(&mut self, resource: u32) -> Option<[u32; 2]> {
         *self.image_info.entry(resource).or_insert_with(|| {
             let data = self.story.resource(*b"Pict", resource)?;
-            let decoded = std::sync::Arc::new(
-                crate::picture::decode_with_limit(
-                    data,
-                    crate::memory::ResourceLimits::bytes(self.resource_limits.decoded_image_mib)
-                        as u64,
-                )
-                .ok()?,
-            );
-            let size = [decoded.width(), decoded.height()];
-            // Keep only the most recent validation result, not every image
-            // queried by a game that scans its resource catalog at startup.
-            self.decoded_picture = Some((resource, decoded));
-            Some(size)
+            crate::picture::dimensions_with_limit(
+                data,
+                crate::memory::ResourceLimits::bytes(self.resource_limits.decoded_image_mib) as u64,
+            )
+            .ok()
         })
     }
 
@@ -322,11 +314,7 @@ impl Vm {
             let size = image.dimensions(window.width);
             if size[0] != 0 && size[1] != 0 {
                 self.graphics.push(GraphicsRequest::Draw(ImageRequest {
-                    decoded: self
-                        .decoded_picture
-                        .as_ref()
-                        .filter(|(id, _)| *id == resource)
-                        .map(|(_, decoded)| decoded.clone()),
+                    decoded: None,
                     window: window_id,
                     resource,
                     data: data.to_vec(),
@@ -581,40 +569,37 @@ mod tests {
     }
 
     #[test]
-    fn first_graphics_draw_reuses_validation_decode_but_sessions_keep_source_bytes() {
+    fn graphics_draw_defers_decode_and_sessions_keep_source_bytes() {
         let mut vm = pictured_vm();
         assert!(vm.picture_dimensions(7).is_some());
-        let validated = vm.decoded_picture.as_ref().unwrap().1.clone();
         let window = vm.open_window(&[0, 0, 0, 5, 0]);
         vm.take_graphics();
         assert_eq!(vm.draw_image(0xe1, &[window, 7, 0, 0]), 1);
         let GraphicsRequest::Draw(draw) = vm.take_graphics().pop().unwrap() else {
             panic!("expected a graphics draw");
         };
-        assert!(std::sync::Arc::ptr_eq(
-            draw.decoded.as_ref().unwrap(),
-            &validated
-        ));
+        assert!(draw.decoded.is_none());
         let restored: ImageRequest =
             serde_json::from_str(&serde_json::to_string(&draw).unwrap()).unwrap();
         assert!(restored.decoded.is_none());
-        assert_eq!(crate::picture::decode(&restored.data).unwrap(), *validated);
+        let decoded = crate::picture::decode(&restored.data).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (80, 40));
     }
 
     #[test]
-    fn corrupt_picture_reports_failure_before_enqueuing_a_draw() {
+    fn corrupt_picture_is_deferred_to_the_host_decoder() {
         let mut vm = pictured_vm();
         let data = vm.story.container.as_mut().unwrap();
         let idat = data.windows(4).position(|part| part == b"IDAT").unwrap();
         data[idat + 4] ^= 0xff;
         let window = vm.open_window(&[0, 0, 0, 5, 0]);
         vm.take_graphics();
-        assert_eq!(vm.picture_dimensions(7), None);
-        assert_eq!(vm.draw_image(0xe1, &[window, 7, 0, 0]), 0);
-        assert!(vm.take_graphics().is_empty());
+        assert!(vm.picture_dimensions(7).is_some());
+        assert_eq!(vm.draw_image(0xe1, &[window, 7, 0, 0]), 1);
+        assert_eq!(vm.take_graphics().len(), 1);
         let buffer = vm.open_window(&[window, 0x22, 50, 3, 0]);
-        assert_eq!(vm.draw_image(0xe1, &[buffer, 7, 1, 0]), 0);
-        assert!(vm.glk_windows[&buffer].runs.is_empty());
+        assert_eq!(vm.draw_image(0xe1, &[buffer, 7, 1, 0]), 1);
+        assert_eq!(vm.glk_windows[&buffer].runs.len(), 1);
     }
 
     #[test]
