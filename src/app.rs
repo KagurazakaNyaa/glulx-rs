@@ -1720,8 +1720,14 @@ impl eframe::App for PlayerApp {
 
 fn idle_repaint_delay(vm: Option<&Vm>) -> std::time::Duration {
     let idle = std::time::Duration::from_millis(100);
-    vm.and_then(Vm::next_timer_delay)
-        .map_or(idle, |delay| delay.min(idle))
+    let timer = vm
+        .and_then(Vm::next_timer_delay)
+        .map_or(idle, |delay| delay.min(idle));
+    if vm.is_some_and(Vm::audio_needs_poll) {
+        timer.min(std::time::Duration::from_millis(10))
+    } else {
+        timer
+    }
 }
 
 /// Spend a short time budget advancing the story before presenting a frame.

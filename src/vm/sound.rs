@@ -151,6 +151,11 @@ impl Vm {
     pub(super) fn sound_available(&self) -> bool {
         self.audio.stream.is_some()
     }
+    pub(crate) fn audio_needs_poll(&self) -> bool {
+        self.channels
+            .values()
+            .any(|channel| channel.active || channel.fade.is_some())
+    }
     pub(super) fn poll_sound(&mut self) {
         for channel in self.channels.values_mut() {
             if let Some(sink) = &channel.sink {
@@ -468,6 +473,20 @@ mod tests {
         for selector in [8, 9, 10, 13, 21] {
             assert_eq!(vm.glk_gestalt(selector, 0), 0, "gestalt {selector}");
         }
+    }
+
+    #[test]
+    fn active_audio_requests_frequent_host_polls() {
+        let mut vm = vm();
+        assert!(!vm.audio_needs_poll());
+        let mut channel = channel();
+        channel.active = true;
+        vm.channels.insert(1, channel);
+        assert!(vm.audio_needs_poll());
+        vm.channels.get_mut(&1).unwrap().active = false;
+        vm.channels.get_mut(&1).unwrap().fade =
+            Some((Instant::now(), Duration::from_secs(1), 1, 2, 0));
+        assert!(vm.audio_needs_poll());
     }
 
     #[test]
