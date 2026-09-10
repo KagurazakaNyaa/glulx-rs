@@ -90,6 +90,11 @@ sparse/dense dirty-page snapshots on 64 MiB memory, 16 KiB cold/warm text layout
 512x384 CPU canvas rasterization. The benchmark tool records the
 commit, platform, Rust version, total time and time per operation; these metrics do not predict whole-game speedups.
 
+On the current Linux release build, the real-story startup workload measured peak HWM of about
+`755844 KiB` and `819592 KiB` for representative 650 MB and 705 MB Blorb files. This is a
+startup/resident-memory measurement, not a complete gameplay benchmark; hardware, allocator and
+story contents affect the result.
+
 Every budget in Settings supports **fixed MiB** or **1%–100% of startup memory**, saved beside the executable in `glulx-settings.json`. New configurations use these fixed defaults; existing numeric settings retain their fixed-MiB meaning:
 
 | Setting | Default MiB | What is counted |

@@ -11,7 +11,9 @@ terminal display/input host is selected for interactive TTYs.
 `Story` validates the executable header and memory layout, parses Blorb resource
 indexes, and exposes metadata and cover resources. Its executable image is shared
 with `Memory`'s initial-image baseline; file loading transfers owned container bytes
-where possible. `Memory` enforces ROM protection, address checks and a bounded allocation policy.
+where possible. `Memory` stores only the writable range from RAMSTART onward and reads
+ROM directly from the shared initial image, while enforcing ROM protection, address checks
+and a bounded allocation policy.
 
 `Vm` owns instruction decoding, execution, stacks and the Glk object model. Its
 bounded run interface keeps the GUI responsive. Unsupported instructions are typed

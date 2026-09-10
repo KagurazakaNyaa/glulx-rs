@@ -2,7 +2,7 @@
 
 [English](glulx-validation.md) | [中文](glulx-validation.ZH.md)
 
-Updated: 2026-09-10. The current implementation state is commit `ebab7cb`; local validation was run on Linux x86_64. This record describes the current tree. It does not certify exhaustive Glulx, Glk, media, or platform conformance.
+Updated: 2026-09-10. The current implementation state is commit `71e6889`; local validation was run on Linux x86_64. This record describes the current tree. It does not certify exhaustive Glulx, Glk, media, or platform conformance.
 
 ## Current Verification
 
@@ -15,7 +15,7 @@ RUSTC_WRAPPER= cargo build --release
 
 The current checks pass:
 
-- 271 library tests pass; 6 manual performance tests remain ignored.
+- 278 library tests pass; 6 manual performance tests remain ignored.
 - 6 CLI tests pass.
 - Formatting, all-target Clippy, and the release build pass.
 - The undo regression proves that a 2 MiB story can retain a one-page undo snapshot under a 1 MiB undo budget; the shared story image is not charged to that snapshot budget.
@@ -38,6 +38,8 @@ python3 tools/benchmark-stories.py \
 ```
 
 The real-story measurement is a startup/resident-memory workload, not a complete playthrough. The largest remaining memory costs are the story container, executable image, VM memory, and media/resource payloads. The repository does not currently use mmap or a block compiler.
+
+The current release measurement recorded peak HWM of `755844 KiB` and `819592 KiB` for representative 650 MB and 705 MB Blorb files. These numbers are machine- and story-dependent and are retained as comparison evidence, not as a universal limit.
 
 ## Coverage Matrix
 

@@ -2,7 +2,7 @@
 
 [English](glulx-spec-checklist.md) | [中文](glulx-spec-checklist.ZH.md)
 
-更新：2026-09-10。当前实现状态为 `ebab7cb`。`[x]` 表示实现及列出的验证已完成，不表示穷尽规范认证；开放工作使用 `[ ]`。规范依据、类别和验收条件见 [剩余能力复核](glulx-remaining-spec-audit.ZH.md)。详细测试、样本版本、复现命令见 [验收记录](glulx-validation.ZH.md)，实现限制见 [兼容性](compatibility.ZH.md)。
+更新：2026-09-10。当前实现状态为 `71e6889`。`[x]` 表示实现及列出的验证已完成，不表示穷尽规范认证；开放工作使用 `[ ]`。规范依据、类别和验收条件见 [剩余能力复核](glulx-remaining-spec-audit.ZH.md)。详细测试、样本版本、复现命令见 [验收记录](glulx-validation.ZH.md)，实现限制见 [兼容性](compatibility.ZH.md)。
 
 ## 规范边界
 
@@ -53,7 +53,7 @@
 
 ## 验收与维护
 
-- [x] 271 个库测试和 6 个 CLI 测试通过；另有 6 个性能测试保留为手动测量。按领域的测试矩阵和边界覆盖见验收记录。
+- [x] 278 个库测试和 6 个 CLI 测试通过；另有 6 个性能测试保留为手动测量。按领域的测试矩阵和边界覆盖见验收记录。
 - [x] 当前仓库通过 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings` 和 `cargo build --release`。
 - [x] Glulxercise 综合、单精度、双精度最终整合共 92 个通过段落、三轮全部通过；此前一次随机分布阈值失败亦保留在验收记录。
 - [x] Inform 加速函数 1–13 共 94 项结果与 Glulxe 精确一致；合成媒体故事验证图像重排、点击、MOD 完成事件和会话恢复。

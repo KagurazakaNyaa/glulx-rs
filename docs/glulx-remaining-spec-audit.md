@@ -2,7 +2,7 @@
 
 [English](glulx-remaining-spec-audit.md) | [中文](glulx-remaining-spec-audit.ZH.md)
 
-Updated: 2026-09-10. This audit describes the current implementation state at commit `ebab7cb`. It is a current scope and risk record, not a historical implementation log. Detailed test commands are in the [validation record](glulx-validation.md), and the implementation checklist is in [glulx-spec-checklist.md].
+Updated: 2026-09-10. This audit describes the current implementation state at commit `71e6889`. It is a current scope and risk record, not a historical implementation log. Detailed test commands are in the [validation record](glulx-validation.md), and the implementation checklist is in [glulx-spec-checklist.md].
 
 ## Sources and Classification
 
@@ -19,6 +19,7 @@ The review uses the [Glulx 3.1.3 specification](https://eblong.com/zarf/glulx/Gl
 | Terminal host | Interactive TTY mode supports grids/status, prefilled editing, timed cancellation, immediate character input, echo/terminators, file prompts, multi-window selection, and terminal restoration. Pipe mode remains a stable automation protocol. | Windows console and macOS on-device terminal validation remain open. |
 | Light weight | Real light font faces are used when available; missing faces fall back to regular and report the actual capability. | Font/DPI behavior on Windows and macOS remains unverified. |
 | Undo budget | Retained page snapshots, stack bytes, and heap-record payloads are charged; the shared story image and current VM address space are not charged. Zero disables retention; oversized candidates are rejected before the complete page table is materialized. | Page-count estimation and page construction still deserve profiling on very large dirty sets. |
+| VM memory layout | `Memory` stores only `RAMSTART..current_end`; ROM reads come from the shared story image. | Cross-boundary reads/copies and legacy desktop-session migration are covered; mmap and lazy container access remain future work. |
 | Container strictness | FORM/IFRS boundaries, RIdx structure, resource offsets, duplicate IDs, and identity checks are validated. | Odd padding bytes and an unindexed GLUL compatibility fallback are tolerated. The player does not claim rejection of every malformed container. |
 
 ## Optional and Host-Specific Scope
