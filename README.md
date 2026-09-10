@@ -84,9 +84,9 @@ The interface supports English and Chinese. **Settings → Interface language** 
 ## Performance and memory limits
 
 Use release or diagnostic builds for gameplay performance. Operand decoding and search comparisons
-now avoid temporary heap allocations. Local optimized microbenchmarks improved from roughly
-140 to 100 ms for five million branch instructions and from 270 to 18–19 ms for 1,000 searches
-through 16,384 records. These measurements do not predict whole-game speedups.
+now avoid temporary heap allocations. The repository provides two fixed microbenchmarks: five million
+branch dispatches and 1,000 linear searches through 16,384 records. The benchmark tool records the
+commit, platform, Rust version, total time and time per operation; these metrics do not predict whole-game speedups.
 
 Every budget in Settings supports **fixed MiB** or **1%–100% of startup memory**, saved beside the executable in `glulx-settings.json`. New configurations use these fixed defaults; existing numeric settings retain their fixed-MiB meaning:
 
@@ -145,11 +145,14 @@ than silently ignoring it. A limit that is too low may prevent startup or fail s
 without a chance to save progress. Recover with `--max-process-memory 0` or edit the JSON file.
 Stricter inherited system limits remain in effect.
 
-Run the microbenchmarks with:
+Run the microbenchmarks and write JSON evidence with:
 
 ```sh
-cargo test --release --lib benchmark_ -- --ignored --nocapture --test-threads=1
+python3 tools/benchmark-engine.py --output /tmp/glulx-engine-benchmark.json
 ```
+
+The tool uses release mode, one test thread and the `benchmark_` ignored tests. For comparisons, keep
+the machine, power mode, toolchain and working-tree commit fixed.
 
 ## Translation
 

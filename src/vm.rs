@@ -3377,13 +3377,19 @@ pub(crate) mod tests {
     fn benchmark_instruction_dispatch() {
         let story = Story::from_bytes(&image_with_program(&[0x20, 0x01, 0xff]), None).unwrap();
         let mut vm = Vm::new(story).unwrap();
+        let iterations = std::hint::black_box(5_000_000usize);
         let started = std::time::Instant::now();
         assert_eq!(
-            vm.run_steps(std::hint::black_box(5_000_000)).unwrap(),
+            vm.run_steps(iterations).unwrap(),
             RunState::Running
         );
         assert_eq!(vm.pc, 0x43);
-        eprintln!("instruction benchmark: {:?}", started.elapsed());
+        let elapsed = started.elapsed();
+        eprintln!(
+            "BENCHMARK name=instruction_dispatch iterations={iterations} elapsed_ns={} ns_per_iteration={:.3}",
+            elapsed.as_nanos(),
+            elapsed.as_secs_f64() * 1_000_000_000.0 / iterations as f64
+        );
     }
 
     // Run optimized, single-threaded; optionally enforce a local timing budget.
@@ -3397,8 +3403,9 @@ pub(crate) mod tests {
         for index in 0..records {
             vm.memory.write32(0x100 + index * 8, index + 1).unwrap();
         }
+        let iterations = 1000;
         let started = std::time::Instant::now();
-        for _ in 0..1000 {
+        for _ in 0..iterations {
             assert_eq!(
                 std::hint::black_box(&vm)
                     .linear_search(std::hint::black_box(records), 4, 0x100, 8, records, 0, 0,)
@@ -3407,7 +3414,11 @@ pub(crate) mod tests {
             );
         }
         let elapsed = started.elapsed();
-        eprintln!("search benchmark: {elapsed:?}");
+        eprintln!(
+            "BENCHMARK name=linear_search records={records} iterations={iterations} elapsed_ns={} ns_per_iteration={:.3}",
+            elapsed.as_nanos(),
+            elapsed.as_secs_f64() * 1_000_000_000.0 / iterations as f64
+        );
         if let Ok(budget) = std::env::var("GLULX_SEARCH_BUDGET_MS") {
             assert!(elapsed.as_secs_f64() * 1000.0 <= budget.parse::<f64>().unwrap());
         }

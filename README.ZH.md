@@ -49,8 +49,8 @@ File → Choose resources 通过重启故事应用资源选择。交互终端中
 ## 性能与内存额度
 
 请使用 release 或 diagnostic 构建测试游戏速度。解释器的指令操作数解码和搜索比较已去掉临时堆分配。
-本地优化构建的微基准：500 万次分支指令从约 140 ms 降至 100 ms；
-16,384 条记录重复查找 1,000 次从约 270 ms 降至 18–19 ms。这不是整款游戏的提速比例。
+仓库提供两个固定微基准：500 万次分支指令分发，以及 16,384 条记录的线性查找重复 1,000 次。
+基准工具会记录 commit、平台、Rust 版本、总耗时和每次操作耗时；这些指标不代表整款游戏的提速比例。
 
 Settings 中每项额度均可选择**固定大小（MiB）**或**启动内存比例（1%–100%）**，保存在可执行文件旁的 `glulx-settings.json`。新配置的默认固定额度如下；已有配置中的数字仍按固定 MiB 保留：
 
@@ -108,11 +108,13 @@ Windows 使用 Job Object 的进程提交内存限制。macOS 暂不支持进程
 无法保证游戏能先保存再退出。若因此无法启动，使用 `--max-process-memory 0` 或修改 JSON 恢复。
 已有更严格的系统限制仍然有效。
 
-复现微基准：
+复现微基准并生成 JSON 证据：
 
 ```sh
-cargo test --release --lib benchmark_ -- --ignored --nocapture --test-threads=1
+python3 tools/benchmark-engine.py --output /tmp/glulx-engine-benchmark.json
 ```
+
+工具内部使用 release、单线程和 `benchmark_` ignored tests；比较多次运行时应固定机器、电源模式、构建工具链和工作树 commit。
 
 ## 翻译
 
