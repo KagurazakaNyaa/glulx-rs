@@ -85,9 +85,14 @@ fn run_interactive(mut vm: Vm) -> Result<(), Box<dyn std::error::Error>> {
             }
             last_size_check = Instant::now();
         }
-        let state = vm
-            .run_steps(20_000)
-            .map_err(|error| format!("{error} at program counter {:#010x}", vm.pc()))?;
+        let state = {
+            let _stage = crate::diagnostics::stage("vm-slice");
+            let state = vm
+                .run_steps(20_000)
+                .map_err(|error| format!("{error} at program counter {:#010x}", vm.pc()))?;
+            crate::diagnostics::vm(&vm);
+            state
+        };
         let output = vm.take_output();
         let input_changed = Editor::synchronize(&vm, &mut editor);
         repaint |= !output.is_empty() || input_changed;
