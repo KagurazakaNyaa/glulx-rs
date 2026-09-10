@@ -504,6 +504,31 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "manual performance measurement"]
+    fn benchmark_dirty_page_snapshots() {
+        for (name, dirty_pages) in [("sparse", 1usize), ("dense", 4096)] {
+            let mut memory = Memory::new_with_limit(&story(), 64 * 1024 * 1024).unwrap();
+            assert!(memory.resize(64 * 1024 * 1024).unwrap());
+            memory.clear_dirty_pages();
+            for page in 0..dirty_pages {
+                memory
+                    .write8(0x100 + page as u32 * 256, (page % 255 + 1) as u8)
+                    .unwrap();
+            }
+            let started = std::time::Instant::now();
+            let pages = memory.snapshot_pages(None);
+            let elapsed = started.elapsed();
+            assert_eq!(pages.len(), dirty_pages);
+            eprintln!(
+                "BENCHMARK name=dirty_page_snapshot class={name} memory_bytes={} dirty_pages={dirty_pages} elapsed_ns={} ns_per_page={:.3}",
+                memory.len(),
+                elapsed.as_nanos(),
+                elapsed.as_secs_f64() * 1_000_000_000.0 / dirty_pages as f64
+            );
+        }
+    }
+
+    #[test]
     fn rom_is_read_only_and_ram_is_writable() {
         let mut memory = Memory::new(&story());
         assert!(matches!(

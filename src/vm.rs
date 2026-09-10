@@ -3393,6 +3393,27 @@ pub(crate) mod tests {
         );
     }
 
+    #[test]
+    #[ignore = "manual performance measurement"]
+    fn benchmark_text_output() {
+        for chars in [4_096usize, 8_192, 16_384] {
+            let story = Story::from_bytes(&image_with_program(&[0x81, 0x20]), None).unwrap();
+            let mut vm = Vm::new(story).unwrap();
+            let window = text_buffer_glk(&mut vm, 0x23, &[0, 0, 0, WINTYPE_TEXT_BUFFER, 0]);
+            let stream = text_buffer_glk(&mut vm, 0x2c, &[window]);
+            let text = "x".repeat(chars);
+            let started = std::time::Instant::now();
+            vm.glk_write_text(stream, &text);
+            let elapsed = started.elapsed();
+            assert_eq!(vm.take_output().chars().count(), chars);
+            eprintln!(
+                "BENCHMARK name=text_output chars={chars} elapsed_ns={} ns_per_char={:.3}",
+                elapsed.as_nanos(),
+                elapsed.as_secs_f64() * 1_000_000_000.0 / chars as f64
+            );
+        }
+    }
+
     // Run optimized, single-threaded; optionally enforce a local timing budget.
     #[test]
     #[ignore = "manual performance measurement"]

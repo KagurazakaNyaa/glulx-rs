@@ -85,7 +85,8 @@ The interface supports English and Chinese. **Settings → Interface language** 
 
 Use release or diagnostic builds for gameplay performance. Operand decoding and search comparisons
 now avoid temporary heap allocations. The repository provides two fixed microbenchmarks: five million
-branch dispatches and 1,000 linear searches through 16,384 records. The benchmark tool records the
+branch dispatches, 1,000 linear searches through 16,384 records, 4/8/16 KiB text output, and
+sparse/dense dirty-page snapshots on 64 MiB memory. The benchmark tool records the
 commit, platform, Rust version, total time and time per operation; these metrics do not predict whole-game speedups.
 
 Every budget in Settings supports **fixed MiB** or **1%–100% of startup memory**, saved beside the executable in `glulx-settings.json`. New configurations use these fixed defaults; existing numeric settings retain their fixed-MiB meaning:
