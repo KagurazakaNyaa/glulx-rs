@@ -1,12 +1,104 @@
 use super::*;
 use rodio::{DeviceSinkBuilder, MixerDeviceSink, Player as Sink, Source};
-use std::time::{Duration, Instant};
+use std::{
+    collections::BTreeMap,
+    sync::mpsc,
+    thread,
+    time::{Duration, Instant},
+};
 
 mod sampled;
 mod song;
 mod tracker;
 
 type SoundOutput = rodio::queue::SourcesQueueOutput;
+type PreparedSource = Box<dyn Source<Item = f32> + Send>;
+
+struct AudioDecodeWorker {
+    sender: mpsc::Sender<AudioDecodeTask>,
+    results: mpsc::Receiver<AudioDecodeResult>,
+    next_id: u64,
+}
+
+struct AudioDecodeTask {
+    id: u64,
+    bytes: Vec<u8>,
+    format: [u8; 4],
+    repeats: u32,
+    offset_ms: u64,
+    limits: crate::memory::ResourceLimits,
+}
+
+struct AudioDecodeResult {
+    id: u64,
+    source: Result<PreparedSource, String>,
+}
+
+impl Default for AudioDecodeWorker {
+    fn default() -> Self {
+        let (task_sender, task_receiver) = mpsc::channel::<AudioDecodeTask>();
+        let (result_sender, result_receiver) = mpsc::channel::<AudioDecodeResult>();
+        thread::Builder::new()
+            .name("glulx-audio-decode".to_owned())
+            .spawn(move || {
+                while let Ok(task) = task_receiver.recv() {
+                    let source = decode_sound_with_limits(
+                        &task.bytes,
+                        task.format,
+                        task.repeats,
+                        task.offset_ms,
+                        |_: u32| None,
+                        task.limits,
+                    )
+                    .ok_or_else(|| "unsupported or invalid sound resource".to_owned());
+                    if result_sender
+                        .send(AudioDecodeResult {
+                            id: task.id,
+                            source,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .expect("audio decoder worker must start");
+        Self {
+            sender: task_sender,
+            results: result_receiver,
+            next_id: 0,
+        }
+    }
+}
+
+impl AudioDecodeWorker {
+    fn submit(
+        &mut self,
+        bytes: Vec<u8>,
+        format: [u8; 4],
+        repeats: u32,
+        offset_ms: u64,
+        limits: crate::memory::ResourceLimits,
+    ) -> Option<u64> {
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+        self.sender
+            .send(AudioDecodeTask {
+                id,
+                bytes,
+                format,
+                repeats,
+                offset_ms,
+                limits,
+            })
+            .ok()
+            .map(|_| id)
+    }
+
+    fn poll(&self) -> impl Iterator<Item = AudioDecodeResult> + '_ {
+        self.results.try_iter()
+    }
+}
 
 /// One source submitted to the device for a whole play_multi call. Each idle
 /// sink supplies exactly one sample at every mixer step, so decoding/setup time
@@ -100,6 +192,16 @@ fn decode_sound_with_limits<'a>(
 #[derive(Default)]
 pub(super) struct AudioDevice {
     stream: Option<MixerDeviceSink>,
+    worker: Option<AudioDecodeWorker>,
+    pending: BTreeMap<u64, PendingSound>,
+}
+
+struct PendingSound {
+    channel: u32,
+    resource: u32,
+    repeats: u32,
+    notify: u32,
+    offset_ms: u64,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct Channel {
@@ -118,6 +220,8 @@ pub(super) struct Channel {
     sink: Option<Sink>,
     #[serde(skip)]
     fade: Option<(Instant, Duration, u32, u32, u32)>,
+    #[serde(skip)]
+    pending: Option<u64>,
 }
 impl Vm {
     pub fn enable_audio(&mut self) {
@@ -157,6 +261,72 @@ impl Vm {
             .any(|channel| channel.active || channel.fade.is_some())
     }
     pub(super) fn poll_sound(&mut self) {
+        let results: Vec<_> = self
+            .audio
+            .worker
+            .as_ref()
+            .into_iter()
+            .flat_map(AudioDecodeWorker::poll)
+            .collect();
+        for result in results {
+            let Some(pending) = self.audio.pending.remove(&result.id) else {
+                continue;
+            };
+            let mut output_to_add = None;
+            let mut failed_notification = None;
+            if let Some(channel) = self.channels.get_mut(&pending.channel) {
+                if channel.pending != Some(result.id) {
+                    continue;
+                }
+                channel.pending = None;
+                match result.source {
+                    Ok(source) => {
+                        let (sink, output) = Sink::new();
+                        sink.set_volume(channel.volume as f32 / 65536.0);
+                        if channel.paused {
+                            sink.pause();
+                        }
+                        sink.append(rodio::source::UniformSourceIterator::new(
+                            source,
+                            rodio::ChannelCount::new(2).unwrap(),
+                            rodio::SampleRate::new(tracker::SAMPLE_RATE).unwrap(),
+                        ));
+                        channel.repeats = pending.repeats;
+                        channel.position_ms = pending.offset_ms;
+                        channel.offset_ms = pending.offset_ms;
+                        channel.active = true;
+                        channel.resource = pending.resource;
+                        channel.notify = if pending.repeats == u32::MAX {
+                            0
+                        } else {
+                            pending.notify
+                        };
+                        channel.sink = Some(sink);
+                        output_to_add = Some(output);
+                    }
+                    Err(_) => {
+                        channel.active = false;
+                        channel.sink = None;
+                        if channel.notify != 0 {
+                            failed_notification = Some((channel.resource, channel.notify));
+                        }
+                        channel.notify = 0;
+                    }
+                }
+            }
+            if let Some(output) = output_to_add {
+                if let Some(stream) = &self.audio.stream {
+                    stream.mixer().add(AlignedSounds {
+                        outputs: vec![output],
+                    });
+                } else {
+                    self.stop_sound(pending.channel);
+                }
+            }
+            if let Some((resource, notify)) = failed_notification {
+                self.events.push_back([7, 0, resource, notify]);
+            }
+        }
         for channel in self.channels.values_mut() {
             if let Some(sink) = &channel.sink {
                 channel.position_ms = channel
@@ -208,6 +378,11 @@ impl Vm {
         notify: u32,
         offset_ms: u64,
     ) -> bool {
+        if let Some(format) = self.story.resource_type(*b"Snd ", resource)
+            && format != *b"SONG"
+        {
+            return self.queue_sound_at(id, resource, format, repeats, notify, offset_ms);
+        }
         let Ok(output) = self.prepare_sound_at(id, resource, repeats, notify, offset_ms) else {
             return false;
         };
@@ -225,7 +400,65 @@ impl Vm {
         }
     }
 
+    fn queue_sound_at(
+        &mut self,
+        id: u32,
+        resource: u32,
+        format: [u8; 4],
+        repeats: u32,
+        notify: u32,
+        offset_ms: u64,
+    ) -> bool {
+        if !self.channels.contains_key(&id) {
+            return false;
+        }
+        self.stop_sound(id);
+        if repeats == 0 {
+            return true;
+        }
+        if self.audio.stream.is_none() {
+            return false;
+        }
+        let Some(bytes) = self.story.sound_resource(resource) else {
+            return false;
+        };
+        let limits = self.resource_limits;
+        let worker = self.audio.worker.get_or_insert_with(Default::default);
+        let Some(request) = worker.submit(bytes.to_vec(), format, repeats, offset_ms, limits)
+        else {
+            return false;
+        };
+        let Some(channel) = self.channels.get_mut(&id) else {
+            return false;
+        };
+        channel.repeats = repeats;
+        channel.position_ms = offset_ms;
+        channel.offset_ms = offset_ms;
+        channel.active = true;
+        channel.resource = resource;
+        channel.notify = if repeats == u32::MAX { 0 } else { notify };
+        channel.pending = Some(request);
+        self.audio.pending.insert(
+            request,
+            PendingSound {
+                channel: id,
+                resource,
+                repeats,
+                notify,
+                offset_ms,
+            },
+        );
+        true
+    }
+
     fn stop_sound(&mut self, id: u32) {
+        let pending = self
+            .channels
+            .get_mut(&id)
+            .and_then(|channel| channel.pending.take());
+        if let Some(pending) = pending {
+            self.audio.pending.remove(&pending);
+        }
         if let Some(channel) = self.channels.get_mut(&id) {
             channel.sink = None;
             channel.active = false;
@@ -241,6 +474,13 @@ impl Vm {
         notify: u32,
         offset_ms: u64,
     ) -> Result<Option<SoundOutput>, ()> {
+        let pending = self
+            .channels
+            .get_mut(&id)
+            .and_then(|channel| channel.pending.take());
+        if let Some(pending) = pending {
+            self.audio.pending.remove(&pending);
+        }
         let Some(channel) = self.channels.get_mut(&id) else {
             return Err(());
         };
@@ -294,6 +534,7 @@ impl Vm {
         channel.resource = resource;
         channel.notify = if repeats == u32::MAX { 0 } else { notify };
         channel.sink = Some(sink);
+        channel.pending = None;
         Ok(Some(output))
     }
     pub(super) fn sound_call(&mut self, selector: u32, args: &[u32]) -> Result<u32, VmError> {
@@ -331,12 +572,14 @@ impl Vm {
                             fade_resume: None,
                             sink: None,
                             fade: None,
+                            pending: None,
                         },
                     );
                     id
                 }
             }
             0xf3 => {
+                self.stop_sound(arg(0));
                 self.channels.remove(&arg(0));
                 0
             }
@@ -454,6 +697,7 @@ mod tests {
             offset_ms: 0,
             sink: None,
             fade: None,
+            pending: None,
         }
     }
     fn vm() -> Vm {

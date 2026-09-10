@@ -563,6 +563,7 @@ mod tests {
                 offset_ms: 0,
                 sink: Some(sink),
                 fade: None,
+                pending: None,
             },
         );
         assert!(output.by_ref().take(1024).all(|value| value == 0.0));
