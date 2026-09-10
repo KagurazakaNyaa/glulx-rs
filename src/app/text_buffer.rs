@@ -432,7 +432,13 @@ fn measure_width(ui: &egui::Ui, rich: RichText, width: f32) -> (Arc<egui::Galley
         egui::Align::BOTTOM,
     );
     job.wrap.max_width = width;
+    let italic = job.sections.iter().any(|section| section.format.italics);
     let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
+    let galley = if italic {
+        super::fonts::repair_italic_galley(galley.clone())
+    } else {
+        galley
+    };
     let ascent = galley
         .rows
         .first()
@@ -1056,6 +1062,24 @@ mod tests {
                     })
                     .collect();
                 assert_eq!(reconstructed, view.runs[0].text);
+            });
+        });
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn italic_narrow_glyph_does_not_cross_its_quad() {
+        let context = egui::Context::default();
+        let output = context.run_ui(egui::RawInput::default(), |context| {
+            egui::CentralPanel::default().show(context, |ui| {
+                let (galley, _) = measure(ui, RichText::new("I").size(18.0).italics());
+                let vertices = &galley.rows[0].visuals.mesh.vertices;
+                assert_eq!(vertices.len(), 4);
+                assert!(
+                    vertices[0].pos.x <= vertices[3].pos.x,
+                    "italic glyph quad crosses itself: {:?}",
+                    vertices.iter().map(|vertex| vertex.pos).collect::<Vec<_>>()
+                );
             });
         });
         output.drop_without_applying_deltas();

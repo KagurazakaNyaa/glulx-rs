@@ -182,6 +182,49 @@ pub(super) fn family(style: crate::vm::ResolvedStyle) -> egui::FontFamily {
     }
 }
 
+/// Egui's faux italic shifts the top of every glyph by a fixed amount. That
+/// can make narrow glyph quads self-intersect, leaving only a clipped sliver
+/// visible (notably for an italic capital `I`). Keep the shear inside the
+/// glyph width while preserving the normal italic slope for wider glyphs.
+pub(super) fn repair_italic_galley(mut galley: Arc<egui::Galley>) -> Arc<egui::Galley> {
+    let minimum_clearance = 0.5 / galley.pixels_per_point.max(1.0);
+    let needs_repair = galley.rows.iter().any(|placed| {
+        let vertices =
+            &placed.row.visuals.mesh.vertices[placed.row.visuals.glyph_vertex_range.clone()];
+        vertices.as_chunks::<4>().0.iter().any(|vertices| {
+            let width = vertices[3].pos.x - vertices[2].pos.x;
+            let shift = vertices[0].pos.x - vertices[2].pos.x;
+            shift > (width - minimum_clearance).max(0.0)
+        })
+    });
+    if !needs_repair {
+        return galley;
+    }
+
+    let galley_mut = Arc::make_mut(&mut galley);
+    let mut mesh_bounds = egui::Rect::NOTHING;
+    for placed in &mut galley_mut.rows {
+        let row = Arc::make_mut(&mut placed.row);
+        {
+            let vertices = &mut row.visuals.mesh.vertices[row.visuals.glyph_vertex_range.clone()];
+            for vertices in vertices.as_chunks_mut::<4>().0 {
+                let width = vertices[3].pos.x - vertices[2].pos.x;
+                let shift = vertices[0].pos.x - vertices[2].pos.x;
+                let maximum = (width - minimum_clearance).max(0.0);
+                if shift > maximum {
+                    let delta = maximum - shift;
+                    vertices[0].pos.x += delta;
+                    vertices[1].pos.x += delta;
+                }
+            }
+        }
+        row.visuals.mesh_bounds = row.visuals.mesh.calc_bounds();
+        mesh_bounds |= row.visuals.mesh_bounds.translate(placed.pos.to_vec2());
+    }
+    galley_mut.mesh_bounds = mesh_bounds;
+    galley
+}
+
 fn is_light_name(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     (name.contains("-light.")

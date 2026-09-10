@@ -69,7 +69,13 @@ impl GalleyCache {
             egui::FontSelection::Default,
             egui::Align::BOTTOM,
         );
+        let italic = job.sections.iter().any(|section| section.format.italics);
         let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
+        let galley = if italic {
+            super::fonts::repair_italic_galley(galley.clone())
+        } else {
+            galley
+        };
         if self.entries.len() >= Self::MAX_ENTRIES {
             self.entries.clear();
         }
