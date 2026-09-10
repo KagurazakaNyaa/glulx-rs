@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::story::ResourceSelection;
 use crate::{
-    GraphicsRequest, InputRequest, RunState, Story, Vm,
+    GraphicsRequest, InputRequest, RunState, Vm,
     translation::{Submission, TranslationSettings, Translator},
 };
 
@@ -261,6 +261,8 @@ pub struct PlayerApp {
     image_results: HashMap<u64, Result<std::sync::Arc<image::RgbaImage>, String>>,
     pending_graphics: VecDeque<GraphicsRequest>,
     pending_image: Option<PendingImageDecode>,
+    story_loader: media::StoryLoadWorker,
+    pending_story: Option<u64>,
     gpu_canvas: bool,
     buffer_images: text_buffer::ImageCache,
     status: String,
@@ -438,6 +440,8 @@ impl PlayerApp {
             image_results: HashMap::new(),
             pending_graphics: VecDeque::new(),
             pending_image: None,
+            story_loader: Default::default(),
+            pending_story: None,
             gpu_canvas,
             buffer_images: text_buffer::ImageCache::default(),
             status: "ui.open_a_ulx_or_gblorb_story_to_begin".to_owned(),
@@ -523,49 +527,81 @@ impl PlayerApp {
         self.load_story_with_resources(path, ResourceSelection::Auto);
     }
 
-    fn load_story_with_resources(&mut self, path: PathBuf, selection: ResourceSelection) {
-        let _stage = crate::diagnostics::stage("load-story");
-        let loaded = (|| -> Result<Vm, String> {
-            let policy = self.memory_policy();
-            let maximum = policy.max_memory_mib.vm_bytes(startup_snapshot())?;
-            let resources = policy.resource_limits.resolve(startup_snapshot())?;
-            let story =
-                Story::open_with_resources(&path, selection).map_err(|error| error.to_string())?;
-            let mut vm =
-                Vm::new_with_memory_limit(story, maximum).map_err(|error| error.to_string())?;
-            vm.set_resource_limits(resources);
-            Ok(vm)
-        })();
-        match loaded {
-            Ok(mut vm) => {
-                vm.enable_audio();
-                self.story_title = vm.story_title().to_owned();
-                self.show_resources = false;
-                self.resource_choice = 0;
-                self.resource_path.clear();
-                self.file_browser.open = false;
-                self.file_browser.resources = false;
-                self.vm = Some(vm);
-                self.story_path = Some(path.clone());
-                self.transcript.clear();
-                self.transcript_lines.clear();
-                self.reset_translation_history();
-                self.input.clear();
-                self.game_status.clear();
-                self.graphics.clear();
-                self.clear_presentation();
-                self.clear_media();
-                self.buffer_images.clear();
-                self.cover = None;
-                self.error = None;
-                self.status = format!("Running {}", path.display());
-                self.last_state = RunState::Running;
+    fn install_story(&mut self, path: PathBuf, mut vm: Vm) {
+        vm.enable_audio();
+        self.story_title = vm.story_title().to_owned();
+        self.show_resources = false;
+        self.resource_choice = 0;
+        self.resource_path.clear();
+        self.file_browser.open = false;
+        self.file_browser.resources = false;
+        self.vm = Some(vm);
+        self.story_path = Some(path.clone());
+        self.transcript.clear();
+        self.transcript_lines.clear();
+        self.reset_translation_history();
+        self.input.clear();
+        self.game_status.clear();
+        self.graphics.clear();
+        self.clear_presentation();
+        self.clear_media();
+        self.buffer_images.clear();
+        self.cover = None;
+        self.error = None;
+        self.status = format!("Running {}", path.display());
+        self.last_state = RunState::Running;
+    }
+
+    fn poll_story_loader(&mut self, context: &egui::Context) {
+        let results: Vec<_> = self.story_loader.poll().collect();
+        for result in results {
+            if self.pending_story != Some(result.id) {
+                continue;
             }
-            Err(error) => {
-                self.error = Some(error.to_string());
-                self.status = "ui.could_not_open_story".to_owned();
+            self.pending_story = None;
+            match result.vm {
+                Ok(vm) => self.install_story(result.path, vm),
+                Err(error) => {
+                    self.error = Some(error);
+                    self.status = "ui.could_not_open_story".to_owned();
+                }
             }
         }
+        if self.pending_story.is_some() {
+            context.request_repaint();
+        }
+    }
+
+    fn load_story_with_resources(&mut self, path: PathBuf, selection: ResourceSelection) {
+        let policy = self.memory_policy();
+        let maximum = match policy.max_memory_mib.vm_bytes(startup_snapshot()) {
+            Ok(maximum) => maximum,
+            Err(error) => {
+                self.error = Some(error);
+                self.status = "ui.could_not_open_story".to_owned();
+                return;
+            }
+        };
+        let resources = match policy.resource_limits.resolve(startup_snapshot()) {
+            Ok(resources) => resources,
+            Err(error) => {
+                self.error = Some(error);
+                self.status = "ui.could_not_open_story".to_owned();
+                return;
+            }
+        };
+        let Some(id) = self
+            .story_loader
+            .submit(path.clone(), selection, maximum, resources)
+        else {
+            self.error = Some("story loader worker unavailable".to_owned());
+            self.status = "ui.could_not_open_story".to_owned();
+            return;
+        };
+        self.stop_story();
+        self.pending_story = Some(id);
+        self.error = None;
+        self.status = format!("Loading {}", path.display());
     }
 
     fn restart_story(&mut self) {
@@ -1890,6 +1926,7 @@ impl eframe::App for PlayerApp {
     fn logic(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
         // Eframe also runs logic while the window is hidden. Keep timers,
         // sound notifications and translation results progressing there.
+        self.poll_story_loader(context);
         self.run_vm();
         self.poll_translations();
         if context.input(|input| input.viewport().visible() == Some(false)) {
@@ -2170,6 +2207,7 @@ fn glk_terminator_key(code: u32) -> Option<egui::Key> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Story;
 
     #[test]
     fn gui_cli_memory_overrides_do_not_change_persisted_settings() {
