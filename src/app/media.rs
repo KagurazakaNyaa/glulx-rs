@@ -102,6 +102,7 @@ impl Default for StoryLoadWorker {
                         let mut vm = Vm::new_with_memory_limit(story, task.maximum)
                             .map_err(|error| error.to_string())?;
                         vm.set_resource_limits(task.resources);
+                        vm.enable_audio();
                         Ok(vm)
                     })();
                     if result_sender

@@ -527,8 +527,7 @@ impl PlayerApp {
         self.load_story_with_resources(path, ResourceSelection::Auto);
     }
 
-    fn install_story(&mut self, path: PathBuf, mut vm: Vm) {
-        vm.enable_audio();
+    fn install_story(&mut self, path: PathBuf, vm: Vm) {
         self.story_title = vm.story_title().to_owned();
         self.show_resources = false;
         self.resource_choice = 0;
