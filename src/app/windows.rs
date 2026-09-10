@@ -23,11 +23,7 @@ impl PlayerApp {
                     self.input_bar(root);
                     egui::CentralPanel::default().show(root, |ui| {
                         ui.push_id("player-log-controls", |ui| {
-                            egui::ScrollArea::vertical()
-                                .stick_to_bottom(true)
-                                .show(ui, |ui| {
-                                    ui.add(egui::Label::new(&self.transcript).selectable(true));
-                                });
+                            self.show_transcript(ui);
                         });
                     });
                     if self
@@ -143,6 +139,28 @@ impl PlayerApp {
             }
         }
     }
+
+    fn show_transcript(&self, ui: &mut egui::Ui) {
+        let row_height = ui.text_style_height(&egui::TextStyle::Body).max(1.0);
+        let transcript = &self.transcript;
+        let lines = &self.transcript_lines;
+        egui::ScrollArea::both().stick_to_bottom(true).show_rows(
+            ui,
+            row_height,
+            lines.len(),
+            |ui, rows| {
+                for index in rows {
+                    if let Some(line) = lines
+                        .get(index)
+                        .and_then(|range| transcript.get(range.clone()))
+                    {
+                        ui.add(egui::Label::new(line).selectable(true).extend());
+                    }
+                }
+            },
+        );
+    }
+
     fn settings_contents(&mut self, ui: &mut egui::Ui) {
         let before = self.settings.language;
         let language = before.resolve();

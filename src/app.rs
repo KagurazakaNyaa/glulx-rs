@@ -227,6 +227,7 @@ pub struct PlayerApp {
     story_path: Option<PathBuf>,
     story_title: String,
     transcript: String,
+    transcript_lines: Vec<std::ops::Range<usize>>,
     turn_buffer: String,
     turn_windows: Vec<(u32, String)>,
     translation_view: u64,
@@ -282,6 +283,44 @@ impl PlayerApp {
         self.presented_revision = 0;
         self.text_layout_revisions.clear();
         self.presented_state = RunState::Running;
+    }
+
+    fn rebuild_transcript_index(&mut self) {
+        self.transcript_lines.clear();
+        if self.transcript.is_empty() {
+            return;
+        }
+        let mut start = 0;
+        for (offset, byte) in self.transcript.bytes().enumerate() {
+            if byte == b'\n' {
+                self.transcript_lines.push(start..offset);
+                start = offset + 1;
+            }
+        }
+        self.transcript_lines.push(start..self.transcript.len());
+    }
+
+    fn append_transcript(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let start = self.transcript.len();
+        self.transcript.push_str(text);
+        if self.transcript_lines.is_empty() && start != 0 {
+            self.rebuild_transcript_index();
+        }
+        if self.transcript_lines.is_empty() {
+            self.transcript_lines.push(start..start);
+        }
+        for (offset, byte) in text.bytes().enumerate() {
+            let end = start + offset + 1;
+            if byte == b'\n' {
+                self.transcript_lines.last_mut().unwrap().end = end - 1;
+                self.transcript_lines.push(end..end);
+            } else {
+                self.transcript_lines.last_mut().unwrap().end = end;
+            }
+        }
     }
 
     fn desktop_snapshot_too_large(&self) -> bool {
@@ -355,6 +394,7 @@ impl PlayerApp {
             story_path: None,
             story_title: "Glulx Player".to_owned(),
             transcript: String::new(),
+            transcript_lines: Vec::new(),
             turn_buffer: String::new(),
             turn_windows: Vec::new(),
             translation_view: 0,
@@ -419,6 +459,7 @@ impl PlayerApp {
                     app.last_state = vm.state();
                     app.vm = Some(vm);
                     app.transcript = session.transcript;
+                    app.rebuild_transcript_index();
                     app.input = session.input;
                     for canvas in session.canvases {
                         if let Some(pixels) =
@@ -486,6 +527,7 @@ impl PlayerApp {
                 self.vm = Some(vm);
                 self.story_path = Some(path.clone());
                 self.transcript.clear();
+                self.transcript_lines.clear();
                 self.reset_translation_history();
                 self.input.clear();
                 self.game_status.clear();
@@ -510,6 +552,7 @@ impl PlayerApp {
             match vm.restart() {
                 Ok(()) => {
                     self.transcript.clear();
+                    self.transcript_lines.clear();
                     self.reset_translation_history();
                     self.game_status.clear();
                     self.graphics.clear();
@@ -538,48 +581,75 @@ impl PlayerApp {
         self.sync_translation_capture();
         let _stage = crate::diagnostics::stage("vm-slice");
         let capture_translation = self.settings.translation.enabled;
-        let Some(vm) = &mut self.vm else {
+        let Some((
+            presentation_revision,
+            output,
+            game_status,
+            text_events,
+            state,
+            initial_input,
+            current_presentation_revision,
+            vm_error,
+        )) = self.vm.as_mut().map(|vm| {
+            if capture_translation {
+                vm.enable_text_buffer_events();
+            } else {
+                vm.disable_text_buffer_events();
+            }
+            let word = |c: [u8; 3]| u32::from_be_bytes([0, c[0], c[1], c[2]]);
+            vm.set_light_fonts(self.fonts.light_fonts);
+            vm.set_glyph_support(self.fonts.support.clone());
+            if !self.pending_font_metrics {
+                vm.set_text_metrics(self.fonts.metrics.clone());
+            }
+            vm.set_text_appearance(
+                self.settings.font_size,
+                word(self.settings.text_color),
+                word(self.settings.background_color),
+            );
+            let presentation_revision = vm.presentation_revision();
+            let vm_error = run_vm_slice(vm).err().map(|error| {
+                let pc = vm.pc();
+                vm.stop();
+                format!("{error}\nProgram counter: {pc:#010x}")
+            });
+            let output = vm.take_output();
+            crate::diagnostics::vm(vm);
+            let game_status = vm.status_text();
+            let text_events = vm.take_text_buffer_events();
+            let state = vm.state();
+            let initial_input = (state == RunState::WaitingForLine).then(|| vm.initial_input());
+            let current_presentation_revision = vm.presentation_revision();
+            (
+                presentation_revision,
+                output,
+                game_status,
+                text_events,
+                state,
+                initial_input,
+                current_presentation_revision,
+                vm_error,
+            )
+        })
+        else {
             return;
         };
-        if capture_translation {
-            vm.enable_text_buffer_events();
-        } else {
-            vm.disable_text_buffer_events();
+        self.game_status = game_status;
+        if !output.is_empty() {
+            self.append_transcript(&output);
         }
-        let word = |c: [u8; 3]| u32::from_be_bytes([0, c[0], c[1], c[2]]);
-        vm.set_light_fonts(self.fonts.light_fonts);
-        vm.set_glyph_support(self.fonts.support.clone());
-        if !self.pending_font_metrics {
-            vm.set_text_metrics(self.fonts.metrics.clone());
-        }
-        vm.set_text_appearance(
-            self.settings.font_size,
-            word(self.settings.text_color),
-            word(self.settings.background_color),
-        );
-        let presentation_revision = vm.presentation_revision();
-        if let Err(error) = run_vm_slice(vm) {
-            let pc = vm.pc();
-            vm.stop();
-            self.error = Some(format!("{error}\nProgram counter: {pc:#010x}"));
+        if let Some(error) = vm_error {
+            self.error = Some(error);
             self.status = "ui.vm_stopped_after_an_error".to_owned();
         }
-        let output = vm.take_output();
-        crate::diagnostics::vm(vm);
-        self.game_status = vm.status_text();
-        if !output.is_empty() {
-            self.transcript.push_str(&output);
-        }
-        let text_events = vm.take_text_buffer_events();
-        let state = vm.state();
-        let output_boundary = vm.presentation_revision() != presentation_revision;
+        let output_boundary = current_presentation_revision != presentation_revision;
         if state != self.last_state {
             crate::diagnostics::record(format_args!("state {:?} -> {state:?}", self.last_state));
         }
         // A timer can cancel and re-request input during one VM slice, leaving
         // the same RunState but supplying a different prefilled line.
-        if state == RunState::WaitingForLine {
-            self.input = vm.initial_input();
+        if let Some(initial_input) = initial_input {
+            self.input = initial_input;
         }
         self.capture_translation_events(text_events);
         if output_boundary || (state != RunState::Running && self.last_state == RunState::Running) {
@@ -969,16 +1039,17 @@ impl PlayerApp {
     }
 
     fn submit_terminated_input(&mut self, terminator: u32) -> Result<(), ()> {
+        let Some(request) = self.vm.as_ref().and_then(Vm::input_request) else {
+            return Err(());
+        };
+        let is_file = matches!(request, InputRequest::File { .. });
+        let input = std::mem::take(&mut self.input);
+        if !is_file {
+            self.append_transcript(&format!("> {input}\n"));
+        }
         let Some(vm) = &mut self.vm else {
             return Err(());
         };
-        if vm.input_request().is_none() {
-            return Err(());
-        }
-        let input = std::mem::take(&mut self.input);
-        if !matches!(vm.input_request(), Some(InputRequest::File { .. })) {
-            self.transcript.push_str(&format!("> {input}\n"));
-        }
         let result = if terminator == 0 {
             vm.provide_input(&input)
         } else {
@@ -2073,6 +2144,20 @@ mod tests {
             saved.resource_limits.undo_mib,
             ResourceBudgets::default().undo_mib
         );
+    }
+
+    #[test]
+    fn transcript_line_index_tracks_incremental_appends() {
+        let context = egui::Context::default();
+        let mut app = PlayerApp::new(&eframe::CreationContext::_new_kittest(context), None);
+        app.append_transcript("first\nsecond");
+        app.append_transcript("\nthird");
+        let lines = app
+            .transcript_lines
+            .iter()
+            .map(|range| app.transcript[range.clone()].to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(lines, ["first", "second", "third"]);
     }
 
     #[test]
