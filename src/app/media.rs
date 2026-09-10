@@ -1,6 +1,14 @@
 //! Background media preparation that does not require an egui or Glk owner.
 
-use std::{path::PathBuf, sync::mpsc, thread};
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
+    thread,
+};
 
 use image::RgbaImage;
 
@@ -72,6 +80,7 @@ pub(super) struct StoryLoadWorker {
     sender: Option<mpsc::Sender<StoryLoadTask>>,
     results: mpsc::Receiver<StoryLoadResult>,
     next_id: u64,
+    latest: Arc<AtomicU64>,
 }
 
 struct StoryLoadTask {
@@ -92,10 +101,15 @@ impl Default for StoryLoadWorker {
     fn default() -> Self {
         let (task_sender, task_receiver) = mpsc::channel::<StoryLoadTask>();
         let (result_sender, result_receiver) = mpsc::channel::<StoryLoadResult>();
+        let latest = Arc::new(AtomicU64::new(u64::MAX));
+        let worker_latest = latest.clone();
         let sender = thread::Builder::new()
             .name("glulx-story-load".to_owned())
             .spawn(move || {
                 while let Ok(task) = task_receiver.recv() {
+                    if worker_latest.load(Ordering::Acquire) != task.id {
+                        continue;
+                    }
                     let vm = (|| {
                         let story = crate::Story::open_with_resources(&task.path, task.selection)
                             .map_err(|error| error.to_string())?;
@@ -105,6 +119,9 @@ impl Default for StoryLoadWorker {
                         vm.enable_audio();
                         Ok(vm)
                     })();
+                    if worker_latest.load(Ordering::Acquire) != task.id {
+                        continue;
+                    }
                     if result_sender
                         .send(StoryLoadResult {
                             id: task.id,
@@ -123,6 +140,7 @@ impl Default for StoryLoadWorker {
             sender,
             results: result_receiver,
             next_id: 0,
+            latest,
         }
     }
 }
@@ -138,6 +156,7 @@ impl StoryLoadWorker {
         let sender = self.sender.as_ref()?;
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
+        self.latest.store(id, Ordering::Release);
         sender
             .send(StoryLoadTask {
                 id,
