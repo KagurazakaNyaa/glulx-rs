@@ -1,6 +1,7 @@
 //! Interactive terminal host, with a separate stable protocol for pipes.
 use std::{
     io::{self, IsTerminal, Write},
+    path::Path,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -26,11 +27,33 @@ use editor::Editor;
 use screen::Screen;
 
 pub fn run(vm: Vm) -> Result<(), Box<dyn std::error::Error>> {
-    if io::stdin().is_terminal() && io::stdout().is_terminal() {
-        run_interactive(vm)
-    } else {
-        pipe::run(vm)
+    run_with_event_trace(vm, None)
+}
+
+pub fn run_with_event_trace(
+    mut vm: Vm,
+    trace_path: Option<std::path::PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if trace_path.is_some() {
+        vm.enable_event_trace();
     }
+    let result = if io::stdin().is_terminal() && io::stdout().is_terminal() {
+        run_interactive(&mut vm)
+    } else {
+        pipe::run(&mut vm)
+    };
+    let trace_result = trace_path.map(|path| write_event_trace(&path, vm.take_event_trace()));
+    match (result, trace_result) {
+        (Err(error), _) => Err(error),
+        (Ok(()), Some(Err(error))) => Err(error),
+        (Ok(()), _) => Ok(()),
+    }
+}
+
+fn write_event_trace(path: &Path, events: Vec<[u32; 4]>) -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = serde_json::to_vec_pretty(&events)?;
+    std::fs::write(path, bytes)?;
+    Ok(())
 }
 
 struct TerminalGuard;
@@ -61,14 +84,14 @@ impl Drop for TerminalGuard {
     }
 }
 
-fn run_interactive(mut vm: Vm) -> Result<(), Box<dyn std::error::Error>> {
+fn run_interactive(vm: &mut Vm) -> Result<(), Box<dyn std::error::Error>> {
     let guard = TerminalGuard::enter()?;
     vm.set_terminal_host(true);
     // A Glk grid cell has a single terminal column. Unsupported glyph widths
     // are visibly replaced and reported as CannotPrint, including wide CJK.
     vm.set_glyph_support(Arc::new(|character| character.width() == Some(1)));
     let mut screen = Screen::new(terminal::size()?);
-    screen.resize_vm(&mut vm);
+    screen.resize_vm(vm);
     let mut editor = None;
     let mut repaint = true;
     let mut last_paint = Instant::now();
@@ -80,7 +103,7 @@ fn run_interactive(mut vm: Vm) -> Result<(), Box<dyn std::error::Error>> {
             let size = terminal::size()?;
             if screen.dimensions() != size {
                 screen = Screen::new(size);
-                screen.resize_vm(&mut vm);
+                screen.resize_vm(vm);
                 repaint = true;
             }
             last_size_check = Instant::now();
@@ -90,14 +113,14 @@ fn run_interactive(mut vm: Vm) -> Result<(), Box<dyn std::error::Error>> {
             let state = vm
                 .run_steps(20_000)
                 .map_err(|error| format!("{error} at program counter {:#010x}", vm.pc()))?;
-            crate::diagnostics::vm(&vm);
+            crate::diagnostics::vm(vm);
             state
         };
         let output = vm.take_output();
-        let input_changed = Editor::synchronize(&vm, &mut editor);
+        let input_changed = Editor::synchronize(vm, &mut editor);
         repaint |= !output.is_empty() || input_changed;
         if repaint || last_paint.elapsed() >= Duration::from_millis(50) {
-            screen.draw(&vm, editor.as_ref())?;
+            screen.draw(vm, editor.as_ref())?;
             repaint = false;
             last_paint = Instant::now();
         }
@@ -115,12 +138,12 @@ fn run_interactive(mut vm: Vm) -> Result<(), Box<dyn std::error::Error>> {
         match event::read()? {
             Event::Resize(width, height) => {
                 screen = Screen::new((width, height));
-                screen.resize_vm(&mut vm);
+                screen.resize_vm(vm);
                 repaint = true;
             }
             Event::Paste(text) => {
                 if let Some(editor) = &mut editor {
-                    editor.paste(&mut vm, &text)?;
+                    editor.paste(vm, &text)?;
                     repaint = true;
                 } else if vm.input_request() == Some(InputRequest::Character)
                     && let Some(character) = text.chars().find(|character| !character.is_control())
@@ -152,7 +175,7 @@ fn run_interactive(mut vm: Vm) -> Result<(), Box<dyn std::error::Error>> {
                         vm.provide_key(code)?;
                     }
                 } else if let Some(current) = &mut editor
-                    && current.key(&mut vm, key)?
+                    && current.key(vm, key)?
                 {
                     editor = None;
                 }
@@ -163,7 +186,7 @@ fn run_interactive(mut vm: Vm) -> Result<(), Box<dyn std::error::Error>> {
     }
     // Preserve the last visible scene after restoring the shell's screen,
     // including a game's final text before it exits without another prompt.
-    screen.draw(&vm, editor.as_ref())?;
+    screen.draw(vm, editor.as_ref())?;
     let final_text = screen.plain_text();
     drop(guard);
     println!("{final_text}");

@@ -2,7 +2,7 @@
 
 [English](glulx-remaining-spec-audit.md) | [中文](glulx-remaining-spec-audit.ZH.md)
 
-更新：2026-09-10。本文件描述当前实现状态 commit `f9c855d` 的规范边界和风险，不记录历史实现过程。详细测试命令见[验收记录](glulx-validation.ZH.md)，实现限制见[兼容性说明](compatibility.ZH.md)。
+更新：2026-09-10。本文件描述基于 `f9c855d` 并包含当前工作树改动的实现状态、规范边界和风险，不记录历史实现过程。详细测试命令见[验收记录](glulx-validation.ZH.md)，实现限制见[兼容性说明](compatibility.ZH.md)。
 
 ## 来源与判定口径
 
@@ -19,7 +19,7 @@
 | 终端宿主 | 交互 TTY 支持网格/状态、预填编辑、定时取消、即时字符输入、回显/终止键、文件提示、多窗口选择和终端恢复。管道模式仍是稳定的自动化协议。 | Windows 控制台和 macOS 实机终端验收仍待完成。 |
 | light 字重 | 有真实 light 字体时使用细字重；缺失时回退常规并如实报告能力。 | Windows/macOS 的字体和 DPI 行为仍未实机验证。 |
 | Undo 预算 | 按保留页、栈字节和堆记录数据计费；共享故事映像和当前 VM 地址空间不计入。零值禁用保留；超预算候选会在构造完整页表前拒绝。 | 很大的 dirty set 仍值得继续做页数估算和构造耗时 profile。 |
-| VM 内存布局 | `Memory` 只保存 `RAMSTART..当前末尾`，ROM 从共享故事映像读取；内嵌 Blorb 容器和执行映像共享 backing buffer。 | 已覆盖跨 ROM/RAM 读写、copy 和旧桌面会话迁移；mmap 和惰性容器读取仍是后续工作。 |
+| VM 内存布局 | `Memory` 以按页写时复制保存 `RAMSTART..当前末尾` 的可写区，未修改页从共享故事映像或零页读取；内嵌 Blorb 容器和执行映像共享 backing buffer。 | 已覆盖跨 ROM/RAM 读写、copy、惰性扩展区和旧桌面会话迁移；mmap 和惰性容器读取仍是后续工作。 |
 | 容器严格性 | 校验 FORM/IFRS 边界、RIdx 结构、资源偏移、重复编号和身份。 | 允许非零 padding，也允许未索引 GLUL 的兼容回退；不宣称拒绝所有损坏容器。 |
 
 ## 可选项与宿主范围
@@ -34,6 +34,6 @@
 1. 修改 VM、资源或宿主行为时，按[验收记录](glulx-validation.ZH.md)重新运行当前 Linux 参考、GUI 和 TTY 工具。
 2. 补充 Windows/macOS 实机的 GUI、字体/DPI、终端输入、文件提示、音频和会话恢复记录。
 3. 扩展媒体矩阵，覆盖 codec、位深、采样率、声道数和历史 tracker 变体；成功和失败都要记录。
-4. 将当前 headless profile 扩展到包含图像/音频的更长脚本路线，再根据测量结果选择 mmap、block compilation 或进一步 UI 优化。
+4. 使用 `benchmark-interpreters.py` 将当前 headless profile 扩展到包含图像/音频的更长脚本路线，再根据测量结果选择 mmap、block compilation 或进一步 UI 优化。
 
 这些是工程和验收工作，不表示当前实现违反了某条强制 Glulx/Glk 规则。

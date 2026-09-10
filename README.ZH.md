@@ -28,6 +28,21 @@ cargo run --release -- path/to/story.gblorb
 cargo run --release -- --headless path/to/story.ulx
 ```
 
+兼容性检查时可以用 `--strict-glk` 让未知 Glk selector 直接报告错误；默认模式
+仍记录并忽略未知 selector，以兼容带有宿主扩展的故事：
+
+```sh
+cargo run --release -- --headless --strict-glk path/to/story.ulx
+```
+
+若需要记录实际交付给故事的事件，可在无界面模式中指定 JSON 输出路径：
+
+```sh
+cargo run --release -- --headless --trace-events "<output-dir>/events.json" path/to/story.ulx
+```
+
+该 trace 默认关闭，不进入存档或桌面会话。
+
 桌面采用三个原生窗口：游戏画布、**日志＋输入**、**翻译**。调整或关闭辅助窗口不会改变画布尺寸；工具栏的 Log 和 Translation 按钮用于显示或隐藏窗口，Settings 打开独立设置窗口；也可从 View 菜单或快捷键 Ctrl+Shift+L / Ctrl+Shift+T 重新打开辅助窗口。画面在 Glk 事件边界发布，下一幅画面完成前保留上一幅完整画面。
 
 游戏发起的保存/读取提示允许在输入栏填写路径；修改已有文件前需要确认，读取时要求文件已存在。桌面应用还会每 30 秒以及正常退出时保存会话；启动时不指定故事即可恢复上次会话。故事、内存和画布等快照原始数据超过 16 MiB 时，会跳过自动会话快照，避免界面卡死；这类游戏请使用游戏内的保存命令，播放器设置仍会保存。设置存储在可执行文件同目录的 `glulx-settings.json` 中，优先于旧 eframe 设置；首次没有 JSON 文件时迁移旧配置。点击 Save settings 或关闭设置窗口会立即保存，也会每 30 秒及正常退出时保存。手动编辑后重启生效；会话仍留在 eframe 存储中。`View -> Story information` 显示可用的 iFiction 元数据、封面以及图像/声音文字描述。可移植游戏存档与桌面会话使用不同的格式。
@@ -117,6 +132,22 @@ python3 tools/benchmark-engine.py --output "<output-dir>/glulx-engine-benchmark.
 
 工具内部使用 release、单线程和 `benchmark_` ignored tests；比较多次运行时应固定机器、电源模式、构建工具链和工作树 commit。
 
+用同一真实故事和输入脚本比较 Glulxe、Git 与 Rust 的耗时、退出码和输出摘要：
+
+```sh
+python3 tools/benchmark-interpreters.py \
+  "<story-dir>/story.gblorb" \
+  --reference "<tool-dir>/glulxe" \
+  --candidate "target/release/glulx-rs" \
+  --git "<tool-dir>/git" \
+  --command-file "<fixture-dir>/route.txt" \
+  --repetitions 3 \
+  --output "<output-dir>/glulx-interpreters.json"
+```
+
+输入脚本中的 `{save}` 会被替换为每个引擎独立的临时存档路径；benchmark 结果只
+记录摘要，不把完整故事或输出写入仓库。
+
 真实故事可用独立工具测量启动时间和 Linux 峰值 RSS/HWM；工具使用临时工作目录，不写入故事目录：
 
 ```sh
@@ -153,8 +184,17 @@ cargo build --release
 可选的参考实现验证（测试样本需单独下载，见[验收记录](docs/glulx-validation.ZH.md)）：
 
 ```sh
-python3 tools/check-reference.py --reference /path/to/glulxe --candidate target/debug/glulx-rs --fixtures /path/to/fixtures
+python3 tools/check-reference.py \
+  --reference /path/to/glulxe \
+  --candidate target/debug/glulx-rs \
+  --git /path/to/git \
+  --strict-glk \
+  --fixtures /path/to/fixtures
 ```
+
+也可以把真实故事和输入脚本传给 `--route STORY COMMAND_FILE`；脚本中的 `{save}`
+会替换为本次运行专用的临时存档路径。`--git` 和 `--route` 都接受真实路径，
+不会依赖仓库外的固定文件。
 
 可以在本地生成原创媒体样本，检查图像环绕、可点击图片、窗口缩放和 MOD 播放：
 

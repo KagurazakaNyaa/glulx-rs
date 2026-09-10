@@ -2,7 +2,7 @@
 
 [English](glulx-validation.md) | [中文](glulx-validation.ZH.md)
 
-Updated: 2026-09-10. The current implementation state is commit `f9c855d`; local validation was run on Linux x86_64. This record describes the current tree. It does not certify exhaustive Glulx, Glk, media, or platform conformance.
+Updated: 2026-09-10. The current implementation is based on `f9c855d` and includes the compatibility, memory, and tooling changes in the current worktree; local validation was run on Linux x86_64. This record describes the current tree. It does not certify exhaustive Glulx, Glk, media, or platform conformance.
 
 ## Current Verification
 
@@ -15,8 +15,8 @@ RUSTC_WRAPPER= cargo build --release
 
 The current checks pass:
 
-- 273 library tests pass; 6 manual performance tests remain ignored.
-- 6 CLI tests pass.
+- 277 library tests pass; 6 manual performance tests remain ignored.
+- 8 CLI tests pass.
 - Formatting, all-target Clippy, and the release build pass.
 - The undo regression proves that a 2 MiB story can retain a one-page undo snapshot under a 1 MiB undo budget; the shared story image is not charged to that snapshot budget.
 - The bounded-page regression rejects dense dirty memory at the page limit before materializing the complete candidate page table.
@@ -37,13 +37,21 @@ python3 tools/benchmark-stories.py \
   --output "<output-dir>/glulx-real-story-baseline.json"
 ```
 
-The real-story measurement is a startup/resident-memory workload, not a complete playthrough. The largest remaining memory costs are the story container, executable image, VM memory, and media/resource payloads. The repository does not currently use mmap or a block compiler.
+The real-story measurement is a startup/resident-memory workload, not a complete playthrough. The largest remaining memory costs are the story container, executable image, VM page tables, and media/resource payloads. The repository does not currently use mmap or a block compiler.
 
 The current release measurement recorded peak HWM of `661620 KiB` and `715360 KiB` for representative 650 MB and 705 MB Blorb files. These numbers are machine- and story-dependent and are retained as comparison evidence, not as a universal limit.
 
 The headless profile now retains diagnostic heartbeats in the JSON artifact. In the startup workload, a representative story executed about 2.78 million instructions in the first two-second interval, used about 92 ms of VM-slice time, reached `WaitingForChar`, and reported roughly 2.65 million decoded-cache hits versus 106 thousand misses. This workload does not show VM dispatch as the dominant CPU cost; use a longer scripted playthrough before considering block compilation.
 
-The current release microbenchmarks report about 8.3 ns per instruction dispatch and 22.2 microseconds per 16,384-record linear-search iteration. The latter is close to the pre-RAM-relative baseline and guards the optimized contiguous-slice path.
+The current Linux release run reports about 8.1 ns per instruction dispatch and 169 microseconds per 16,384-record linear-search iteration. These values depend on the machine and toolchain; they are workload attribution for the current tree, not a cross-engine ranking.
+
+`tools/benchmark-interpreters.py` accepts one real story and an input script and compares
+elapsed time, exit status, timeout, and stdout/stderr digests for Glulxe, Git, and Rust.
+`--git` is optional; `{save}` in the script expands to an engine-specific temporary save.
+
+`tools/check-headless.py` needs no external reference implementation. It uses a synthetic
+story to validate pipe output, the `--strict-glk` error, and `--trace-events` JSON output;
+the release workflow runs it on every platform.
 
 ## Coverage Matrix
 
@@ -65,6 +73,12 @@ The matrix describes covered behavior and regression entry points; it does not c
 ## Reference Fixtures
 
 Reference implementation revisions are Glulxe `56ab8743bab565de307bd892c555d8d8897ed517` and CheapGlk `14d8aaf6e4150669762bd4646a5368e75c1eeee6`. Fixtures come from the official Glulx fixture page or IF Archive and are not distributed with this repository. Commands accept their locations through `--fixtures`, as shown above and in [compatibility](compatibility.md).
+
+`tools/check-reference.py` also accepts an optional `--git <git-path>` and runs Git
+against the synthetic stories and fixtures. `--strict-glk` is passed only to the Rust
+candidate. Long real-story routes are supplied with repeated
+`--route <story-path> <command-file>` options; `{save}` in a command file expands to
+an isolated temporary save path.
 
 The maintained fixture set covers Glulxercise, Unicode, resource streams, Adventure, Sensory Jam, input extensions, date/time, and multi-window startup. Exact fixture hashes and reference command options belong in the test run artifact, not in a machine-specific repository path.
 

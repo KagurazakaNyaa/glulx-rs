@@ -1,7 +1,7 @@
 //! Stable text-only protocol for redirected stdin/stdout and reference tools.
 use super::*;
 
-pub(super) fn run(mut vm: Vm) -> Result<(), Box<dyn std::error::Error>> {
+pub(super) fn run(vm: &mut Vm) -> Result<(), Box<dyn std::error::Error>> {
     vm.set_graphical_host(false);
     let (sender, input) = std::sync::mpsc::sync_channel(16);
     std::thread::spawn(move || {
@@ -28,7 +28,7 @@ pub(super) fn run(mut vm: Vm) -> Result<(), Box<dyn std::error::Error>> {
             let state = vm
                 .run_steps(100_000)
                 .map_err(|error| format!("{error} at program counter {:#010x}", vm.pc()))?;
-            crate::diagnostics::vm(&vm);
+            crate::diagnostics::vm(vm);
             state
         };
         print!("{}", vm.take_output());

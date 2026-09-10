@@ -107,8 +107,10 @@ standard special keys and editing directly in grid windows.
 The headless adapter exposes terminal text and file prompts and does not advertise
 GUI-only facilities. Without an audio output device the desktop disables sound
 capabilities. Gestalt queries account for their arguments and host availability.
-Unknown Glk selectors return zero and are recorded; unsupported VM instructions
-produce typed errors. A successfully started game is not necessarily fully playable.
+Unknown Glk selectors return zero and are recorded by default; `--strict-glk` promotes
+them to a typed error for reference checks, and `--trace-events` writes delivered story
+events as JSON. Unsupported VM instructions produce typed errors. A successfully started
+game is not necessarily fully playable.
 
 Date conversion uses Gregorian arithmetic across the signed 32-bit year range;
 local time retains historical offsets and future recurring timezone rules. IFZS

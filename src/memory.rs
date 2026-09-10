@@ -6,6 +6,8 @@ use std::{
 use crate::{Story, VmError, story::StoryImage};
 
 pub(crate) type MemoryPage = Arc<Vec<u8>>;
+const PAGE_SIZE: usize = 256;
+static ZERO_PAGE: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
 
 /// Per-VM allocation ceiling; failed growth is reported through setmemsize/malloc.
 pub const MAX_MEMORY_SIZE: u32 = 1024 * 1024 * 1024;
@@ -71,7 +73,11 @@ fn default_memory_layout() -> MemoryLayout {
 pub struct Memory {
     #[serde(skip, default = "default_memory_limit")]
     maximum: u32,
+    // Kept only to read desktop sessions written before the paged layout.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     bytes: Vec<u8>,
+    #[serde(default)]
+    pages: Vec<Option<MemoryPage>>,
     initial: Arc<StoryImage>,
     #[serde(default = "default_memory_layout")]
     layout: MemoryLayout,
@@ -84,7 +90,16 @@ pub struct Memory {
 
 impl Memory {
     pub(crate) fn snapshot_byte_len(&self) -> usize {
-        self.bytes.len().saturating_add(self.initial.len())
+        let pages = self
+            .pages
+            .iter()
+            .fold(self.pages.len().saturating_mul(8), |size, page| {
+                size.saturating_add(page.as_ref().map_or(0, |page| page.len()))
+            });
+        self.bytes
+            .len()
+            .saturating_add(pages)
+            .saturating_add(self.initial.len())
     }
 
     pub(crate) fn snapshot_pages(
@@ -115,14 +130,8 @@ impl Memory {
             if address < self.ram_start || address.saturating_add(256) > self.len() {
                 continue;
             }
-            let mut baseline = [0; 256];
-            let page_start = address as usize;
-            let page_end = page_start + 256;
-            if address < self.ext_start {
-                baseline.copy_from_slice(&self.initial[page_start..page_end]);
-            }
-            let current = &self.bytes
-                [page_start - self.ram_start as usize..page_end - self.ram_start as usize];
+            let baseline = self.baseline_page(address);
+            let current = self.current_page((address - self.ram_start) as usize / PAGE_SIZE);
             if current == baseline {
                 pages.remove(&address);
             } else if previous
@@ -134,7 +143,12 @@ impl Memory {
                 if !pages.contains_key(&address) && pages.len() >= maximum_pages {
                     return None;
                 }
-                pages.insert(address, Arc::new(current.to_vec()));
+                let index = (address - self.ram_start) as usize / PAGE_SIZE;
+                let page = self.pages[index]
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or_else(|| Arc::new(current.to_vec()));
+                pages.insert(address, page);
             }
         }
         Some(pages)
@@ -152,11 +166,31 @@ impl Memory {
     pub(crate) fn validate_session(&mut self, story: &Story) -> Result<(), VmError> {
         // Older desktop sessions stored Memory.bytes from address zero. Convert
         // that representation before validating the current RAM-relative one.
-        if self.layout == MemoryLayout::LegacyAbsolute {
-            if self.bytes.len() < self.ram_start as usize {
+        if !self.bytes.is_empty() {
+            let mut bytes = std::mem::take(&mut self.bytes);
+            if self.layout == MemoryLayout::LegacyAbsolute {
+                if bytes.len() < self.ram_start as usize {
+                    return Err(VmError::InvalidSave);
+                }
+                bytes = bytes.split_off(self.ram_start as usize);
+            }
+            if !bytes.len().is_multiple_of(PAGE_SIZE) {
                 return Err(VmError::InvalidSave);
             }
-            self.bytes = self.bytes.split_off(self.ram_start as usize);
+            self.pages.clear();
+            self.pages
+                .try_reserve_exact(bytes.len() / PAGE_SIZE)
+                .map_err(|_| VmError::InvalidSave)?;
+            for (index, page) in bytes.as_chunks::<PAGE_SIZE>().0.iter().enumerate() {
+                let address = self.ram_start + (index * PAGE_SIZE) as u32;
+                let baseline = if address < self.ext_start {
+                    &self.initial[address as usize..address as usize + PAGE_SIZE]
+                } else {
+                    &ZERO_PAGE[..]
+                };
+                self.pages
+                    .push((page != baseline).then(|| Arc::new(page.to_vec())));
+            }
             self.layout = MemoryLayout::RamRelative;
         }
         if self.len() > self.maximum
@@ -165,7 +199,11 @@ impl Memory {
             || self.original_end != story.header.end_mem
             || self.initial != story.image
             || self.len() < self.original_end
-            || !self.len().is_multiple_of(256)
+            || !self.len().is_multiple_of(PAGE_SIZE as u32)
+            || self
+                .pages
+                .iter()
+                .any(|page| page.as_ref().is_some_and(|page| page.len() != PAGE_SIZE))
         {
             return Err(VmError::InvalidSave);
         }
@@ -186,18 +224,17 @@ impl Memory {
                 maximum,
             });
         }
-        let mut bytes = Vec::new();
         let writable_len = story.header.end_mem - story.header.ram_start;
-        bytes
-            .try_reserve_exact(writable_len as usize)
+        let page_count = writable_len as usize / PAGE_SIZE;
+        let mut pages = Vec::new();
+        pages
+            .try_reserve_exact(page_count)
             .map_err(|_| VmError::MemoryAllocation(story.header.end_mem))?;
-        bytes.extend_from_slice(
-            &story.image[story.header.ram_start as usize..story.header.ext_start as usize],
-        );
-        bytes.resize(writable_len as usize, 0);
+        pages.resize(page_count, None);
         Ok(Self {
             maximum,
-            bytes,
+            bytes: Vec::new(),
+            pages,
             initial: Arc::clone(&story.image),
             layout: MemoryLayout::RamRelative,
             ram_start: story.header.ram_start,
@@ -226,7 +263,8 @@ impl Memory {
     }
 
     pub fn len(&self) -> u32 {
-        self.ram_start.saturating_add(self.bytes.len() as u32)
+        self.ram_start
+            .saturating_add((self.pages.len() * PAGE_SIZE) as u32)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -243,11 +281,12 @@ impl Memory {
                 .get(address as usize)
                 .copied()
                 .ok_or(VmError::MemoryRead(address))
+        } else if address < self.len() {
+            let page = (address - self.ram_start) as usize / PAGE_SIZE;
+            let offset = (address as usize) % PAGE_SIZE;
+            Ok(self.current_page(page)[offset])
         } else {
-            self.bytes
-                .get((address - self.ram_start) as usize)
-                .copied()
-                .ok_or(VmError::MemoryRead(address))
+            Err(VmError::MemoryRead(address))
         }
     }
 
@@ -349,26 +388,15 @@ impl Memory {
     }
 
     pub fn write8(&mut self, address: u32, value: u8) -> Result<(), VmError> {
-        self.check_write(address, 1)?;
-        self.bytes[(address - self.ram_start) as usize] = value;
-        self.mark_dirty_range(address, 1);
-        Ok(())
+        self.write_bytes(address, &[value])
     }
 
     pub fn write16(&mut self, address: u32, value: u16) -> Result<(), VmError> {
-        self.check_write(address, 2)?;
-        let start = (address - self.ram_start) as usize;
-        self.bytes[start..start + 2].copy_from_slice(&value.to_be_bytes());
-        self.mark_dirty_range(address, 2);
-        Ok(())
+        self.write_bytes(address, &value.to_be_bytes())
     }
 
     pub fn write32(&mut self, address: u32, value: u32) -> Result<(), VmError> {
-        self.check_write(address, 4)?;
-        let start = (address - self.ram_start) as usize;
-        self.bytes[start..start + 4].copy_from_slice(&value.to_be_bytes());
-        self.mark_dirty_range(address, 4);
-        Ok(())
+        self.write_bytes(address, &value.to_be_bytes())
     }
 
     pub fn zero(&mut self, address: u32, length: u32) -> Result<(), VmError> {
@@ -376,8 +404,24 @@ impl Memory {
             return Ok(());
         }
         self.check_write(address, length)?;
-        let start = (address - self.ram_start) as usize;
-        self.bytes[start..start + length as usize].fill(0);
+        let mut offset = 0usize;
+        while offset < length as usize {
+            let current = address as usize - self.ram_start as usize + offset;
+            let page = current / PAGE_SIZE;
+            let within = current % PAGE_SIZE;
+            let count = (length as usize - offset).min(PAGE_SIZE - within);
+            let page_address = self.ram_start + (page * PAGE_SIZE) as u32;
+            let baseline_is_zero = self
+                .baseline_page(page_address)
+                .iter()
+                .all(|byte| *byte == 0);
+            if within == 0 && count == PAGE_SIZE && baseline_is_zero {
+                self.pages[page] = None;
+            } else {
+                self.ensure_page(page)[within..within + count].fill(0);
+            }
+            offset += count;
+        }
         self.mark_dirty_range(address, length);
         Ok(())
     }
@@ -390,22 +434,10 @@ impl Memory {
             .checked_add(length)
             .filter(|end| *end <= self.len())
             .ok_or(VmError::MemoryRead(source))?;
-        self.check_write(destination, length)?;
-        let destination_offset = (destination - self.ram_start) as usize;
-        if source >= self.ram_start {
-            self.bytes.copy_within(
-                (source - self.ram_start) as usize..(source_end - self.ram_start) as usize,
-                destination_offset,
-            );
-        } else {
-            let copied = (source..source_end)
-                .map(|address| self.read8(address))
-                .collect::<Result<Vec<_>, _>>()?;
-            self.bytes[destination_offset..destination_offset + length as usize]
-                .copy_from_slice(&copied);
-        }
-        self.mark_dirty_range(destination, length);
-        Ok(())
+        let copied = (source..source_end)
+            .map(|address| self.read8(address))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.write_bytes(destination, &copied)
     }
 
     pub fn resize(&mut self, new_size: u32) -> Result<bool, VmError> {
@@ -415,16 +447,17 @@ impl Memory {
         {
             return Ok(false);
         }
-        if new_size > self.len()
+        let old_size = self.len();
+        let page_count = (new_size - self.ram_start) as usize / PAGE_SIZE;
+        if page_count > self.pages.len()
             && self
-                .bytes
-                .try_reserve_exact((new_size - self.len()) as usize)
+                .pages
+                .try_reserve_exact(page_count - self.pages.len())
                 .is_err()
         {
             return Ok(false);
         }
-        let old_size = self.len();
-        self.bytes.resize((new_size - self.ram_start) as usize, 0);
+        self.pages.resize(page_count, None);
         if old_size != new_size {
             self.mark_dirty_range(old_size.min(new_size), old_size.abs_diff(new_size));
         }
@@ -433,12 +466,11 @@ impl Memory {
 
     pub fn restart(&mut self, protected: Option<(u32, u32)>) {
         let protected_bytes = self.protected_bytes(protected, self.original_end);
-        self.bytes
-            .resize((self.original_end - self.ram_start) as usize, 0);
-        let initial_end = (self.ext_start - self.ram_start) as usize;
-        self.bytes[..initial_end]
-            .copy_from_slice(&self.initial[self.ram_start as usize..self.ext_start as usize]);
-        self.bytes[initial_end..].fill(0);
+        self.pages.resize(
+            (self.original_end - self.ram_start) as usize / PAGE_SIZE,
+            None,
+        );
+        self.pages.fill(None);
         self.restore_protected(protected_bytes);
         self.mark_all_pages_dirty();
     }
@@ -479,20 +511,19 @@ impl Memory {
         if !self.resize(target_len)? {
             return Err(VmError::MemoryAllocation(target_len));
         }
-        let initial_end = (self.ext_start - self.ram_start) as usize;
-        self.bytes[..initial_end]
-            .copy_from_slice(&self.initial[self.ram_start as usize..self.ext_start as usize]);
-        self.bytes[initial_end..].fill(0);
+        self.pages.fill(None);
         for (&address, page) in pages {
             if address < self.ram_start
-                || address.checked_add(256).is_none_or(|end| end > target_len)
-                || !address.is_multiple_of(256)
-                || page.len() != 256
+                || address
+                    .checked_add(PAGE_SIZE as u32)
+                    .is_none_or(|end| end > target_len)
+                || !address.is_multiple_of(PAGE_SIZE as u32)
+                || page.len() != PAGE_SIZE
             {
                 return Err(VmError::InvalidSave);
             }
-            let start = (address - self.ram_start) as usize;
-            self.bytes[start..start + 256].copy_from_slice(page.as_slice());
+            let index = (address - self.ram_start) as usize / PAGE_SIZE;
+            self.pages[index] = Some(page.clone());
         }
         self.restore_protected(protected_bytes);
         self.mark_all_pages_dirty();
@@ -512,6 +543,49 @@ impl Memory {
         }
     }
 
+    fn baseline_page(&self, address: u32) -> &[u8] {
+        if address < self.ext_start {
+            &self.initial[address as usize..address as usize + PAGE_SIZE]
+        } else {
+            &ZERO_PAGE
+        }
+    }
+
+    fn current_page(&self, index: usize) -> &[u8] {
+        let address = self.ram_start + (index * PAGE_SIZE) as u32;
+        self.pages[index]
+            .as_ref()
+            .map_or_else(|| self.baseline_page(address), |page| page.as_slice())
+    }
+
+    fn ensure_page(&mut self, index: usize) -> &mut [u8] {
+        if self.pages[index].is_none() {
+            let address = self.ram_start + (index * PAGE_SIZE) as u32;
+            self.pages[index] = Some(Arc::new(self.baseline_page(address).to_vec()));
+        }
+        Arc::make_mut(self.pages[index].as_mut().unwrap()).as_mut_slice()
+    }
+
+    fn write_bytes(&mut self, address: u32, bytes: &[u8]) -> Result<(), VmError> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let length = u32::try_from(bytes.len()).map_err(|_| VmError::MemoryWrite(address))?;
+        self.check_write(address, length)?;
+        let mut offset = 0usize;
+        while offset < bytes.len() {
+            let current = address as usize - self.ram_start as usize + offset;
+            let page = current / PAGE_SIZE;
+            let within = current % PAGE_SIZE;
+            let count = (bytes.len() - offset).min(PAGE_SIZE - within);
+            self.ensure_page(page)[within..within + count]
+                .copy_from_slice(&bytes[offset..offset + count]);
+            offset += count;
+        }
+        self.mark_dirty_range(address, length);
+        Ok(())
+    }
+
     fn check_write(&self, address: u32, length: u32) -> Result<(), VmError> {
         if address < self.ram_start {
             return Err(VmError::RomWrite(address));
@@ -524,6 +598,9 @@ impl Memory {
     }
 
     fn slice(&self, address: u32, length: u32) -> Result<&[u8], VmError> {
+        if length == 0 {
+            return Ok(&[]);
+        }
         let end = address
             .checked_add(length)
             .filter(|end| *end <= self.len())
@@ -531,9 +608,13 @@ impl Memory {
         if end <= self.ram_start {
             Ok(&self.initial[address as usize..end as usize])
         } else if address >= self.ram_start {
-            let start = (address - self.ram_start) as usize;
-            let end = (end - self.ram_start) as usize;
-            Ok(&self.bytes[start..end])
+            let offset = (address - self.ram_start) as usize;
+            let within = offset % PAGE_SIZE;
+            if within + length as usize > PAGE_SIZE {
+                return Err(VmError::MemoryRead(address));
+            }
+            let page = offset / PAGE_SIZE;
+            Ok(&self.current_page(page)[within..within + length as usize])
         } else {
             Err(VmError::MemoryRead(address))
         }
@@ -584,8 +665,8 @@ impl Memory {
         };
         let length = bytes.len().min(self.len().saturating_sub(start) as usize);
         if length != 0 {
-            let start = (start - self.ram_start) as usize;
-            self.bytes[start..start + length].copy_from_slice(&bytes[..length]);
+            self.write_bytes(start, &bytes[..length])
+                .expect("protected range checked");
         }
     }
 }
@@ -653,9 +734,26 @@ mod tests {
         let memory = Memory::new_with_limit(&story, 0x400).unwrap();
 
         assert_eq!(memory.len(), 0x200);
-        assert_eq!(memory.bytes.len(), 0x100);
+        assert_eq!(memory.pages.len(), 1);
+        assert!(memory.pages.iter().all(Option::is_none));
         assert_eq!(memory.read8(0x20).unwrap(), story.image[0x20]);
         assert_eq!(memory.read8(0x100).unwrap(), 0);
+    }
+
+    #[test]
+    fn extended_zero_memory_stays_lazy_until_written() {
+        let story = story();
+        let mut memory = Memory::new_with_limit(&story, 16 * 1024 * 1024).unwrap();
+        assert!(memory.resize(16 * 1024 * 1024).unwrap());
+        let before = memory.snapshot_byte_len();
+
+        assert_eq!(memory.read8(0x00f0_0000).unwrap(), 0);
+        assert!(before < 1024 * 1024);
+
+        memory.write8(0x00f0_0000, 7).unwrap();
+        assert_eq!(memory.read8(0x00f0_0000).unwrap(), 7);
+        assert!(memory.snapshot_byte_len() >= before + 256);
+        assert!(memory.snapshot_byte_len() < 1024 * 1024);
     }
 
     #[test]
@@ -751,12 +849,12 @@ mod tests {
     #[test]
     fn zero_length_block_operations_do_not_access_memory() {
         let mut memory = Memory::new(&story());
-        let before = memory.bytes.clone();
+        let before = memory.clone();
         for address in [0, 0x20, 0x100, memory.len(), u32::MAX] {
             memory.zero(address, 0).unwrap();
             memory.copy(address, u32::MAX, 0).unwrap();
             memory.copy(u32::MAX, address, 0).unwrap();
         }
-        assert_eq!(memory.bytes, before);
+        assert_eq!(memory.pages, before.pages);
     }
 }

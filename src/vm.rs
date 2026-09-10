@@ -551,6 +551,8 @@ pub struct Vm {
     poll_yields: u64,
     graphical_host: bool,
     #[serde(skip)]
+    strict_glk: bool,
+    #[serde(skip)]
     terminal_host: bool,
     #[serde(skip)]
     audio: sound::AudioDevice,
@@ -566,6 +568,8 @@ pub struct Vm {
     output: String,
     #[serde(skip)]
     text_buffer_events: Option<Vec<TextBufferEvent>>,
+    #[serde(skip)]
+    event_trace: Option<Vec<[u32; 4]>>,
     requests: BTreeMap<u32, Request>,
     events: std::collections::VecDeque<[u32; 4]>,
     #[serde(skip)]
@@ -597,6 +601,11 @@ pub struct Vm {
 impl Vm {
     pub fn resource_limits(&self) -> crate::memory::ResourceLimits {
         self.resource_limits
+    }
+
+    /// Treat an unknown Glk selector as a VM error instead of a recorded no-op.
+    pub fn set_strict_glk(&mut self, strict: bool) {
+        self.strict_glk = strict;
     }
 
     pub fn set_resource_limits(&mut self, limits: crate::memory::ResourceLimits) {
@@ -672,6 +681,7 @@ impl Vm {
             poll_calls: 0,
             poll_yields: 0,
             graphical_host: true,
+            strict_glk: false,
             terminal_host: false,
             audio: sound::AudioDevice::default(),
             channels: BTreeMap::new(),
@@ -685,6 +695,7 @@ impl Vm {
             io_rock: 0,
             output: String::new(),
             text_buffer_events: None,
+            event_trace: None,
             requests: BTreeMap::new(),
             events: std::collections::VecDeque::new(),
             timer: None,
@@ -756,6 +767,25 @@ impl Vm {
 
     pub fn take_output(&mut self) -> String {
         std::mem::take(&mut self.output)
+    }
+
+    /// Enable optional recording of events delivered to the story.
+    pub fn enable_event_trace(&mut self) {
+        self.event_trace.get_or_insert_with(Vec::new);
+    }
+
+    /// Return and clear the events recorded since tracing was enabled.
+    pub fn take_event_trace(&mut self) -> Vec<[u32; 4]> {
+        self.event_trace
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
+    }
+
+    fn record_event(&mut self, event: [u32; 4]) {
+        if let Some(trace) = &mut self.event_trace {
+            trace.push(event);
+        }
     }
 
     pub(crate) fn enable_text_buffer_events(&mut self) {
@@ -909,12 +939,18 @@ impl Vm {
                 if b == 0 {
                     return Err(VmError::DivisionByZero);
                 }
+                if a == i32::MIN && b == -1 {
+                    return Err(VmError::IntegerOverflow);
+                }
                 store!(2, a.wrapping_div(b) as u32);
             }
             0x14 => {
                 let (a, b) = (load!(0) as i32, load!(1) as i32);
                 if b == 0 {
                     return Err(VmError::DivisionByZero);
+                }
+                if a == i32::MIN && b == -1 {
+                    return Err(VmError::IntegerOverflow);
                 }
                 store!(2, a.wrapping_rem(b) as u32);
             }
@@ -2622,6 +2658,9 @@ impl Vm {
             }
             _ => {
                 self.unsupported_glk.insert(selector);
+                if self.strict_glk {
+                    return Err(VmError::UnsupportedGlkSelector(selector));
+                }
                 0
             }
         };
@@ -3053,6 +3092,10 @@ pub enum VmError {
     InvalidStoreMode,
     #[error("unsupported opcode {opcode:#x} at {address:#010x}")]
     UnsupportedOpcode { opcode: u32, address: u32 },
+    #[error("integer division overflow")]
+    IntegerOverflow,
+    #[error("unsupported Glk selector {0:#x}")]
+    UnsupportedGlkSelector(u32),
     #[error("division by zero")]
     DivisionByZero,
     #[error("invalid function at {0:#010x}")]

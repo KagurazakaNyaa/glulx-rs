@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Reproducible Glulxe differential and bidirectional IFZS smoke test.
+"""Reproducible Glulxe/Git differential and bidirectional IFZS smoke test.
 
-Usage: python3 tools/check-reference.py --reference /path/to/glulxe --candidate target/debug/glulx-rs
+Usage: python3 tools/check-reference.py --reference /path/to/glulxe --candidate target/debug/glulx-rs [--git /path/to/git]
 Requires Python 3; generates a synthetic story in a temporary directory.
 """
 import argparse
 import pathlib
+import re
 import struct
 import subprocess
 import tempfile
@@ -94,12 +95,90 @@ def story():
     return b.finish()
 
 
-def run(executable, image, save, action, candidate, cwd=None):
-    command = [str(pathlib.Path(executable).resolve())] + (['--headless'] if candidate else ['-q', '-u']) + [str(image)]
-    result = subprocess.run(command, input=f'{action}\n{save}\n', text=True, capture_output=True, timeout=20, cwd=cwd)
+def command_for(executable, image, candidate, strict_glk=False):
+    command = [str(pathlib.Path(executable).resolve())]
+    if candidate:
+        command.append('--headless')
+        if strict_glk:
+            command.append('--strict-glk')
+    else:
+        command.extend(['-q', '-u'])
+    command.append(str(image))
+    return command
+
+
+def run_process(executable, image, input_text, candidate, cwd=None, timeout=20, strict_glk=False):
+    command = command_for(executable, image, candidate, strict_glk)
+    result = subprocess.run(command, input=input_text, text=True, capture_output=True, timeout=timeout, cwd=cwd)
     if result.returncode:
         raise AssertionError(f'{command}: {result.stderr}\n{result.stdout}')
     return result.stdout
+
+
+def run(executable, image, save, action, candidate, cwd=None, timeout=20, strict_glk=False):
+    return run_process(
+        executable,
+        image,
+        f'{action}\n{save}\n',
+        candidate,
+        cwd=cwd,
+        timeout=timeout,
+        strict_glk=strict_glk,
+    )
+
+
+def normalize_output(output):
+    output = output.replace('\r\n', '\n')
+    return re.sub(r'Interpreter version [^ /\n]+', 'Interpreter version X', output)
+
+
+def engine_specs(args):
+    specs = {
+        'Glulxe': (args.reference, False),
+        'glulx-rs': (args.candidate, True),
+    }
+    if args.git:
+        specs['Git'] = (args.git, False)
+    return specs
+
+
+def run_engine(specs, name, image, save, action, cwd=None, timeout=20, strict_glk=False):
+    executable, candidate = specs[name]
+    return run(
+        executable,
+        image,
+        save,
+        action,
+        candidate,
+        cwd=cwd,
+        timeout=timeout,
+        strict_glk=strict_glk,
+    )
+
+
+def run_engine_input(specs, name, image, input_text, cwd=None, timeout=20, strict_glk=False):
+    executable, candidate = specs[name]
+    return run_process(
+        executable,
+        image,
+        input_text,
+        candidate,
+        cwd=cwd,
+        timeout=timeout,
+        strict_glk=strict_glk,
+    )
+
+
+def compare_transcripts(outputs, context, strip=False):
+    baseline = normalize_output(outputs['Glulxe'])
+    if strip:
+        baseline = baseline.strip()
+    for name, output in outputs.items():
+        actual = normalize_output(output)
+        if strip:
+            actual = actual.strip()
+        if actual != baseline:
+            raise AssertionError(f'{context}: transcript differs for {name}')
 
 
 def acceleration_story():
@@ -290,100 +369,145 @@ def shared_stream_story():
     return image, 'SHARED:X\nREADCOUNT:1 WRITECOUNT:1\nDATA:XYC\n'
 
 
+def unknown_selector_story():
+    b = StoryBuilder()
+    b.glk(0x7fff, [], (7, 0x800))
+    b.text('UNKNOWN-SELECTOR-OK\n')
+    b.instruction(0x120)
+    return b.finish()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--reference', type=pathlib.Path, required=True)
     parser.add_argument('--candidate', type=pathlib.Path, required=True)
+    parser.add_argument('--git', type=pathlib.Path, help='optional David Kinder Git executable; invoked with -q -u')
+    parser.add_argument('--strict-glk', action='store_true', help='make the Rust candidate fail on unknown Glk selectors')
     parser.add_argument('--fixtures', type=pathlib.Path, help='Directory containing official Glulxercise, Unicode, resource-stream, and Adventure fixtures')
+    parser.add_argument(
+        '--route',
+        action='append',
+        nargs=2,
+        type=pathlib.Path,
+        metavar=('STORY', 'COMMAND_FILE'),
+        help='run a command script against every selected engine; {save} expands to a private save path',
+    )
     args = parser.parse_args()
+    specs = engine_specs(args)
     with tempfile.TemporaryDirectory(prefix='glulx-conformance-') as directory:
         root = pathlib.Path(directory)
         image = root / 'interop.ulx'
         image.write_bytes(story())
-        for writer, reader, name in [(True, False, 'Rust -> Glulxe'), (False, True, 'Glulxe -> Rust')]:
-            save = root / ('rust.glksave' if writer else 'glulxe.glksave')
-            output = run(args.candidate if writer else args.reference, image, save, 's', writer)
+        pairs = [('glulx-rs', 'Glulxe'), ('Glulxe', 'glulx-rs')]
+        if args.git:
+            pairs.extend([('Git', 'glulx-rs'), ('glulx-rs', 'Git'), ('Glulxe', 'Git'), ('Git', 'Glulxe')])
+        for writer, reader in pairs:
+            save = root / f'{writer.lower()}-to-{reader.lower()}.glksave'
+            output = run_engine(specs, writer, image, save, 's', strict_glk=args.strict_glk)
             assert 'GLULX-RESULT:0' in output, output
             assert 'DOUBLE:-1234567' in output, output
-            output = run(args.candidate if reader else args.reference, image, save, 'r', reader)
+            output = run_engine(specs, reader, image, save, 'r', strict_glk=args.strict_glk)
             assert 'GLULX-RESULT:-1' in output, output
             assert 'DOUBLE:-1234567' in output, output
-            print(f'PASS {name}: save continuation, heap chunk, double stack order')
+            print(f'PASS {writer} -> {reader}: save continuation, heap chunk, double stack order')
 
         image = root / 'acceleration.ulx'
         data, expected = acceleration_story()
         image.write_bytes(data)
         expected_text = ''.join(f'ACCEL:{value}\n' for value in expected) + 'ACCEL-DONE\n'
-        transcripts = []
-        for candidate in [False, True]:
-            executable = args.candidate if candidate else args.reference
-            output = run(executable, image, root / 'unused', '', candidate)
+        outputs = {}
+        for name in specs:
+            output = run_engine(specs, name, image, root / 'unused', '', strict_glk=args.strict_glk)
             # CheapGlk inserts an initial newline when the main window opens.
-            assert output.strip() == expected_text.strip(), (candidate, output, expected_text)
-            transcripts.append(output)
-        assert transcripts[0] == transcripts[1], 'Acceleration transcripts differ'
+            assert normalize_output(output).strip() == normalize_output(expected_text).strip(), (name, output, expected_text)
+            outputs[name] = output
+        compare_transcripts(outputs, 'Acceleration')
         print(f'PASS acceleration: all 13 functions, {len(expected)} result checks, exact reference transcript')
 
         image = root / 'core-boundaries.ulx'
         data, expected = core_boundary_story()
         image.write_bytes(data)
-        transcripts = []
-        for candidate in [False, True]:
-            executable = args.candidate if candidate else args.reference
-            output = run(executable, image, root / 'unused', '', candidate)
-            assert output.strip() == expected.strip(), f'Core boundary output mismatch: candidate={candidate}'
-            transcripts.append(output)
-        assert transcripts[0] == transcripts[1], 'Core boundary transcripts differ'
+        outputs = {}
+        for name in specs:
+            output = run_engine(specs, name, image, root / 'unused', '', strict_glk=args.strict_glk)
+            assert normalize_output(output).strip() == normalize_output(expected).strip(), f'Core boundary output mismatch: engine={name}'
+            outputs[name] = output
+        compare_transcripts(outputs, 'Core boundaries')
         print('PASS core boundaries: zero-length memory operations and 40000 Huffman substrings, exact reference transcript')
 
         image = root / 'shared-streams.ulx'
         data, expected = shared_stream_story()
         image.write_bytes(data)
-        for candidate in [False, True]:
+        for name in specs:
             file = root / 'sharedfile.glkdata'
             file.write_bytes(b'ABC')
-            executable = args.candidate if candidate else args.reference
-            output = run(executable, image, root / 'unused', '', candidate, cwd=root)
-            assert output == expected, ('Shared stream transcript differs', candidate, output)
-            assert file.read_bytes() == b'XYC', ('Shared file contents differ', candidate, file.read_bytes())
+            output = run_engine(specs, name, image, root / 'unused', '', cwd=root, strict_glk=args.strict_glk)
+            assert normalize_output(output).strip() == normalize_output(expected).strip(), ('Shared stream transcript differs', name, output)
+            assert file.read_bytes() == b'XYC', ('Shared file contents differ', name, file.read_bytes())
         print('PASS shared file streams: cross-handle reads, independent counts, and final file bytes match reference')
 
+        if args.strict_glk:
+            image = root / 'unknown-selector.ulx'
+            image.write_bytes(unknown_selector_story())
+            try:
+                run_engine_input(specs, 'glulx-rs', image, '', strict_glk=True)
+            except AssertionError as error:
+                assert 'unsupported Glk selector' in str(error), error
+                print('PASS strict Glk: unknown selector fails at the Rust VM boundary')
+            else:
+                raise AssertionError('strict Glk mode accepted an unknown selector')
+
     if args.fixtures:
-        import re
         for fixture, commands in [('glulxercise.ulx','all\nallfloat\nalldouble\nquit\n'),('unicasetest.ulx','all\nquit\n'),('resstreamtest.gblorb','quit\n')]:
             file=args.fixtures / fixture
-            result=subprocess.run([str(args.candidate),'--headless',str(file)],input=commands,text=True,capture_output=True,timeout=60)
-            assert result.returncode==0,(fixture,result.stderr)
-            if 'FAIL' in result.stdout or 'tests failed' in result.stdout:
-                with tempfile.NamedTemporaryFile(mode='w', prefix=f'{fixture}-', suffix='.log', delete=False) as log:
-                    log.write(result.stdout + result.stderr)
-                    saved = log.name
-                failures = '\n'.join(line for line in result.stdout.splitlines() if 'FAIL' in line or 'tests failed' in line)
-                raise AssertionError(f'{fixture}: {failures}\nFull transcript: {saved}')
+            outputs = {}
+            for name in specs:
+                output = run_engine_input(specs, name, file, commands, timeout=60, strict_glk=args.strict_glk)
+                outputs[name] = output
+                if 'FAIL' in output or 'tests failed' in output:
+                    with tempfile.NamedTemporaryFile(mode='w', prefix=f'{fixture}-', suffix='.log', delete=False) as log:
+                        log.write(output)
+                        saved = log.name
+                    failures = '\n'.join(line for line in output.splitlines() if 'FAIL' in line or 'tests failed' in line)
+                    raise AssertionError(f'{fixture} ({name}): {failures}\nFull transcript: {saved}')
+            candidate_output = outputs['glulx-rs']
             if fixture=='glulxercise.ulx':
-                assert result.stdout.count('All tests passed.')==3,result.stdout
-                print(f'PASS {fixture}: {result.stdout.count("Passed.")} passing sections')
+                for name, output in outputs.items():
+                    assert output.count('All tests passed.')==3, (fixture, name, output)
+                print(f'PASS {fixture}: {candidate_output.count("Passed.")} passing sections for {", ".join(outputs)}')
             else:
-                reference=subprocess.run([str(args.reference),'-q','-u',str(file)],input=commands,text=True,capture_output=True,timeout=60)
-                normalize=lambda output:re.sub(r'Interpreter version [^ /]+','Interpreter version X',output)
-                assert reference.returncode==0,reference.stderr
-                assert normalize(reference.stdout)==normalize(result.stdout),f'{fixture}: transcript differs'
-                print(f'PASS {fixture}: exact normalized reference transcript')
+                compare_transcripts(outputs, fixture)
+                print(f'PASS {fixture}: exact normalized reference transcript for {", ".join(outputs)}')
         adventure=args.fixtures/'glulx-advent.ulx'
         if adventure.exists():
             with tempfile.TemporaryDirectory(prefix='glulx-adventure-') as directory:
-                for writer,reader,name in [(True,False,'Rust -> Glulxe'),(False,True,'Glulxe -> Rust')]:
-                    save=pathlib.Path(directory)/('rust.glksave' if writer else 'glulxe.glksave')
-                    def play(candidate,commands):
-                        command=[str(args.candidate),'--headless'] if candidate else [str(args.reference),'-q','-u']
-                        result=subprocess.run(command+[str(adventure)],input=commands,text=True,capture_output=True,timeout=30)
-                        assert result.returncode==0,result.stderr
-                        return result.stdout
-                    output=play(writer,'north\nsave\n'+str(save)+'\nquit\ny\n')
+                for writer, reader in pairs:
+                    save=pathlib.Path(directory)/f'{writer.lower()}-to-{reader.lower()}.glksave'
+                    output=run_engine_input(specs, writer, adventure, 'north\nsave\n'+str(save)+'\nquit\ny\n', timeout=30, strict_glk=args.strict_glk)
                     assert save.exists(),output
-                    output=play(reader,'restore\n'+str(save)+'\nlook\nquit\ny\n')
+                    output=run_engine_input(specs, reader, adventure, 'restore\n'+str(save)+'\nlook\nquit\ny\n', timeout=30, strict_glk=args.strict_glk)
                     assert 'In Forest' in output and 'Restore failed' not in output,output
-                    print(f'PASS Adventure {name}')
+                    print(f'PASS Adventure {writer} -> {reader}')
+
+    for index, (story_path, command_path) in enumerate(args.route or [], 1):
+        story_path = story_path.resolve(strict=True)
+        command_path = command_path.resolve(strict=True)
+        command_text = command_path.read_text(encoding='utf-8')
+        with tempfile.TemporaryDirectory(prefix='glulx-route-') as directory:
+            outputs = {}
+            for name in specs:
+                save = pathlib.Path(directory) / f'{index}-{name.lower()}.glksave'
+                input_text = command_text.replace('{save}', str(save))
+                outputs[name] = run_engine_input(
+                    specs,
+                    name,
+                    story_path,
+                    input_text,
+                    timeout=120,
+                    strict_glk=args.strict_glk,
+                )
+            compare_transcripts(outputs, f'route {story_path.name}')
+            print(f'PASS route {story_path.name}: {", ".join(outputs)}')
 
 
 if __name__ == '__main__':

@@ -217,6 +217,9 @@ impl Vm {
             .position(|event| matches!(event[0], 1 | 5 | 6 | 7))
             .and_then(|index| self.events.remove(index))
             .unwrap_or([0, 0, 0, 0]);
+        if event[0] != 0 {
+            self.record_event(event);
+        }
         self.write_event(address, event)
     }
     /// Wake at the actual timer deadline, rather than the host's idle cadence.
@@ -238,6 +241,7 @@ impl Vm {
         if self.pending_select.is_some()
             && let Some(event) = self.events.pop_front()
         {
+            self.record_event(event);
             let select = self.pending_select.take().unwrap();
             self.write_event(select.event_address, event)?;
             self.store_destination(&select.destination, 0, Width::Word)?;

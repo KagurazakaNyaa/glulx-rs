@@ -46,6 +46,51 @@ fn glk(vm: &mut Vm, selector: u32, args: &[u32]) -> u32 {
 }
 
 #[test]
+fn integer_division_overflow_is_rejected() {
+    for opcode in [0x13, 0x14] {
+        let image = image_with_program(&[
+            opcode, 0x33, 0x07, // div/mod with two word constants and a memory store
+            0x80, 0, 0, 0, // i32::MIN
+            0xff, 0xff, 0xff, 0xff, // -1
+            0, 0, 1, 0x20, // destination 0x120
+        ]);
+        let mut vm = Vm::new(Story::from_bytes(&image, None).unwrap()).unwrap();
+        assert!(
+            matches!(vm.run_steps(1), Err(VmError::IntegerOverflow)),
+            "opcode {opcode:#x}"
+        );
+    }
+}
+
+#[test]
+fn unknown_glk_selector_can_be_checked_at_the_vm_boundary() {
+    let image = image_with_program(&[
+        0x81, 0x30, 0x33, 0x07, // glk selector, argument count, memory destination
+        0, 0, 0x7f, 0xff, // selector 0x7fff
+        0, 0, 0, 0, // no arguments
+        0, 0, 1, 0x20, // destination 0x120
+    ]);
+    let mut permissive = Vm::new(Story::from_bytes(&image, None).unwrap()).unwrap();
+    assert_eq!(permissive.run_steps(1).unwrap(), RunState::Running);
+
+    let mut strict = Vm::new(Story::from_bytes(&image, None).unwrap()).unwrap();
+    strict.set_strict_glk(true);
+    assert!(matches!(
+        strict.run_steps(1),
+        Err(VmError::UnsupportedGlkSelector(0x7fff))
+    ));
+}
+
+#[test]
+fn optional_event_trace_records_events_consumed_by_select_poll() {
+    let mut vm = vm();
+    vm.enable_event_trace();
+    vm.events.push_back([5, 1, 2, 3]);
+    vm.select_poll(0x100).unwrap();
+    assert_eq!(vm.take_event_trace(), vec![[5, 1, 2, 3]]);
+}
+
+#[test]
 fn double_arithmetic_opcodes_store_low_then_high() {
     let mut vm = vm();
     for (opcode, a, b, expected) in [
@@ -399,10 +444,17 @@ fn narrow_copy_integer_extremes_and_stack_bounds() {
         step(&mut vm, opcode, &[0x89ab_cdef], &[8]);
         assert_eq!(vm.stack.pop_u32().unwrap(), expected);
     }
-    step(&mut vm, 0x13, &[i32::MIN as u32, u32::MAX], &[8]);
-    assert_eq!(vm.stack.pop_u32().unwrap(), i32::MIN as u32);
-    step(&mut vm, 0x14, &[i32::MIN as u32, u32::MAX], &[8]);
-    assert_eq!(vm.stack.pop_u32().unwrap(), 0);
+    for opcode in [0x13, 0x14] {
+        let bytes = instruction(opcode, &[i32::MIN as u32, u32::MAX], &[8]);
+        for (i, byte) in bytes.iter().enumerate() {
+            vm.memory.write8(0x180 + i as u32, *byte).unwrap();
+        }
+        vm.pc = 0x180;
+        assert!(
+            matches!(vm.step(), Err(VmError::IntegerOverflow)),
+            "opcode {opcode:#x}"
+        );
+    }
     for shift in [32, 33, u32::MAX] {
         step(&mut vm, 0x1c, &[1, shift], &[8]);
         assert_eq!(vm.stack.pop_u32().unwrap(), 0);

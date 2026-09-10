@@ -12,9 +12,10 @@ terminal display/input host is selected for interactive TTYs.
 indexes, and exposes metadata and cover resources. Its executable image is shared
 with `Memory`'s initial-image baseline; file loading transfers owned container bytes
 where possible. Bundled Blorb stories share the container backing buffer with the
-execution-image view. `Memory` stores only the writable range from RAMSTART onward and
-reads ROM directly from the shared initial image, while enforcing ROM protection, address
-checks and a bounded allocation policy.
+execution-image view. `Memory` stores the writable range from RAMSTART onward as
+copy-on-write pages; untouched pages read directly from the shared initial image or a
+zero page. ROM reads use the shared initial image, while enforcing ROM protection,
+address checks and a bounded allocation policy.
 
 `Vm` owns instruction decoding, execution, stacks and the Glk object model. Its
 bounded run interface keeps the GUI responsive. Unsupported instructions are typed

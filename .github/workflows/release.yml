@@ -152,6 +152,13 @@ jobs:
           result.check_returncode()
           if "Usage: glulx-rs" not in result.stdout:
               raise SystemExit("The release executable did not print its CLI help.")
+      - name: Smoke test the native headless pipe
+        # This uses an in-memory synthetic story, so every runner exercises the actual binary without downloaded fixtures.
+        run: |
+          binary=glulx-rs
+          if [[ "$BUILD_TARGET" == *windows-msvc ]]; then binary=glulx-rs.exe; fi
+          python -m py_compile tools/check-reference.py tools/check-headless.py tools/benchmark-interpreters.py
+          python tools/check-headless.py --candidate "target/$BUILD_TARGET/release/$binary"
           PY
       - name: Package executable and license
         # The preceding native checks exercise the executable users will download.

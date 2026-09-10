@@ -39,6 +39,22 @@ adapter compiled into the same executable:
 cargo run --release -- --headless path/to/story.ulx
 ```
 
+For compatibility checks, `--strict-glk` makes an unknown Glk selector a reported
+error. The default mode still records and ignores unknown selectors for stories
+that use host extensions:
+
+```sh
+cargo run --release -- --headless --strict-glk path/to/story.ulx
+```
+
+Headless playback can optionally write the events actually delivered to the story:
+
+```sh
+cargo run --release -- --headless --trace-events "<output-dir>/events.json" path/to/story.ulx
+```
+
+Tracing is disabled by default and is not part of saves or desktop sessions.
+
 The desktop uses three native windows: the game canvas, **Log and input**, and
 **Translation**. Resize or close companion windows without resizing the game.
 Use the toolbar Log and Translation toggles to show or hide them. Settings opens
@@ -161,6 +177,23 @@ python3 tools/benchmark-engine.py --output "<output-dir>/glulx-engine-benchmark.
 The tool uses release mode, one test thread and the `benchmark_` ignored tests. For comparisons, keep
 the machine, power mode, toolchain and working-tree commit fixed.
 
+Compare one real story route across Glulxe, Git, and Rust, recording elapsed time,
+exit status, and output digests:
+
+```sh
+python3 tools/benchmark-interpreters.py \
+  "<story-dir>/story.gblorb" \
+  --reference "<tool-dir>/glulxe" \
+  --candidate "target/release/glulx-rs" \
+  --git "<tool-dir>/git" \
+  --command-file "<fixture-dir>/route.txt" \
+  --repetitions 3 \
+  --output "<output-dir>/glulx-interpreters.json"
+```
+
+`{save}` in the input script expands to an engine-specific temporary save path. The
+benchmark records summaries only; it does not add stories or full output to the repo.
+
 For real stories, use the separate tool to measure startup time and peak Linux RSS/HWM. It uses a
 temporary working directory and does not write beside the stories:
 
@@ -227,8 +260,17 @@ Optional reference validation (download fixtures separately; see
 [validation record](docs/glulx-validation.md)):
 
 ```sh
-python3 tools/check-reference.py --reference /path/to/glulxe --candidate target/debug/glulx-rs --fixtures /path/to/fixtures
+python3 tools/check-reference.py \
+  --reference /path/to/glulxe \
+  --candidate target/debug/glulx-rs \
+  --git /path/to/git \
+  --strict-glk \
+  --fixtures /path/to/fixtures
 ```
+
+Real story routes can also be passed as `--route STORY COMMAND_FILE`; `{save}` in the
+command file expands to a private temporary save path. `--git` and `--route` accept
+real paths and do not depend on fixed files outside the repository.
 
 An original media fixture can be generated locally to inspect image wrapping,
 clickable pictures, window resizing and MOD playback:

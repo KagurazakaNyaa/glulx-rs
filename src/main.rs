@@ -6,11 +6,13 @@ use glulx_rs::app::PlayerApp;
 use glulx_rs::memory_budget::{Budget, MemoryPolicy, Overrides, startup_snapshot};
 use glulx_rs::{ResourceSelection, Story, Vm};
 
-const USAGE: &str = "Usage: glulx-rs [--headless] [--max-memory MIB] [--max-process-memory MIB] [--diagnostics LOG] [--resources PATH] [--no-auto-resources] [STORY]\n\n--headless          Play in the terminal (plain text when input or output is piped)\n--max-memory MIB   Game VM limit: MiB or percentage (e.g. 1024 or 25%)\n--max-process-memory MIB  OS hard limit: MiB or percentage (0 disables)\n--max-undo-memory SIZE       Undo payload budget\n--max-graphics-cache SIZE    Graphics cache budget\n--max-text-image-cache SIZE  Text image cache budget\n--max-decoded-image SIZE     Per-picture RGBA budget\n--max-audio-resource SIZE    Per-audio encoded budget\n--max-song-pcm SIZE          SONG PCM budget\nAll SIZE values accept MiB or 1%–100%. CLI overrides JSON for this run only.\n--diagnostics LOG   Write diagnostic heartbeats and slow operations to LOG\n--resources PATH    Use this Blorb archive or loose resource directory\n--no-auto-resources Disable discovery of same-name external resource archives\n--help              Show this help\n\nDebug builds default to ./glulx-debug.log; --diagnostics overrides it.\n\nAn explicit --resources path takes priority over --no-auto-resources.";
+const USAGE: &str = "Usage: glulx-rs [--headless] [--strict-glk] [--trace-events PATH] [--max-memory MIB] [--max-process-memory MIB] [--diagnostics LOG] [--resources PATH] [--no-auto-resources] [STORY]\n\n--headless          Play in the terminal (plain text when input or output is piped)\n--strict-glk        Fail when a story calls an unknown Glk selector\n--trace-events PATH Write delivered Glk events as JSON after headless playback\n--max-memory MIB   Game VM limit: MiB or percentage (e.g. 1024 or 25%)\n--max-process-memory MIB  OS hard limit: MiB or percentage (0 disables)\n--max-undo-memory SIZE       Undo payload budget\n--max-graphics-cache SIZE    Graphics cache budget\n--max-text-image-cache SIZE  Text image cache budget\n--max-decoded-image SIZE     Per-picture RGBA budget\n--max-audio-resource SIZE    Per-audio encoded budget\n--max-song-pcm SIZE          SONG PCM budget\nAll SIZE values accept MiB or 1%–100%. CLI overrides JSON for this run only.\n--diagnostics LOG   Write diagnostic heartbeats and slow operations to LOG\n--resources PATH    Use this Blorb archive or loose resource directory\n--no-auto-resources Disable discovery of same-name external resource archives\n--help              Show this help\n\nDebug builds default to ./glulx-debug.log; --diagnostics overrides it.\n\nAn explicit --resources path takes priority over --no-auto-resources.";
 
 #[derive(Debug)]
 struct Arguments {
     headless: bool,
+    strict_glk: bool,
+    trace_events: Option<PathBuf>,
     max_memory_mib: Option<Budget>,
     max_process_memory_mib: Option<Budget>,
     resource_overrides: std::collections::BTreeMap<String, Budget>,
@@ -27,6 +29,8 @@ fn parse_arguments(
     let mut resource_overrides = std::collections::BTreeMap::new();
     let mut max_memory_mib = None;
     let mut max_process_memory_mib = None;
+    let mut strict_glk = false;
+    let mut trace_events = None;
     let (mut headless, mut story, mut explicit, mut automatic, mut positional) =
         (false, None, None, true, false);
     while let Some(argument) = arguments.next() {
@@ -36,6 +40,15 @@ fn parse_arguments(
             positional = true;
         } else if !positional && argument == "--headless" {
             headless = true;
+        } else if !positional && argument == "--strict-glk" {
+            strict_glk = true;
+        } else if !positional && argument == "--trace-events" {
+            let path = arguments
+                .next()
+                .ok_or("--trace-events requires a JSON path")?;
+            if trace_events.replace(PathBuf::from(path)).is_some() {
+                return Err("Specify --trace-events only once".to_owned());
+            }
         } else if !positional
             && matches!(
                 argument.to_str(),
@@ -90,11 +103,16 @@ fn parse_arguments(
     if headless && story.is_none() {
         return Err("--headless requires a story".to_owned());
     }
+    if trace_events.is_some() && !headless {
+        return Err("--trace-events requires --headless".to_owned());
+    }
     if story.is_none() && (explicit.is_some() || !automatic) {
         return Err("Resource options require a story".to_owned());
     }
     Ok(Some(Arguments {
         headless,
+        strict_glk,
+        trace_events,
         max_memory_mib,
         resource_overrides,
         max_process_memory_mib,
@@ -147,8 +165,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if arguments.headless {
         let story = Story::open_with_resources(arguments.story.unwrap(), arguments.resources)?;
         let mut vm = Vm::new_with_memory_limit(story, game_limit)?;
+        vm.set_strict_glk(arguments.strict_glk);
         vm.set_resource_limits(resources);
-        return glulx_rs::terminal::run(vm);
+        return glulx_rs::terminal::run_with_event_trace(vm, arguments.trace_events);
     }
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
@@ -169,11 +188,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Glulx Player",
         options,
         Box::new(move |creation| {
-            Ok(Box::new(PlayerApp::new_with_memory_policy(
+            Ok(Box::new(PlayerApp::new_with_memory_policy_and_strict_glk(
                 creation,
                 arguments.story,
                 arguments.resources,
                 overrides,
+                arguments.strict_glk,
             )))
         }),
     )?;
@@ -298,6 +318,22 @@ mod tests {
         assert!(!args.headless);
         assert!(parse(&["--diagnostics"]).is_err());
         assert!(parse(&["--diagnostics", "a", "--diagnostics", "b"]).is_err());
+    }
+
+    #[test]
+    fn strict_glk_mode_is_parsed_for_reference_checks() {
+        let args = parse(&["--strict-glk", "game.ulx"]).unwrap().unwrap();
+        assert!(args.strict_glk);
+        assert!(!parse(&["game.ulx"]).unwrap().unwrap().strict_glk);
+    }
+
+    #[test]
+    fn event_trace_path_is_parsed_without_becoming_a_story_argument() {
+        let args = parse(&["--headless", "--trace-events", "events.json", "game.ulx"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(args.trace_events, Some(PathBuf::from("events.json")));
+        assert_eq!(args.story, Some(PathBuf::from("game.ulx")));
     }
 
     #[test]

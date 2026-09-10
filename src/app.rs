@@ -230,6 +230,7 @@ impl FileBrowser {
 pub struct PlayerApp {
     settings: PlayerSettings,
     memory_overrides: Overrides,
+    strict_glk: bool,
     settings_file: settings_file::SettingsFile,
     vm: Option<Vm>,
     story_path: Option<PathBuf>,
@@ -410,6 +411,22 @@ impl PlayerApp {
         selection: ResourceSelection,
         memory_overrides: Overrides,
     ) -> Self {
+        Self::new_with_memory_policy_and_strict_glk(
+            creation,
+            initial_story,
+            selection,
+            memory_overrides,
+            false,
+        )
+    }
+
+    pub fn new_with_memory_policy_and_strict_glk(
+        creation: &eframe::CreationContext<'_>,
+        initial_story: Option<PathBuf>,
+        selection: ResourceSelection,
+        memory_overrides: Overrides,
+        strict_glk: bool,
+    ) -> Self {
         let _ = startup_snapshot();
         let _stage = crate::diagnostics::stage("create-app-or-restore-session");
         let mut gpu_canvas = false;
@@ -446,6 +463,7 @@ impl PlayerApp {
             translation_capture_enabled: settings.translation.enabled,
             settings,
             memory_overrides,
+            strict_glk,
             settings_file,
             vm: None,
             story_path: None,
@@ -508,6 +526,7 @@ impl PlayerApp {
         {
             match (|| {
                 let mut vm = session.vm;
+                vm.set_strict_glk(app.strict_glk);
                 let policy = app.memory_policy();
                 vm.set_resource_limits(policy.resource_limits.resolve(startup_snapshot())?);
                 vm.set_memory_limit(policy.max_memory_mib.vm_bytes(startup_snapshot())?)
@@ -628,9 +647,9 @@ impl PlayerApp {
                 return;
             }
         };
-        let Some(id) = self
-            .story_loader
-            .submit(path.clone(), selection, maximum, resources)
+        let Some(id) =
+            self.story_loader
+                .submit(path.clone(), selection, maximum, resources, self.strict_glk)
         else {
             self.error = Some("story loader worker unavailable".to_owned());
             self.status = "ui.could_not_open_story".to_owned();

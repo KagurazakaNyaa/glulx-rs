@@ -106,6 +106,7 @@ struct StoryLoadTask {
     selection: ResourceSelection,
     maximum: u32,
     resources: ResourceLimits,
+    strict_glk: bool,
 }
 
 pub(super) struct StoryLoadResult {
@@ -157,6 +158,7 @@ impl Default for StoryLoadWorker {
                             .map_err(|error| error.to_string())?;
                         let mut vm = Vm::new_with_memory_limit(story, task.maximum)
                             .map_err(|error| error.to_string())?;
+                        vm.set_strict_glk(task.strict_glk);
                         vm.set_resource_limits(task.resources);
                         vm.enable_audio();
                         Ok(vm)
@@ -194,6 +196,7 @@ impl StoryLoadWorker {
         selection: ResourceSelection,
         maximum: u32,
         resources: ResourceLimits,
+        strict_glk: bool,
     ) -> Option<u64> {
         let queue = self.queue.as_ref()?;
         let id = self.next_id;
@@ -212,6 +215,7 @@ impl StoryLoadWorker {
             selection,
             maximum,
             resources,
+            strict_glk,
         });
         queue.wake.notify_one();
         Some(id)
@@ -260,6 +264,7 @@ mod tests {
                 ResourceSelection::None,
                 1024 * 1024,
                 ResourceLimits::default(),
+                false,
             )
             .unwrap();
         let result = (0..1000).find_map(|_| {
