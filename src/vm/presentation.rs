@@ -432,12 +432,8 @@ impl Vm {
                 if !self.graphical_host || !matches!(w.kind, 3 | 4) || arg(1) > 10 || arg(2) > 10 {
                     return 0;
                 }
-                let mut one =
-                    ResolvedStyle::resolve(w.kind, arg(1), &w.hints, self.text_appearance);
-                let mut two =
-                    ResolvedStyle::resolve(w.kind, arg(2), &w.hints, self.text_appearance);
-                one.reverse = false;
-                two.reverse = false;
+                let one = ResolvedStyle::resolve(w.kind, arg(1), &w.hints, self.text_appearance);
+                let two = ResolvedStyle::resolve(w.kind, arg(2), &w.hints, self.text_appearance);
                 u32::from(one != two)
             }),
             0xb3 => {
@@ -685,6 +681,8 @@ mod tests {
         assert_eq!(vm.style_call(0xb2, &[buffer, 0, 9]).unwrap(), 0);
         assert_eq!(vm.style_call(0xb2, &[buffer, 0, 3]).unwrap(), 1);
         assert_eq!(vm.style_call(0xb2, &[buffer, 3, 4]).unwrap(), 0);
+        vm.style_call(0xb0, &[3, 0, 9, 1]).unwrap();
+        assert_eq!(vm.style_call(0xb2, &[buffer, 0, 3]).unwrap(), 1);
         let grid = vm.open_window(&[buffer, 0x12, 3, 4, 0]);
         assert_eq!(vm.style_call(0xb2, &[grid, 0, 2]).unwrap(), 0);
         assert_eq!(vm.style_call(0xb2, &[grid, 0, 1]).unwrap(), 1);
