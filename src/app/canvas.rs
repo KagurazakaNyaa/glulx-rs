@@ -499,7 +499,7 @@ mod tests {
             canvas.draw(
                 &context,
                 source.clone(),
-                [((index % 8) * 64) as i32, ((index / 8) * 48) as i32],
+                [(index % 8) * 64, (index / 8) * 48],
                 [96, 96],
             );
         }
