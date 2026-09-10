@@ -120,6 +120,23 @@ enum Destination {
     Local(u32),
 }
 
+const INLINE_ARGUMENTS: usize = 64;
+
+struct ArgumentBuffer {
+    inline: [u32; INLINE_ARGUMENTS],
+    heap: Option<Vec<u32>>,
+    length: usize,
+}
+
+impl ArgumentBuffer {
+    fn as_slice(&self) -> &[u32] {
+        match &self.heap {
+            Some(values) => values,
+            None => &self.inline[..self.length],
+        }
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 struct LineRequest {
     buffer: u32,
@@ -908,11 +925,8 @@ impl Vm {
                 let address = load!(0);
                 let count = load!(1);
                 let destination = self.destination(&operands[2])?;
-                let mut arguments = Vec::with_capacity(count as usize);
-                for _ in 0..count {
-                    arguments.push(self.stack.pop_u32()?);
-                }
-                self.call(address, &arguments, destination)?;
+                let arguments = self.pop_arguments(count)?;
+                self.call(address, arguments.as_slice(), destination)?;
             }
             0x31 => {
                 let value = load!(0);
@@ -935,13 +949,10 @@ impl Vm {
             0x34 => {
                 let address = load!(0);
                 let count = load!(1);
-                let mut arguments = Vec::with_capacity(count as usize);
-                for _ in 0..count {
-                    arguments.push(self.stack.pop_u32()?);
-                }
+                let arguments = self.pop_arguments(count)?;
                 let frame = self.stack.frame_ptr;
                 self.stack.truncate(frame)?;
-                self.enter_function(address, &arguments)?;
+                self.enter_function(address, arguments.as_slice())?;
             }
             0x40 => {
                 let value = load!(0);
@@ -1028,13 +1039,23 @@ impl Vm {
             }
             0x54 => {
                 let count = load!(0);
-                let values = (0..count)
-                    .rev()
-                    .map(|depth| self.stack.peek(depth))
-                    .collect::<Result<Vec<_>, _>>()?;
-                for value in values {
-                    self.stack.push_u32(value)?;
+                let available = (self.stack.len() - self.stack.frame_end()?) / 4;
+                if count > available {
+                    return Err(VmError::StackUnderflow);
                 }
+                let count_bytes = count.checked_mul(4).ok_or(VmError::StackOverflow)?;
+                if self
+                    .stack
+                    .len()
+                    .checked_add(count_bytes)
+                    .is_none_or(|end| end > self.stack.maximum)
+                {
+                    return Err(VmError::StackOverflow);
+                }
+                let start = self.stack.len() - count_bytes;
+                self.stack
+                    .bytes
+                    .extend_from_within(start as usize..self.stack.len() as usize);
             }
             0x70 => {
                 let value = load!(0);
@@ -1244,12 +1265,12 @@ impl Vm {
             0x160..=0x163 => {
                 let address = load!(0);
                 let argument_count = (opcode - 0x160) as usize;
-                let mut arguments = Vec::with_capacity(argument_count);
+                let mut arguments = [0; 3];
                 for index in 0..argument_count {
-                    arguments.push(load!(index + 1));
+                    arguments[index] = load!(index + 1);
                 }
                 let destination = self.destination(&operands[argument_count + 1])?;
-                self.call(address, &arguments, destination)?;
+                self.call(address, &arguments[..argument_count], destination)?;
             }
             0x170 => {
                 let length = load!(0);
@@ -1398,9 +1419,9 @@ impl Vm {
                     0x230 | 0x231 => 7,
                     _ => 4,
                 };
-                let mut args = Vec::with_capacity(loads);
+                let mut args = [0; 7];
                 for (index, _) in operands.iter().take(loads).enumerate() {
-                    args.push(load!(index));
+                    args[index] = load!(index);
                 }
                 let double = |index: usize| {
                     f64::from_bits(((args[index] as u64) << 32) | args[index + 1] as u64)
@@ -1547,6 +1568,38 @@ impl Vm {
             },
             Operand::Stack => self.stack.pop_u32(),
             Operand::Local(offset) => self.stack.read_local(*offset, width),
+        }
+    }
+
+    fn pop_arguments(&mut self, count: u32) -> Result<ArgumentBuffer, VmError> {
+        let count = count as usize;
+        let available = (self.stack.len() - self.stack.frame_end()?) / 4;
+        if count > available as usize {
+            return Err(VmError::StackUnderflow);
+        }
+        if count <= INLINE_ARGUMENTS {
+            let mut values = [0; INLINE_ARGUMENTS];
+            for value in &mut values[..count] {
+                *value = self.stack.pop_u32()?;
+            }
+            Ok(ArgumentBuffer {
+                inline: values,
+                heap: None,
+                length: count,
+            })
+        } else {
+            let mut values = Vec::new();
+            values
+                .try_reserve_exact(count)
+                .map_err(|_| VmError::MemoryAllocation(count as u32))?;
+            for _ in 0..count {
+                values.push(self.stack.pop_u32()?);
+            }
+            Ok(ArgumentBuffer {
+                inline: [0; INLINE_ARGUMENTS],
+                length: count,
+                heap: Some(values),
+            })
         }
     }
 
@@ -1755,16 +1808,18 @@ impl Vm {
         if count > available {
             return Err(VmError::StackUnderflow);
         }
-        let mut values = Vec::with_capacity(count as usize);
-        for _ in 0..count {
-            values.push(self.stack.pop_u32()?);
-        }
-        values.reverse();
         let rotation = places.rem_euclid(count as i32) as usize;
-        values.rotate_right(rotation);
-        for value in values {
-            self.stack.push_u32(value)?;
+        if rotation == 0 {
+            return Ok(());
         }
+        let count = count as usize;
+        let count_bytes = count.checked_mul(4).ok_or(VmError::StackUnderflow)?;
+        let split = count - rotation;
+        let start = self.stack.len() as usize - count_bytes;
+        let end = self.stack.len() as usize;
+        reverse_stack_words(&mut self.stack.bytes[start..start + split * 4]);
+        reverse_stack_words(&mut self.stack.bytes[start + split * 4..end]);
+        reverse_stack_words(&mut self.stack.bytes[start..end]);
         Ok(())
     }
 
@@ -1944,10 +1999,8 @@ impl Vm {
         if selector != 0xc1 {
             self.presentation_pending = true;
         }
-        let mut arguments = Vec::with_capacity(argument_count as usize);
-        for _ in 0..argument_count {
-            arguments.push(self.stack.pop_u32()?);
-        }
+        let arguments = self.pop_arguments(argument_count)?;
+        let arguments = arguments.as_slice();
         let result = match selector {
             0x0001 => {
                 self.stop();
@@ -1983,7 +2036,7 @@ impl Vm {
                 .map(|window| window.rock)
                 .unwrap_or(0),
             0x0022 => self.glk_root,
-            0x0023 => self.open_window(&arguments),
+            0x0023 => self.open_window(arguments),
             0x0024 => {
                 let (read, write) = self.close_window(arguments.first().copied().unwrap_or(0));
                 let address = arguments.get(1).copied().unwrap_or(0);
@@ -2008,7 +2061,7 @@ impl Vm {
                 0
             }
             0x0026 => {
-                self.set_arrangement(&arguments);
+                self.set_arrangement(arguments);
                 0
             }
             0x0027 => {
@@ -2126,8 +2179,8 @@ impl Vm {
                 .get(&arguments.first().copied().unwrap_or(0))
                 .map(|stream| stream.rock)
                 .unwrap_or(0),
-            0x0042 | 0x0138 => self.open_file_stream(&arguments, selector == 0x0138),
-            0x0049 | 0x013a => self.open_resource_stream(&arguments, selector == 0x013a),
+            0x0042 | 0x0138 => self.open_file_stream(arguments, selector == 0x0138),
+            0x0049 | 0x013a => self.open_resource_stream(arguments, selector == 0x013a),
             0x0060..=0x0068 => {
                 if selector == 0x0062 {
                     self.file_request = Some(streams::FileRequest {
@@ -2141,7 +2194,7 @@ impl Vm {
                     self.state = RunState::WaitingForFile;
                     return Ok(());
                 }
-                self.fileref_call(selector, &arguments)?
+                self.fileref_call(selector, arguments)?
             }
             0x0043 | 0x0139 => {
                 let address = arguments.first().copied().unwrap_or(0);
@@ -2207,7 +2260,7 @@ impl Vm {
                 0
             }
             0x0045 => {
-                self.seek_stream(&arguments);
+                self.seek_stream(arguments);
                 0
             }
             0x0046 => self.stream_position(arguments.first().copied().unwrap_or(0)),
@@ -2254,7 +2307,7 @@ impl Vm {
                 )?;
                 0
             }
-            0x0090..=0x0092 | 0x0130..=0x0132 => self.read_stream_call(selector, &arguments)?,
+            0x0090..=0x0092 | 0x0130..=0x0132 => self.read_stream_call(selector, arguments)?,
             0x00a0 | 0x00a1 => {
                 let value = arguments.first().copied().unwrap_or(0) & 255;
                 if selector == 0x00a0 && matches!(value,0x41..=0x5a|0xc0..=0xd6|0xd8..=0xde) {
@@ -2267,7 +2320,7 @@ impl Vm {
                 }
             }
             0x0086 | 0x0087 | 0x00b0..=0x00b3 | 0x0100..=0x0101 => {
-                self.style_call(selector, &arguments)?
+                self.style_call(selector, arguments)?
             }
             0x00d4 | 0x0102 => {
                 let id = arguments.first().copied().unwrap_or(0);
@@ -2300,11 +2353,11 @@ impl Vm {
                 0
             }
             0x00d0 | 0x0141 => {
-                self.request_line(&arguments, selector == 0x0141)?;
+                self.request_line(arguments, selector == 0x0141)?;
                 0
             }
             0x00d1 => {
-                self.cancel_line(&arguments)?;
+                self.cancel_line(arguments)?;
                 0
             }
             0x00d2 | 0x0140 => {
@@ -2371,7 +2424,7 @@ impl Vm {
                     0
                 }
             }
-            0x00e1 | 0x00e2 | 0x00ec => self.draw_image(selector, &arguments),
+            0x00e1 | 0x00e2 | 0x00ec => self.draw_image(selector, arguments),
             0x00e8 => {
                 self.flow_break(arguments.first().copied().unwrap_or(0));
                 0
@@ -2410,9 +2463,9 @@ impl Vm {
                 }
                 0
             }
-            0x00f0..=0x00f4 | 0x00f7..=0x00ff => self.sound_call(selector, &arguments)?,
-            0x0160..=0x0161 | 0x0168..=0x016f => self.datetime_call(selector, &arguments)?,
-            0x0120..=0x0124 => self.unicode_transform(selector, &arguments)?,
+            0x00f0..=0x00f4 | 0x00f7..=0x00ff => self.sound_call(selector, arguments)?,
+            0x0160..=0x0161 | 0x0168..=0x016f => self.datetime_call(selector, arguments)?,
+            0x0120..=0x0124 => self.unicode_transform(selector, arguments)?,
             0x0128 | 0x012b => {
                 let value = arguments.last().copied().unwrap_or(0);
                 let stream = if selector == 0x012b {
@@ -2716,6 +2769,17 @@ fn float_to_int(value: f64, nearest: bool) -> u32 {
 
 fn align(value: u32, alignment: u32) -> u32 {
     (value + alignment - 1) & !(alignment - 1)
+}
+
+fn reverse_stack_words(bytes: &mut [u8]) {
+    let length = bytes.len();
+    for index in 0..length / 4 / 2 {
+        let left = index * 4;
+        let right = length - (index + 1) * 4;
+        for offset in 0..4 {
+            bytes.swap(left + offset, right + offset);
+        }
+    }
 }
 
 fn destination_parts(destination: &Destination) -> (u32, u32) {
@@ -3047,6 +3111,21 @@ pub(crate) mod tests {
         assert_eq!(vm.stack.pop_u32().unwrap(), 0);
         assert_eq!(vm.stack.len(), depth);
         assert!(vm.take_output().is_empty());
+    }
+
+    #[test]
+    fn stack_roll_reorders_words_without_allocating_a_copy() {
+        let mut vm =
+            Vm::new(Story::from_bytes(&image_with_program(&[0x81, 0x20]), None).unwrap()).unwrap();
+        for value in 1..=4 {
+            vm.stack.push_u32(value).unwrap();
+        }
+        vm.roll_stack(4, 1).unwrap();
+        let mut values = Vec::new();
+        for _ in 0..4 {
+            values.push(vm.stack.pop_u32().unwrap());
+        }
+        assert_eq!(values, [3, 2, 1, 4]);
     }
 
     #[test]
