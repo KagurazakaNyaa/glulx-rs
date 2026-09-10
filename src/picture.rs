@@ -65,38 +65,58 @@ pub(crate) fn draw_scaled_clipped(
         .clamp(0, i64::from(canvas.height()))
         .min(clip[3] as i64);
     // Bilinear samples use source pixel centers. Work and memory depend on the
-    // clipped canvas, even for unsigned extents such as 0xFFFFFFFF.
-    for y in top.max(clip[1] as i64)..bottom {
-        let sy = ((y - top) as f64 + 0.5) * f64::from(source.height()) / f64::from(size[1]) - 0.5;
-        let sy = sy.clamp(0.0, f64::from(source.height() - 1));
-        let y0 = sy.floor() as u32;
-        let fy = sy - f64::from(y0);
-        for x in left.max(clip[0] as i64)..right {
+    // clipped canvas, even for unsigned extents such as 0xFFFFFFFF. Precompute
+    // the one-dimensional coordinates once per draw; the old inner loop did
+    // the same division, clamp and floor for every destination pixel.
+    let x_start = left.max(clip[0] as i64);
+    let y_start = top.max(clip[1] as i64);
+    let x_samples: Vec<_> = (x_start..right)
+        .map(|x| {
             let sx =
                 ((x - left) as f64 + 0.5) * f64::from(source.width()) / f64::from(size[0]) - 0.5;
             let sx = sx.clamp(0.0, f64::from(source.width() - 1));
             let x0 = sx.floor() as u32;
-            let fx = sx - f64::from(x0);
-            let neighbors = [
-                (x0, y0, (1.0 - fx) * (1.0 - fy)),
-                ((x0 + 1).min(source.width() - 1), y0, fx * (1.0 - fy)),
-                (x0, (y0 + 1).min(source.height() - 1), (1.0 - fx) * fy),
-                (
-                    (x0 + 1).min(source.width() - 1),
-                    (y0 + 1).min(source.height() - 1),
-                    fx * fy,
-                ),
+            (x0, (x0 + 1).min(source.width() - 1), sx - f64::from(x0))
+        })
+        .collect();
+    let y_samples: Vec<_> = (y_start..bottom)
+        .map(|y| {
+            let sy =
+                ((y - top) as f64 + 0.5) * f64::from(source.height()) / f64::from(size[1]) - 0.5;
+            let sy = sy.clamp(0.0, f64::from(source.height() - 1));
+            let y0 = sy.floor() as u32;
+            (y0, (y0 + 1).min(source.height() - 1), sy - f64::from(y0))
+        })
+        .collect();
+    for (y, &(y0, y1, fy)) in (y_start..bottom).zip(&y_samples) {
+        let top_weight = 1.0 - fy;
+        for (x, &(x0, x1, fx)) in (x_start..right).zip(&x_samples) {
+            let left_weight = 1.0 - fx;
+            let weights = [
+                left_weight * top_weight,
+                fx * top_weight,
+                left_weight * fy,
+                fx * fy,
             ];
+            let pixels = [
+                source.get_pixel(x0, y0).0,
+                source.get_pixel(x1, y0).0,
+                source.get_pixel(x0, y1).0,
+                source.get_pixel(x1, y1).0,
+            ];
+            let alpha = weights
+                .iter()
+                .zip(pixels.iter())
+                .map(|(weight, pixel)| weight * f64::from(pixel[3]))
+                .sum::<f64>();
             let mut color = [0.0; 4];
-            for (px, py, weight) in neighbors {
-                let pixel = source.get_pixel(px, py).0;
-                let alpha = f64::from(pixel[3]);
+            for (pixel, weight) in pixels.iter().zip(weights) {
+                let weighted_alpha = weight * f64::from(pixel[3]);
                 for channel in 0..3 {
-                    color[channel] += f64::from(pixel[channel]) * alpha * weight;
+                    color[channel] += f64::from(pixel[channel]) * weighted_alpha;
                 }
-                color[3] += alpha * weight;
             }
-            let alpha = color[3];
+            color[3] = alpha;
             if alpha > 0.0 {
                 let target = canvas.get_pixel_mut(x as u32, y as u32);
                 let background_alpha = f64::from(target[3]) * (1.0 - alpha / 255.0);
