@@ -207,7 +207,8 @@ impl Story {
             (bytes.to_vec(), None, HashMap::new())
         };
         let header = StoryHeader::parse(&image)?;
-        let image = image[..header.ext_start as usize].to_vec();
+        let mut image = image;
+        image.truncate(header.ext_start as usize);
         if let Some(bytes) = &container {
             validate_blorb_identity(bytes, &image, false)?;
         }

@@ -13,9 +13,10 @@ mod tracker;
 
 type SoundOutput = rodio::queue::SourcesQueueOutput;
 type PreparedSource = Box<dyn Source<Item = f32> + Send>;
+const AUDIO_QUEUE_CAPACITY: usize = 2;
 
 struct AudioDecodeWorker {
-    sender: mpsc::Sender<AudioDecodeTask>,
+    sender: mpsc::SyncSender<AudioDecodeTask>,
     results: mpsc::Receiver<AudioDecodeResult>,
     next_id: u64,
 }
@@ -36,8 +37,10 @@ struct AudioDecodeResult {
 
 impl Default for AudioDecodeWorker {
     fn default() -> Self {
-        let (task_sender, task_receiver) = mpsc::channel::<AudioDecodeTask>();
-        let (result_sender, result_receiver) = mpsc::channel::<AudioDecodeResult>();
+        let (task_sender, task_receiver) =
+            mpsc::sync_channel::<AudioDecodeTask>(AUDIO_QUEUE_CAPACITY);
+        let (result_sender, result_receiver) =
+            mpsc::sync_channel::<AudioDecodeResult>(AUDIO_QUEUE_CAPACITY);
         thread::Builder::new()
             .name("glulx-audio-decode".to_owned())
             .spawn(move || {
@@ -83,7 +86,7 @@ impl AudioDecodeWorker {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
         self.sender
-            .send(AudioDecodeTask {
+            .try_send(AudioDecodeTask {
                 id,
                 bytes,
                 format,

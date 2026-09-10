@@ -957,19 +957,30 @@ impl PlayerApp {
                         continue;
                     }
                     let data = std::mem::take(&mut request.data);
-                    let Some(id) = self.image_decoder.submit(
+                    match self.image_decoder.submit(
                         data,
                         crate::memory::ResourceLimits::bytes(limits.decoded_image_mib) as u64,
-                    ) else {
-                        self.status = format!(
-                            "Could not decode picture {}: worker unavailable",
-                            request.resource
-                        );
-                        continue;
-                    };
-                    self.pending_image = Some(PendingImageDecode { id, request });
-                    context.request_repaint();
-                    break;
+                    ) {
+                        Ok(Some(id)) => {
+                            self.pending_image = Some(PendingImageDecode { id, request });
+                            context.request_repaint();
+                            break;
+                        }
+                        Ok(None) => {
+                            self.status = format!(
+                                "Could not decode picture {}: worker unavailable",
+                                request.resource
+                            );
+                            continue;
+                        }
+                        Err(data) => {
+                            request.data = data;
+                            self.pending_graphics
+                                .push_front(GraphicsRequest::Draw(request));
+                            context.request_repaint();
+                            break;
+                        }
+                    }
                 }
                 GraphicsRequest::Fill {
                     window,

@@ -3,7 +3,7 @@
 use std::{
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, Condvar, Mutex,
         atomic::{AtomicU64, Ordering},
         mpsc,
     },
@@ -14,8 +14,10 @@ use image::RgbaImage;
 
 use crate::{ResourceSelection, Vm, memory::ResourceLimits};
 
+const IMAGE_QUEUE_CAPACITY: usize = 2;
+
 pub(super) struct ImageDecodeWorker {
-    sender: Option<mpsc::Sender<ImageDecodeTask>>,
+    sender: Option<mpsc::SyncSender<ImageDecodeTask>>,
     results: mpsc::Receiver<ImageDecodeResult>,
     next_id: u64,
 }
@@ -33,8 +35,10 @@ pub(super) struct ImageDecodeResult {
 
 impl Default for ImageDecodeWorker {
     fn default() -> Self {
-        let (task_sender, task_receiver) = mpsc::channel::<ImageDecodeTask>();
-        let (result_sender, result_receiver) = mpsc::channel::<ImageDecodeResult>();
+        let (task_sender, task_receiver) =
+            mpsc::sync_channel::<ImageDecodeTask>(IMAGE_QUEUE_CAPACITY);
+        let (result_sender, result_receiver) =
+            mpsc::sync_channel::<ImageDecodeResult>(IMAGE_QUEUE_CAPACITY);
         let sender = thread::Builder::new()
             .name("glulx-image-decode".to_owned())
             .spawn(move || {
@@ -61,14 +65,17 @@ impl Default for ImageDecodeWorker {
 }
 
 impl ImageDecodeWorker {
-    pub(super) fn submit(&mut self, data: Vec<u8>, maximum: u64) -> Option<u64> {
-        let sender = self.sender.as_ref()?;
+    pub(super) fn submit(&mut self, data: Vec<u8>, maximum: u64) -> Result<Option<u64>, Vec<u8>> {
+        let Some(sender) = self.sender.as_ref() else {
+            return Ok(None);
+        };
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
-        sender
-            .send(ImageDecodeTask { id, data, maximum })
-            .ok()
-            .map(|_| id)
+        match sender.try_send(ImageDecodeTask { id, data, maximum }) {
+            Ok(()) => Ok(Some(id)),
+            Err(mpsc::TrySendError::Full(task)) => Err(task.data),
+            Err(mpsc::TrySendError::Disconnected(_)) => Ok(None),
+        }
     }
 
     pub(super) fn poll(&self) -> impl Iterator<Item = ImageDecodeResult> + '_ {
@@ -77,10 +84,20 @@ impl ImageDecodeWorker {
 }
 
 pub(super) struct StoryLoadWorker {
-    sender: Option<mpsc::Sender<StoryLoadTask>>,
+    queue: Option<Arc<StoryLoadQueue>>,
     results: mpsc::Receiver<StoryLoadResult>,
     next_id: u64,
     latest: Arc<AtomicU64>,
+}
+
+struct StoryLoadQueue {
+    state: Mutex<StoryLoadState>,
+    wake: Condvar,
+}
+
+struct StoryLoadState {
+    task: Option<StoryLoadTask>,
+    closed: bool,
 }
 
 struct StoryLoadTask {
@@ -99,14 +116,39 @@ pub(super) struct StoryLoadResult {
 
 impl Default for StoryLoadWorker {
     fn default() -> Self {
-        let (task_sender, task_receiver) = mpsc::channel::<StoryLoadTask>();
         let (result_sender, result_receiver) = mpsc::channel::<StoryLoadResult>();
+        let queue = Arc::new(StoryLoadQueue {
+            state: Mutex::new(StoryLoadState {
+                task: None,
+                closed: false,
+            }),
+            wake: Condvar::new(),
+        });
         let latest = Arc::new(AtomicU64::new(u64::MAX));
         let worker_latest = latest.clone();
+        let worker_queue = queue.clone();
         let sender = thread::Builder::new()
             .name("glulx-story-load".to_owned())
             .spawn(move || {
-                while let Ok(task) = task_receiver.recv() {
+                loop {
+                    let task = {
+                        let mut state = worker_queue
+                            .state
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner());
+                        loop {
+                            if let Some(task) = state.task.take() {
+                                break task;
+                            }
+                            if state.closed {
+                                return;
+                            }
+                            state = worker_queue
+                                .wake
+                                .wait(state)
+                                .unwrap_or_else(|error| error.into_inner());
+                        }
+                    };
                     if worker_latest.load(Ordering::Acquire) != task.id {
                         continue;
                     }
@@ -135,9 +177,9 @@ impl Default for StoryLoadWorker {
                 }
             })
             .ok()
-            .map(|_| task_sender);
+            .map(|_| queue.clone());
         Self {
-            sender,
+            queue: sender,
             results: result_receiver,
             next_id: 0,
             latest,
@@ -153,24 +195,45 @@ impl StoryLoadWorker {
         maximum: u32,
         resources: ResourceLimits,
     ) -> Option<u64> {
-        let sender = self.sender.as_ref()?;
+        let queue = self.queue.as_ref()?;
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
         self.latest.store(id, Ordering::Release);
-        sender
-            .send(StoryLoadTask {
-                id,
-                path,
-                selection,
-                maximum,
-                resources,
-            })
-            .ok()
-            .map(|_| id)
+        let mut state = queue
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if state.closed {
+            return None;
+        }
+        state.task = Some(StoryLoadTask {
+            id,
+            path,
+            selection,
+            maximum,
+            resources,
+        });
+        queue.wake.notify_one();
+        Some(id)
     }
 
     pub(super) fn poll(&self) -> impl Iterator<Item = StoryLoadResult> + '_ {
         self.results.try_iter()
+    }
+}
+
+impl Drop for StoryLoadWorker {
+    fn drop(&mut self) {
+        let Some(queue) = self.queue.take() else {
+            return;
+        };
+        let mut state = queue
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.closed = true;
+        state.task = None;
+        queue.wake.notify_one();
     }
 }
 

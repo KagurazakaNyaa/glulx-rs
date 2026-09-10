@@ -92,7 +92,7 @@ GarglK 的 [event list](https://github.com/garglk/garglk/blob/9597add4091e5aaf6e
 
 glulx-rs 的 [Story](https://github.com/KagurazakaNyaa/glulx-rs/blob/4eccf8b527349d3ae226be44194f1925477f94ee/src/story.rs)保留故事映像、可选原始容器和外部资源内容，以便会话脱离原文件恢复；这会产生多份字节副本。图形请求还会暂存编码图片字节，直到 UI worker 完成解码。Git README 明确建议在系统支持时 mmap，以减少启动复制并更快开始执行；GarglK 当前 CMake 的 Git 集成不使用这个独立 Windows 端口。
 
-当前 worker 都是单线程 `std::sync::mpsc` 队列。图形请求为保持 Fill/Clear/Close 顺序，一次只等待一个未完成图片；切换故事时不会取消已经开始的图片任务，迟到结果只会留在结果表中，直到后续清理。音频和故事加载也没有固定容量的 channel，故事加载用最新请求令牌跳过排队旧任务；这些是异步化后的剩余资源和调度边界。
+当前 worker 都是单线程队列。图片和非 SONG 音频准备使用容量为 2 的非阻塞任务队列，队列满时 owner 保留请求并在后续宿主周期重试，不把发送端阻塞在 UI 上；图形请求仍一次只等待一个未完成图片，以保持 Fill/Clear/Close 顺序。故事加载使用条件变量队列，只保留一个最新待处理任务；已经开始的旧任务仍只能在阶段边界丢弃结果。迟到的图片/音频结果通过请求 ID 丢弃，避免写入当前故事状态。
 
 ## 文本、字体和图形
 
@@ -120,7 +120,7 @@ Git 的 `savefile.c`/`saveundo.c`处理可移植存档、栈和页表，不保�
 | 顺序 | 当前状态 | 仍与参考项目不同的边界 |
 | --- | --- | --- |
 | 可观测性 | 已有 `vm-slice`、UI、publish、布局、图形上传、音频准备、undo 和会话阶段计时 | 输入事件到每个阶段的跨线程 trace 仍可进一步细化 |
-| 异步宿主工作 | 故事、图片、采样/MOD 音频准备已使用有序 worker | 纹理上传、布局、软件栅格化、SONG 和会话编码仍在 owner/UI |
+| 异步宿主工作 | 故事、图片、采样/MOD 音频准备已使用有序且有界的 worker | 纹理上传、布局、软件栅格化、SONG 和会话编码仍在 owner/UI |
 | 指令缓存 | ROM decoded cache 已实现，RAM 代码不缓存 | 没有 Git 风格 block compiler、peephole 或 JIT |
 | undo | 256 字节页差分、共享页、旧会话迁移已实现 | 页表是 Rust `BTreeMap`，不是 Git 的原始指针数组 |
 | Glk/呈现热路径 | 参数使用固定小缓冲，翻译关闭时不捕获，transcript 显示采用虚拟行，变化窗口发布有界 | 逐字符 Glk 输出和变化窗口内的完整向量仍不同于 GarglK 的 dirty 行 |

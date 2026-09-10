@@ -60,10 +60,16 @@ impl ImageCache {
             }
         } else {
             let bytes = vm.image_resource(resource)?;
-            let id = decoder.submit(
+            let id = match decoder.submit(
                 bytes.to_vec(),
                 crate::memory::ResourceLimits::bytes(limits.decoded_image_mib) as u64,
-            )?;
+            ) {
+                Ok(Some(id)) => id,
+                Ok(None) | Err(_) => {
+                    ui.ctx().request_repaint();
+                    return None;
+                }
+            };
             self.pending.insert(resource, id);
             ui.ctx().request_repaint();
             return None;
