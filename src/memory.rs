@@ -79,6 +79,24 @@ impl Memory {
         &self,
         previous: Option<&BTreeMap<u32, MemoryPage>>,
     ) -> BTreeMap<u32, MemoryPage> {
+        self.snapshot_pages_with_limit(previous, usize::MAX)
+            .expect("unlimited page snapshot must not hit its page limit")
+    }
+
+    pub(crate) fn snapshot_pages_with_limit(
+        &self,
+        previous: Option<&BTreeMap<u32, MemoryPage>>,
+        maximum_pages: usize,
+    ) -> Option<BTreeMap<u32, MemoryPage>> {
+        if previous.is_some_and(|pages| {
+            pages
+                .keys()
+                .filter(|address| address.saturating_add(256) <= self.len())
+                .count()
+                > maximum_pages
+        }) {
+            return None;
+        }
         let mut pages = previous.cloned().unwrap_or_default();
         pages.retain(|address, _| address.saturating_add(256) <= self.len());
         for &address in &self.dirty_pages {
@@ -100,10 +118,13 @@ impl Memory {
             {
                 // Keep the shared page from the previous snapshot.
             } else {
+                if !pages.contains_key(&address) && pages.len() >= maximum_pages {
+                    return None;
+                }
                 pages.insert(address, Arc::new(current.to_vec()));
             }
         }
-        pages
+        Some(pages)
     }
 
     pub(crate) fn clear_dirty_pages(&mut self) {
@@ -501,6 +522,18 @@ mod tests {
         assert_eq!(memory.read8(0x100).unwrap(), 9);
         assert_eq!(memory.read8(0x101).unwrap(), 0);
         assert_eq!(memory.read8(0x200).unwrap(), 2);
+    }
+
+    #[test]
+    fn limited_page_snapshots_reject_dense_dirty_memory() {
+        let story = story();
+        let mut memory = Memory::new_with_limit(&story, 0x4000).unwrap();
+        assert!(memory.resize(0x4000).unwrap());
+        for page in 0..8 {
+            memory.write8(0x100 + page * 256, (page + 1) as u8).unwrap();
+        }
+
+        assert!(memory.snapshot_pages_with_limit(None, 1).is_none());
     }
 
     #[test]

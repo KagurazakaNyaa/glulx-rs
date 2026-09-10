@@ -1217,12 +1217,29 @@ impl Vm {
             0x125 => {
                 let _stage = crate::diagnostics::stage("undo-save");
                 let destination = self.destination(&operands[0])?;
+                let budget = crate::memory::ResourceLimits::bytes(self.resource_limits.undo_mib);
+                let fixed_cost = self
+                    .stack
+                    .bytes
+                    .len()
+                    .saturating_add(self.heap_blocks.len().saturating_mul(8));
+                if budget == 0 || fixed_cost > budget {
+                    self.store_destination(&destination, 1, Width::Word)?;
+                    return Ok(());
+                }
+                let maximum_pages = (budget - fixed_cost) / (256 + 8);
+                let previous_pages = self.undo.back().map(|undo| &undo.memory_pages);
+                let Some(memory_pages) = self
+                    .memory
+                    .snapshot_pages_with_limit(previous_pages, maximum_pages)
+                else {
+                    self.store_destination(&destination, 1, Width::Word)?;
+                    return Ok(());
+                };
                 let snapshot = UndoState {
                     memory: None,
                     memory_len: self.memory.len(),
-                    memory_pages: self
-                        .memory
-                        .snapshot_pages(self.undo.back().map(|undo| &undo.memory_pages)),
+                    memory_pages,
                     stack: self.stack.clone(),
                     pc: self.pc,
                     destination: destination.clone(),
@@ -1230,8 +1247,7 @@ impl Vm {
                     heap_blocks: self.heap_blocks.clone(),
                 };
                 let cost = snapshot.byte_len();
-                let budget = crate::memory::ResourceLimits::bytes(self.resource_limits.undo_mib);
-                if budget == 0 || cost > budget {
+                if cost > budget {
                     self.store_destination(&destination, 1, Width::Word)?;
                     return Ok(());
                 }
