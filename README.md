@@ -63,8 +63,8 @@ The desktop supports paragraph alignment and indentation, styled grids with inli
 editing, inline and margin images with resizing, picture hyperlinks,
 and MOD/XM/S3M/IT music alongside sampled audio. Inform acceleration functions 1–13 are
 available. Settings supports native font selection on Windows/macOS and GTK 3 desktops,
-or a TTF/OTF/TTC file. The selected face takes priority for proportional text;
-fixed-pitch faces also apply to monospace text. See the compatibility document for tested media formats and limits.
+or a TTF/OTF/TTC file. The selected face takes priority in its matching proportional or monospace family.
+Fixed-pitch/HW faces remain fallback fonts for missing proportional glyphs rather than replacing proportional Latin body text. See the compatibility document for tested media formats and limits.
 
 External resources can be selected before startup:
 

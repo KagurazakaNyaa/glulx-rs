@@ -1,6 +1,6 @@
 use super::*;
 
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct TextRun {
     pub text: String,
     pub style: u32,
@@ -12,7 +12,7 @@ pub struct TextRun {
 }
 
 /// Retain scaling rules so text-buffer pictures reflow when the window resizes.
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct BufferImage {
     pub resource: u32,
     pub original: [u32; 2],
@@ -111,7 +111,10 @@ impl ResolvedStyle {
                     i32::from(v as i32 > 0)
                 }
             }),
-            oblique: hint(5).map_or(matches!(style, 1 | 5), |v| v != 0),
+            // Glk defaults: Emphasized and Note are italic; Alert is the
+            // bold-italic face. An explicit oblique hint still overrides the
+            // style default below.
+            oblique: hint(5).map_or(matches!(style, 1 | 5 | 6), |v| v != 0),
             proportional,
             foreground,
             background,
@@ -151,7 +154,7 @@ impl ResolvedStyle {
     }
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct WindowView {
     pub id: u32,
     pub kind: u32,
@@ -174,6 +177,7 @@ impl Vm {
     pub fn set_light_fonts(&mut self, available: [bool; 2]) {
         if self.text_appearance.light_fonts != available {
             self.text_appearance.light_fonts = available;
+            self.presentation_revision = self.presentation_revision.wrapping_add(1);
             self.layout_windows();
             if self.glk_root != 0 && !self.events.iter().any(|event| event[0] == 5) {
                 self.events.push_back([5, 0, 0, 0]);
@@ -187,14 +191,22 @@ impl Vm {
         } else {
             18.0
         };
+        let foreground = foreground & 0xffffff;
+        let background = background & 0xffffff;
         let resized = self.text_appearance.font_size != font_size;
+        let appearance_changed = resized
+            || self.text_appearance.foreground != foreground
+            || self.text_appearance.background != background;
+        if appearance_changed {
+            self.presentation_revision = self.presentation_revision.wrapping_add(1);
+        }
         if resized && self.glk_root != 0 && !self.events.iter().any(|e| e[0] == 5) {
             self.events.push_back([5, 0, 0, 0]);
         }
         self.text_appearance = TextAppearance {
             font_size,
-            foreground: foreground & 0xffffff,
-            background: background & 0xffffff,
+            foreground,
+            background,
             ..self.text_appearance
         };
         if resized {
@@ -604,6 +616,46 @@ mod tests {
         assert_eq!(measured(&mut vm, buffer, 0, 7), 0x001122);
         assert_eq!(vm.style_call(0xb3, &[buffer, 11, 7, 0]).unwrap(), 0);
         assert_eq!(vm.style_call(0xb3, &[buffer, 0, 10, 0]).unwrap(), 0);
+    }
+
+    #[test]
+    fn default_note_and_alert_styles_match_garglk_faces() {
+        let vm = pictured_vm();
+        let hints = BTreeMap::new();
+        let appearance = vm.text_appearance;
+        let note = ResolvedStyle::resolve(WINTYPE_TEXT_BUFFER, 6, &hints, appearance);
+        let alert = ResolvedStyle::resolve(WINTYPE_TEXT_BUFFER, 5, &hints, appearance);
+        let normal = ResolvedStyle::resolve(WINTYPE_TEXT_BUFFER, 0, &hints, appearance);
+
+        assert!(note.oblique);
+        assert!(alert.oblique);
+        assert!(alert.weight > 0);
+        assert!(!normal.oblique);
+    }
+
+    #[test]
+    fn text_appearance_changes_publish_once_and_repeated_values_are_stable() {
+        let mut vm = pictured_vm();
+        let revision = vm.presentation_revision();
+        vm.set_text_appearance(18.0, 0x202225, 0xf8f8f6);
+        assert_eq!(vm.presentation_revision(), revision);
+
+        vm.set_text_appearance(18.0, 0x123456, 0xf8f8f6);
+        let changed = vm.presentation_revision();
+        assert_ne!(changed, revision);
+        vm.set_text_appearance(18.0, 0x123456, 0xf8f8f6);
+        assert_eq!(vm.presentation_revision(), changed);
+    }
+
+    #[test]
+    fn font_availability_changes_publish_layout_updates_once() {
+        let mut vm = pictured_vm();
+        let initial = vm.presentation_revision();
+        vm.set_light_fonts([true, false]);
+        let changed = vm.presentation_revision();
+        assert_ne!(changed, initial);
+        vm.set_light_fonts([true, false]);
+        assert_eq!(vm.presentation_revision(), changed);
     }
 
     #[test]

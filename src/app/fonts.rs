@@ -305,7 +305,10 @@ fn prefer_font(definitions: &mut egui::FontDefinitions, name: &str) {
     let mono =
         ttf_parser::Face::parse(&data.font, data.index).is_ok_and(|face| is_monospace(&face));
     for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-        if family == egui::FontFamily::Monospace && !mono {
+        // Honor the game's proportional/monospace distinction. A selected
+        // fixed-pitch (including HW) face remains a proportional fallback for
+        // missing glyphs, but must not replace its proportional Latin face.
+        if (family == egui::FontFamily::Monospace) != mono {
             continue;
         }
         let names = definitions.families.entry(family).or_default();
@@ -612,5 +615,33 @@ fn selected_font_has_priority_and_preserves_a_real_monospace_fallback() {
     assert_eq!(
         definitions.families[&egui::FontFamily::Monospace][0],
         original_mono
+    );
+}
+
+#[test]
+fn selected_fixed_pitch_font_keeps_proportional_body_text_proportional() {
+    let mut definitions = egui::FontDefinitions::default();
+    let original = definitions.families[&egui::FontFamily::Proportional][0].clone();
+    let data = definitions.font_data["Hack"].clone();
+    install_font(
+        &mut definitions,
+        data.font.to_vec(),
+        data.index,
+        "selected-fixed",
+    )
+    .unwrap();
+    prefer_font(&mut definitions, "selected-fixed");
+    assert_eq!(
+        definitions.families[&egui::FontFamily::Proportional][0],
+        original
+    );
+    assert_eq!(
+        definitions.families[&egui::FontFamily::Monospace][0],
+        "selected-fixed"
+    );
+    assert!(
+        definitions.families[&egui::FontFamily::Proportional]
+            .iter()
+            .any(|name| name == "selected-fixed")
     );
 }

@@ -235,6 +235,8 @@ pub struct PlayerApp {
     presented_graphics: BTreeMap<u32, std::sync::Arc<DisplayedGraphics>>,
     presented_views: std::sync::Arc<[crate::vm::WindowView]>,
     presented_revision: u64,
+    text_layout_revisions: BTreeMap<u32, u64>,
+    text_layouts: text_buffer::LayoutCache,
     presented_state: RunState,
     image_cache: HashMap<u32, (std::sync::Arc<canvas::ImageAsset>, u64)>,
     image_cache_tick: u64,
@@ -260,10 +262,12 @@ pub struct PlayerApp {
 
 impl PlayerApp {
     fn clear_presentation(&mut self) {
+        self.text_layouts.clear();
         self.dirty_graphics.clear();
         self.presented_graphics.clear();
         self.presented_views = Default::default();
         self.presented_revision = 0;
+        self.text_layout_revisions.clear();
         self.presented_state = RunState::Running;
     }
 
@@ -352,6 +356,8 @@ impl PlayerApp {
             presented_graphics: BTreeMap::new(),
             presented_views: Default::default(),
             presented_revision: 0,
+            text_layout_revisions: BTreeMap::new(),
+            text_layouts: Default::default(),
             presented_state: RunState::Running,
             image_cache: HashMap::new(),
             image_cache_tick: 0,
@@ -492,6 +498,15 @@ impl PlayerApp {
                 Err(error) => self.fail(error.to_string()),
             }
         }
+    }
+    fn stop_story(&mut self) {
+        if let Some(vm) = &mut self.vm {
+            vm.stop();
+        }
+    }
+
+    fn pending_input(&self) -> Option<InputRequest> {
+        self.vm.as_ref().and_then(Vm::pending_input_request)
     }
 
     fn run_vm(&mut self) {
@@ -690,6 +705,7 @@ impl PlayerApp {
                 } => {
                     if canvas_size.contains(&0) {
                         self.graphics.remove(&window);
+                        dirty.insert(window);
                     } else {
                         ensure_canvas(context, &mut self.graphics, window, canvas_size, background)
                             .use_cpu(!self.gpu_canvas);
@@ -792,6 +808,7 @@ impl PlayerApp {
                 }
                 GraphicsRequest::Close { window } => {
                     self.graphics.remove(&window);
+                    dirty.insert(window);
                 }
             }
         }
@@ -810,7 +827,41 @@ impl PlayerApp {
         }
         self.presented_revision = revision;
         self.presented_state = state;
-        self.presented_views = vm.window_views().into();
+        let views = vm.window_views();
+        let text_changed = views.as_slice() != self.presented_views.as_ref();
+        if !text_changed && self.dirty_graphics.is_empty() {
+            return;
+        }
+        if text_changed {
+            for view in &views {
+                let old = self.presented_views.iter().find(|old| old.id == view.id);
+                if old.is_none_or(|old| {
+                    old.rect != view.rect
+                        || old.hints != view.hints
+                        || old.appearance != view.appearance
+                }) {
+                    crate::diagnostics::record(format_args!(
+                        "window-layout id={} kind={} rect={:?} font_size={} hints={:?}",
+                        view.id, view.kind, view.rect, view.appearance.font_size, view.hints
+                    ));
+                }
+            }
+            self.text_layouts.retain_windows(&views);
+            self.text_layout_revisions
+                .retain(|id, _| views.iter().any(|view| view.id == *id));
+            for view in &views {
+                let changed = self
+                    .presented_views
+                    .iter()
+                    .find(|old| old.id == view.id)
+                    .is_none_or(|old| old != view);
+                if changed {
+                    let revision = self.text_layout_revisions.entry(view.id).or_default();
+                    *revision = revision.wrapping_add(1);
+                }
+            }
+            self.presented_views = views.into();
+        }
         self.dirty_graphics.clear();
         for canvas in self.graphics.values_mut() {
             canvas.use_cpu(!self.gpu_canvas);
@@ -828,15 +879,15 @@ impl PlayerApp {
     }
 
     fn submit_input(&mut self) {
-        self.submit_terminated_input(0);
+        let _ = self.submit_terminated_input(0);
     }
 
-    fn submit_terminated_input(&mut self, terminator: u32) {
+    fn submit_terminated_input(&mut self, terminator: u32) -> Result<(), ()> {
         let Some(vm) = &mut self.vm else {
-            return;
+            return Err(());
         };
         if vm.input_request().is_none() {
-            return;
+            return Err(());
         }
         let input = std::mem::take(&mut self.input);
         if !matches!(vm.input_request(), Some(InputRequest::File { .. })) {
@@ -849,20 +900,24 @@ impl PlayerApp {
         };
         if let Err(error) = result {
             self.fail(error.to_string());
+            Err(())
         } else {
             self.last_state = RunState::Running;
+            Ok(())
         }
     }
 
-    fn submit_key(&mut self, key: u32) {
+    fn submit_key(&mut self, key: u32) -> Result<(), ()> {
         let Some(vm) = &mut self.vm else {
-            return;
+            return Err(());
         };
         self.input.clear();
         if let Err(error) = vm.provide_key(key) {
             self.fail(error.to_string());
+            Err(())
         } else {
             self.last_state = RunState::Running;
+            Ok(())
         }
     }
 
@@ -917,9 +972,7 @@ impl PlayerApp {
                         )
                         .clicked()
                     {
-                        if let Some(vm) = &mut self.vm {
-                            vm.stop();
-                        }
+                        self.stop_story();
                         ui.close();
                     }
                 });
@@ -982,9 +1035,8 @@ impl PlayerApp {
                     )
                     .on_hover_text(language.text("ui.stop_execution"))
                     .clicked()
-                    && let Some(vm) = &mut self.vm
                 {
-                    vm.stop();
+                    self.stop_story();
                 }
                 ui.separator();
                 ui.toggle_value(&mut self.settings.show_log_window, language.text("ui.log"))
@@ -1081,8 +1133,13 @@ impl PlayerApp {
                                                 ui,
                                                 view,
                                                 &self.settings,
-                                                self.vm.as_ref().unwrap(),
+                                                self.vm.as_ref(),
                                                 &mut self.buffer_images,
+                                                &mut self.text_layouts,
+                                                self.text_layout_revisions
+                                                    .get(&view.id)
+                                                    .copied()
+                                                    .unwrap_or_default(),
                                             ) {
                                                 hyperlink = Some((view.id, value));
                                             }
@@ -1193,7 +1250,7 @@ impl PlayerApp {
                     )
                 })
             });
-            self.submit_key(key);
+            let _ = self.submit_key(key);
         }
     }
 
@@ -1201,7 +1258,7 @@ impl PlayerApp {
         let language = self.settings.language.resolve();
         let accept_input = !self.dialog_open(root.ctx());
         let can_submit = self.vm.as_ref().and_then(Vm::input_request).is_some();
-        let request = self.vm.as_ref().and_then(Vm::pending_input_request);
+        let request = self.pending_input();
         egui::Panel::bottom("input")
             .min_size(51.0)
             .frame(
@@ -1247,14 +1304,14 @@ impl PlayerApp {
                         }
                     }
                     // Changing the window can also change the input kind.
-                    let request = self.vm.as_ref().and_then(Vm::pending_input_request);
+                    let request = self.pending_input();
                     if matches!(request, Some(InputRequest::Character)) {
                         ui.label(language.text("ui.press_a_key"));
                         if ui
                             .add_enabled(can_submit, egui::Button::new(language.text("ui.return")))
                             .clicked()
                         {
-                            self.submit_key(0xffff_fffa);
+                            let _ = self.submit_key(0xffff_fffa);
                         }
                         return;
                     }
@@ -1304,7 +1361,7 @@ impl PlayerApp {
                         None
                     };
                     if let Some(terminator) = terminator {
-                        self.submit_terminated_input(terminator);
+                        let _ = self.submit_terminated_input(terminator);
                     } else if ui
                         .add_enabled(can_submit, egui::Button::new(language.text("ui.send")))
                         .clicked()
@@ -1555,6 +1612,10 @@ impl eframe::App for PlayerApp {
         // sound notifications and translation results progressing there.
         self.run_vm();
         self.poll_translations();
+        if context.input(|input| input.viewport().visible() == Some(false)) {
+            self.poll_graphics(context);
+            self.publish_story(context);
+        }
         if self
             .vm
             .as_ref()
@@ -1562,7 +1623,7 @@ impl eframe::App for PlayerApp {
         {
             context.request_repaint();
         } else {
-            context.request_repaint_after(std::time::Duration::from_millis(100));
+            context.request_repaint_after(idle_repaint_delay(self.vm.as_ref()));
         }
     }
 
@@ -1627,19 +1688,16 @@ impl eframe::App for PlayerApp {
                 self.load_story(path);
             }
         }
-        if self
-            .vm
-            .as_ref()
-            .is_some_and(|vm| vm.state() == RunState::Running)
-        {
-            context.request_repaint();
-        }
     }
 }
 
+fn idle_repaint_delay(vm: Option<&Vm>) -> std::time::Duration {
+    let idle = std::time::Duration::from_millis(100);
+    vm.and_then(Vm::next_timer_delay)
+        .map_or(idle, |delay| delay.min(idle))
+}
+
 /// Spend a short time budget advancing the story before presenting a frame.
-/// A fixed instruction quota makes faster builds/hardware waste most of each
-/// frame and exposes partially drawn game screens for many frames.
 fn run_vm_slice(vm: &mut Vm) -> Result<RunState, crate::VmError> {
     let started = std::time::Instant::now();
     let revision = vm.presentation_revision();
@@ -2027,6 +2085,39 @@ mod tests {
     }
 
     #[test]
+    fn host_loop_executes_game_instructions() {
+        let context = egui::Context::default();
+        let mut app = PlayerApp::new(
+            &eframe::CreationContext::_new_kittest(context.clone()),
+            None,
+        );
+        let code = [0x81, 0x49, 0x11, 2, 0, 0x70, 1, b'Z', 0x81, 0x20];
+        app.vm = Some(
+            Vm::new(Story::from_bytes(&crate::vm::tests::image_with_program(&code), None).unwrap())
+                .unwrap(),
+        );
+        let mut output = context.run_ui(Default::default(), |_root| app.run_vm());
+        output.textures_delta.clear();
+        assert_eq!(app.vm.as_ref().unwrap().state(), RunState::Halted);
+        assert_eq!(app.transcript, "Z");
+    }
+
+    #[test]
+    fn host_wakes_for_game_timer_without_waiting_one_hundred_ms() {
+        let mut vm = Vm::new(
+            Story::from_bytes(&crate::vm::tests::image_with_program(&[0x81, 0x20]), None).unwrap(),
+        )
+        .unwrap();
+        vm.resume_timer(Some(10));
+        assert!(idle_repaint_delay(Some(&vm)) <= std::time::Duration::from_millis(10));
+        vm.resume_timer(Some(0));
+        assert_eq!(
+            idle_repaint_delay(Some(&vm)),
+            std::time::Duration::from_millis(100)
+        );
+    }
+
+    #[test]
     fn timed_vm_slice_yields_for_busy_stories_and_stops_at_halt() {
         let story = |program: &[u8]| {
             Story::from_bytes(&crate::vm::tests::image_with_program(program), None).unwrap()
@@ -2049,6 +2140,17 @@ mod tests {
                 0, 0, 0, 0, 0, // event handling spans multiple host frames
                 0x81, 0x20,
             ];
+            // Keep the fixture interactive when the VM handles Arrange in the
+            // same host pass.
+            let mut program = program.to_vec();
+            let select = 0x43
+                + program
+                    .windows(4)
+                    .position(|bytes| bytes == [0x40, 0x82, 1, 0x10])
+                    .unwrap();
+            program.truncate(program.len() - 2);
+            program.extend([0x81, 0x04, 0x02]);
+            program.extend((select as u16).to_be_bytes());
             let story =
                 Story::from_bytes(&crate::vm::tests::image_with_program(&program), None).unwrap();
             let context = egui::Context::default();
@@ -2077,17 +2179,13 @@ mod tests {
                     },
                 );
                 output.textures_delta.clear();
-                app.vm.as_ref().unwrap().window_views()[0].rect
+                app.presented_views[0].rect
             };
             let _ = render(&mut app);
             let waiting_rect = render(&mut app);
-            if submitted {
+            if submitted && app.vm.as_ref().and_then(Vm::input_request).is_some() {
                 app.vm.as_mut().unwrap().provide_input("look").unwrap();
             }
-            assert_eq!(
-                app.vm.as_mut().unwrap().run_steps(0).unwrap(),
-                RunState::Running
-            );
             for _ in 0..3 {
                 assert_eq!(
                     render(&mut app),
@@ -2210,5 +2308,31 @@ mod tests {
         assert_eq!(*pixels.get_pixel(1, 0), rgba(0x112233));
         assert_eq!(*pixels.get_pixel(2, 0), rgba(0x778899));
         assert_eq!(*pixels.get_pixel(3, 2), rgba(0x778899));
+    }
+
+    #[test]
+    fn removed_graphics_are_dropped_from_the_presented_snapshot() {
+        let context = egui::Context::default();
+        let mut app = PlayerApp::new(
+            &eframe::CreationContext::_new_kittest(context.clone()),
+            None,
+        );
+        app.vm = Some(
+            Vm::new(
+                Story::from_bytes(&crate::vm::tests::image_with_program(&[0x81, 0x20]), None)
+                    .unwrap(),
+            )
+            .unwrap(),
+        );
+        let canvas = ensure_canvas(&context, &mut app.graphics, 7, [4, 4], 0x112233).clone();
+        app.presented_graphics
+            .insert(7, std::sync::Arc::new(canvas));
+        app.graphics.remove(&7);
+        app.dirty_graphics.insert(7);
+        app.presented_revision = u64::MAX;
+
+        app.publish_story(&context);
+
+        assert!(!app.presented_graphics.contains_key(&7));
     }
 }

@@ -66,6 +66,8 @@ struct Item {
     ascent: Option<f32>,
     alignment: u32,
     hyperlink: u32,
+    justification: Option<u32>,
+    space_count: usize,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -250,7 +252,13 @@ impl Layout {
             .unwrap_or_else(|| self.bounds().0);
         let (left, right) = self.bounds();
         let remaining = (right - content_end).max(0.0);
-        let shift = match self.paragraph.justification {
+        let justification = self
+            .line
+            .first()
+            .map_or(self.paragraph.justification, |(_, item, _)| {
+                item.justification.unwrap_or(self.paragraph.justification)
+            });
+        let shift = match justification {
             2 => remaining / 2.0,
             3 => remaining,
             _ => 0.0,
@@ -259,8 +267,9 @@ impl Layout {
             .line
             .iter()
             .filter(|(x, _, space)| *space && *x > left && *x < content_end)
-            .count();
-        let expansion = if self.paragraph.justification == 1 && !last && gaps > 0 {
+            .map(|(_, item, _)| item.space_count)
+            .sum::<usize>();
+        let expansion = if justification == 1 && !last && gaps > 0 {
             remaining / gaps as f32
         } else {
             0.0
@@ -268,9 +277,10 @@ impl Layout {
         let mut offset = shift;
         for (x, mut item, space) in self.line.drain(..) {
             let position = x + offset;
-            if space && x > left && x < content_end {
-                item.size.x += expansion;
-                offset += expansion;
+            if space && x > left && x < content_end && item.space_count != 0 {
+                let extra = expansion * item.space_count as f32;
+                item.size.x += extra;
+                offset += extra;
             }
             let rect = egui::Rect::from_min_size(
                 egui::pos2(position, baseline + item_top(item, ascent)),
@@ -429,6 +439,8 @@ fn prepare(
                     ascent: None,
                     alignment: image.alignment,
                     hyperlink: run.hyperlink,
+                    justification: Some(view.style(run.style).justification),
+                    space_count: 0,
                 };
                 paints.push(Paint::Image(image.resource));
                 tokens.push(Token::Image(item));
@@ -457,30 +469,45 @@ fn prepare(
                     end += ch.len_utf8();
                 }
             }
-            let (galley, ascent) =
-                measure(ui, rich_text(&run.text[start..end], run, view, settings));
-            let fragments = if galley.size().x > width {
-                // Long unbroken words still have to remain readable in a narrow window.
-                // Let the font layout choose emergency breaks, preserving combining glyphs.
-                let (wrapped, _) = measure_width(
-                    ui,
-                    rich_text(&run.text[start..end], run, view, settings),
-                    width,
-                );
-                wrapped
-                    .rows
-                    .iter()
-                    .map(|row| {
-                        let text: String = row.glyphs.iter().map(|glyph| glyph.chr).collect();
-                        measure(ui, rich_text(&text, run, view, settings))
+            let text = &run.text[start..end];
+            let fragments = if space && text.chars().count() > 1 {
+                text.chars()
+                    .map(|character| {
+                        let character = character.to_string();
+                        measure(ui, rich_text(&character, run, view, settings))
                     })
                     .collect::<Vec<_>>()
             } else {
-                vec![(galley, ascent)]
+                let (galley, ascent) = measure(ui, rich_text(text, run, view, settings));
+                if galley.size().x > width {
+                    // Long unbroken words still have to remain readable in a narrow window.
+                    // Let the font layout choose emergency breaks, preserving combining glyphs.
+                    let (wrapped, _) =
+                        measure_width(ui, rich_text(text, run, view, settings), width);
+                    wrapped
+                        .rows
+                        .iter()
+                        .map(|row| {
+                            let text: String = row.glyphs.iter().map(|glyph| glyph.chr).collect();
+                            measure(ui, rich_text(&text, run, view, settings))
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    vec![(galley, ascent)]
+                }
             };
             // Styling or hyperlink changes inside a word must not create wrap opportunities.
             // CJK glyphs, unlike Latin word fragments, each allow a break.
             let merge = start == 0 && !is_cjk(first) && fragments.len() == 1;
+            let space_count = if space {
+                if text.chars().count() > 1 {
+                    1
+                } else {
+                    text.chars().filter(|character| *character == ' ').count()
+                }
+            } else {
+                0
+            };
             for (galley, ascent) in fragments {
                 let item = Item {
                     index: paints.len(),
@@ -488,6 +515,8 @@ fn prepare(
                     ascent: Some(ascent),
                     alignment: 0,
                     hyperlink: run.hyperlink,
+                    justification: Some(view.style(run.style).justification),
+                    space_count,
                 };
                 paints.push(Paint::Text(galley, view.style(run.style).weight > 0));
                 match tokens.last_mut() {
@@ -503,17 +532,63 @@ fn prepare(
     (tokens, paints, ascent, descent)
 }
 
+type LayoutKey = (u64, u32, u32, [u8; 3], u32);
+struct CachedLayout {
+    key: LayoutKey,
+    paints: Vec<Paint>,
+    placed: Vec<Placed>,
+    height: f32,
+}
+#[derive(Default)]
+pub(super) struct LayoutCache(HashMap<u32, CachedLayout>);
+impl LayoutCache {
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+    pub fn retain_windows(&mut self, views: &[WindowView]) {
+        self.0
+            .retain(|id, _| views.iter().any(|view| view.id == *id));
+    }
+}
+
 pub(super) fn show(
     ui: &mut egui::Ui,
     view: &WindowView,
     settings: &PlayerSettings,
-    vm: &Vm,
+    vm: Option<&Vm>,
     images: &mut ImageCache,
+    layouts: &mut LayoutCache,
+    revision: u64,
 ) -> Option<u32> {
     let width = ui.available_width().max(1.0);
-    let (tokens, paints, ascent, descent) = prepare(ui, view, settings, width);
-    let (placed, height) = Layout::new(width, ascent, descent).format(&tokens);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+    let key = (
+        revision,
+        width.to_bits(),
+        settings.font_size.to_bits(),
+        settings.hyperlink_color,
+        ui.ctx().pixels_per_point().to_bits(),
+    );
+    if layouts
+        .0
+        .get(&view.id)
+        .is_none_or(|cached| cached.key != key)
+    {
+        let (tokens, paints, ascent, descent) = prepare(ui, view, settings, width);
+        let (placed, height) = Layout::new(width, ascent, descent).format(&tokens);
+        layouts.0.insert(
+            view.id,
+            CachedLayout {
+                key,
+                paints,
+                placed,
+                height,
+            },
+        );
+    }
+    let cached = &layouts.0[&view.id];
+    let paints = &cached.paints;
+    let placed = &cached.placed;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, cached.height), egui::Sense::hover());
     let mut hyperlink = None;
     for (index, placed) in placed.iter().enumerate() {
         let destination = placed.rect.translate(rect.min.to_vec2());
@@ -537,7 +612,15 @@ pub(super) fn show(
                 }
             }
             Paint::Image(resource) => {
-                if let Some(texture) = images.get(ui, vm, *resource) {
+                let texture = if let Some(vm) = vm {
+                    images.get(ui, vm, *resource)
+                } else {
+                    images
+                        .entries
+                        .get(resource)
+                        .map(|(texture, _)| texture.clone())
+                };
+                if let Some(texture) = texture {
                     ui.painter().image(
                         texture.id(),
                         destination,
@@ -574,6 +657,32 @@ mod tests {
             ascent: Some(15.0),
             alignment: 0,
             hyperlink: 0,
+            justification: None,
+            space_count: 0,
+        }])
+    }
+
+    fn italic_text(index: usize, width: f32) -> Token {
+        Token::Word(vec![Item {
+            index,
+            size: egui::vec2(width, 20.0),
+            ascent: Some(15.0),
+            alignment: 0,
+            hyperlink: 0,
+            justification: Some(1),
+            space_count: 0,
+        }])
+    }
+
+    fn left_text(index: usize, width: f32) -> Token {
+        Token::Word(vec![Item {
+            index,
+            size: egui::vec2(width, 20.0),
+            ascent: Some(15.0),
+            alignment: 0,
+            hyperlink: 0,
+            justification: Some(0),
+            space_count: 0,
         }])
     }
 
@@ -584,6 +693,8 @@ mod tests {
             ascent: None,
             alignment,
             hyperlink: 42,
+            justification: None,
+            space_count: 0,
         })
     }
 
@@ -607,9 +718,10 @@ mod tests {
         })
     }
     fn space(index: usize, width: f32) -> Token {
-        let Token::Word(items) = text(index, width) else {
+        let Token::Word(mut items) = text(index, width) else {
             unreachable!()
         };
+        items[0].space_count = 1;
         Token::Space(items)
     }
 
@@ -632,6 +744,43 @@ mod tests {
         assert_eq!(rect(&items, 0).left(), 10.0);
         assert_eq!(rect(&items, 1).left(), 20.0);
         assert_eq!(rect(&items, 2).left(), 10.0);
+    }
+
+    #[test]
+    fn italic_full_justification_keeps_natural_word_spacing() {
+        let tokens = [
+            Token::Paragraph(ParagraphStyle {
+                indentation: 0.0,
+                first_indent: 0.0,
+                justification: 1,
+            }),
+            left_text(0, 30.0),
+            space(1, 5.0),
+            italic_text(2, 30.0),
+        ];
+        let (items, _) = layout(&tokens, 100.0);
+        assert_eq!(rect(&items, 2).left(), 35.0);
+    }
+
+    #[test]
+    fn full_justification_counts_repeated_spaces_individually() {
+        let tokens = [
+            paragraph(0.0, 0.0, 1),
+            text(0, 20.0),
+            Token::Space(vec![Item {
+                index: 1,
+                size: egui::vec2(10.0, 20.0),
+                ascent: Some(15.0),
+                alignment: 0,
+                hyperlink: 0,
+                justification: None,
+                space_count: 2,
+            }]),
+            text(2, 20.0),
+            text(3, 60.0),
+        ];
+        let (items, _) = layout(&tokens, 100.0);
+        assert_eq!(rect(&items, 2).right(), 100.0);
     }
 
     #[test]
@@ -924,6 +1073,64 @@ mod tests {
 #[cfg(test)]
 mod cache_tests {
     use super::*;
+
+    #[test]
+    fn text_layout_cache_reuses_rows_and_invalidates_on_width_and_revision() {
+        let context = egui::Context::default();
+        let view = WindowView {
+            id: 1,
+            kind: 3,
+            rect: [0, 0, 400, 400],
+            runs: vec![crate::vm::TextRun {
+                text: "A paragraph that wraps in a narrow window. ".repeat(20),
+                style: 0,
+                hyperlink: 0,
+                image: None,
+                flow_break: false,
+            }],
+            grid: String::new(),
+            grid_cells: vec![],
+            grid_size: [0, 0],
+            grid_cursor: [0, 0],
+            appearance: Default::default(),
+            hints: Default::default(),
+        };
+        let mut images = ImageCache::default();
+        let mut layouts = LayoutCache::default();
+        let settings = PlayerSettings::default();
+        let mut render = |width, view: &WindowView, revision| {
+            let mut output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width, 800.0),
+                    )),
+                    ..Default::default()
+                },
+                |root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        show(
+                            ui,
+                            view,
+                            &settings,
+                            None,
+                            &mut images,
+                            &mut layouts,
+                            revision,
+                        );
+                    });
+                },
+            );
+            output.textures_delta.clear();
+            (layouts.0[&1].placed.as_ptr(), layouts.0[&1].height)
+        };
+        let (old_rows, old_height) = render(400.0, &view, 1);
+        assert_eq!(render(400.0, &view, 1).0, old_rows);
+        assert!(render(200.0, &view, 1).1 > old_height);
+        let mut changed = view.clone();
+        changed.runs[0].text = "Short".into();
+        assert!(render(200.0, &changed, 2).1 < old_height);
+    }
 
     #[test]
     fn text_image_cache_evicts_payloads_and_zero_disables_retention() {

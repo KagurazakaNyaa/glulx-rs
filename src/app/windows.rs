@@ -426,6 +426,7 @@ impl PlayerApp {
     }
 
     fn apply_selected_font(&mut self, context: &egui::Context) {
+        self.text_layouts.clear();
         self.fonts = fonts::Fonts::new(
             context,
             &self.settings.fallback_font,
