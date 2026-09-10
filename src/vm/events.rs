@@ -214,7 +214,7 @@ impl Vm {
         let event = self
             .events
             .iter()
-            .position(|event| !matches!(event[0], 2 | 3 | 4 | 8))
+            .position(|event| matches!(event[0], 1 | 5 | 6 | 7))
             .and_then(|index| self.events.remove(index))
             .unwrap_or([0, 0, 0, 0]);
         self.write_event(address, event)
@@ -313,6 +313,14 @@ impl Vm {
     }
     pub(super) fn request_line(&mut self, args: &[u32], unicode: bool) -> Result<(), VmError> {
         let window = args.first().copied().unwrap_or(0);
+        if !self
+            .glk_windows
+            .get(&window)
+            .is_some_and(|w| matches!(w.kind, WINTYPE_TEXT_BUFFER | WINTYPE_TEXT_GRID))
+            || self.requests.contains_key(&window)
+        {
+            return Ok(());
+        }
         let buffer = args.get(1).copied().unwrap_or(0);
         let max_len = args.get(2).copied().unwrap_or(0);
         if let Some(w) = self.glk_windows.get_mut(&window)
@@ -407,12 +415,18 @@ mod tests {
         let mut vm = vm();
         let players = [[4, 1, 2, 3], [8, 1, 99, 0], [3, 2, 5, 0], [2, 1, 65, 0]];
         vm.events.extend(players);
-        vm.events.extend([[1, 0, 0, 0], [7, 0, 8, 42]]);
-        for expected in [1, 7, 0] {
+        vm.events
+            .extend([[1, 0, 0, 0], [7, 0, 8, 42], [9, 0, 0, 43]]);
+        for expected in [1, 7, 0, 0] {
             glk(&mut vm, 0xc1, &[0x100]);
             assert_eq!(vm.memory.read32(0x100).unwrap(), expected);
         }
-        assert_eq!(vm.events.iter().copied().collect::<Vec<_>>(), players);
+        let mut expected_events = players.to_vec();
+        expected_events.push([9, 0, 0, 43]);
+        assert_eq!(
+            vm.events.iter().copied().collect::<Vec<_>>(),
+            expected_events
+        );
         for event in players {
             vm.select_event(0x100, Destination::Discard).unwrap();
             for (index, value) in event.into_iter().enumerate() {
@@ -582,7 +596,7 @@ mod tests {
     #[test]
     fn character_special_keys_and_latin1_conversion_keep_event_contract() {
         let mut vm = vm();
-        let window = glk(&mut vm, 0x23, &[0, 0, 0, 5, 0]);
+        let window = glk(&mut vm, 0x23, &[0, 0, 0, WINTYPE_TEXT_BUFFER, 0]);
         for key in [
             0xffff_fffe,
             0xffff_fff9,
@@ -612,7 +626,22 @@ mod tests {
     #[test]
     fn line_request_rejects_wrapping_buffer_before_retaining_it() {
         let mut vm = vm();
-        assert!(vm.request_line(&[1, 0x100, u32::MAX, 0], true).is_err());
+        let window = glk(&mut vm, 0x23, &[0, 0, 0, WINTYPE_TEXT_BUFFER, 0]);
+        assert!(
+            vm.request_line(&[window, 0x100, u32::MAX, 0], true)
+                .is_err()
+        );
+        assert!(vm.requests.is_empty());
+    }
+
+    #[test]
+    fn input_requests_on_non_text_windows_are_ignored() {
+        let mut vm = vm();
+        let graphics = glk(&mut vm, 0x23, &[0, 0, 0, WINTYPE_GRAPHICS, 0]);
+        vm.request_line(&[graphics, 0x100, 8, 0], false).unwrap();
+        assert!(vm.requests.is_empty());
+
+        glk(&mut vm, 0xd2, &[graphics]);
         assert!(vm.requests.is_empty());
     }
     #[test]

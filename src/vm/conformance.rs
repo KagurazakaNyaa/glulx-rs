@@ -338,25 +338,27 @@ fn nested_window_tree_arrangement_close_and_resize() {
 #[test]
 fn event_queue_multiwindow_initial_line_cancel_and_timer() {
     let mut vm = vm();
+    let first = glk(&mut vm, 0x23, &[0, 0, 0, 3, 0]);
+    let second = glk(&mut vm, 0x23, &[first, 0x12, 1, 3, 0]);
     vm.memory.write8(0x100, 0xe9).unwrap();
-    glk(&mut vm, 0xd0, &[1, 0x100, 8, 1]);
-    glk(&mut vm, 0x140, &[2]);
+    glk(&mut vm, 0xd0, &[first, 0x100, 8, 1]);
+    glk(&mut vm, 0x140, &[second]);
     push_glk_arguments(&mut vm, &[u32::MAX]);
     vm.glk(0xc0, 1, Destination::Discard).unwrap();
     assert_eq!(vm.initial_input(), "é");
-    vm.provide_window_input(2, "中").unwrap();
+    vm.provide_window_input(second, "中").unwrap();
     assert_eq!(vm.stack.pop_u32().unwrap(), 0);
     assert_eq!(vm.stack.pop_u32().unwrap(), 0x4e2d);
     assert_eq!(vm.stack.pop_u32().unwrap(), 2);
     assert_eq!(vm.stack.pop_u32().unwrap(), 2);
-    assert!(vm.requests.contains_key(&1));
-    glk(&mut vm, 0xd1, &[1, 0x120]);
+    assert!(vm.requests.contains_key(&first));
+    glk(&mut vm, 0xd1, &[first, 0x120]);
     assert_eq!(vm.memory.read32(0x120).unwrap(), 3);
     assert_eq!(vm.memory.read32(0x128).unwrap(), 1);
     vm.timer = Some((std::time::Duration::from_secs(1), std::time::Instant::now()));
     glk(&mut vm, 0xc1, &[0x120]);
     assert_eq!(vm.memory.read32(0x120).unwrap(), 1);
-    glk(&mut vm, 0xd0, &[1, 0x100, 8, 0]);
+    glk(&mut vm, 0xd0, &[first, 0x100, 8, 0]);
     vm.select_event(0x120, Destination::Discard).unwrap();
     vm.provide_input("é中").unwrap();
     assert_eq!(vm.memory.read8(0x100).unwrap(), 0xe9);

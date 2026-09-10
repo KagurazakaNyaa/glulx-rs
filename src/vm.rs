@@ -1790,6 +1790,13 @@ impl Vm {
         };
         match target {
             GlkStreamTarget::Window(window_id) => {
+                if self
+                    .requests
+                    .get(&window_id)
+                    .is_some_and(|request| matches!(request, Request::Line(_)))
+                {
+                    return;
+                }
                 if let Some(window) = self.glk_windows.get_mut(&window_id) {
                     window.write_count = window.write_count.wrapping_add(1);
                 }
@@ -1993,6 +2000,13 @@ impl Vm {
             }
             0x002a => {
                 let window_id = arguments.first().copied().unwrap_or(0);
+                if self
+                    .requests
+                    .get(&window_id)
+                    .is_some_and(|request| matches!(request, Request::Line(_)))
+                {
+                    return self.store_destination(&destination, 0, Width::Word);
+                }
                 if let Some(window) = self.glk_windows.get_mut(&window_id) {
                     window.runs.clear();
                     window.grid.fill(' ');
@@ -2249,11 +2263,16 @@ impl Vm {
                 0
             }
             0x00d2 | 0x0140 => {
-                self.requests
-                    .entry(arguments.first().copied().unwrap_or(0))
-                    .or_insert(Request::Character {
+                let window = arguments.first().copied().unwrap_or(0);
+                if self
+                    .glk_windows
+                    .get(&window)
+                    .is_some_and(|w| matches!(w.kind, WINTYPE_TEXT_BUFFER | WINTYPE_TEXT_GRID))
+                {
+                    self.requests.entry(window).or_insert(Request::Character {
                         unicode: selector == 0x0140,
                     });
+                }
                 0
             }
             0x00d3 => {
@@ -2267,6 +2286,7 @@ impl Vm {
                 if let Some(w) = self
                     .glk_windows
                     .get_mut(&arguments.first().copied().unwrap_or(0))
+                    .filter(|w| w.kind == WINTYPE_TEXT_BUFFER)
                 {
                     w.echo_line = arguments.get(1).copied().unwrap_or(0) != 0;
                 }
@@ -2455,8 +2475,8 @@ impl Vm {
             14 => u32::from(self.graphical_host), // GraphicsTransparency
             15..=16 => 1,                         // Unicode / UnicodeNorm
             20 => 1,                              // DateTime
-            22 => 1,
-            23 => u32::from(self.graphical_host), // ResourceStream / GraphicsCharInput
+            22 => 1,                              // ResourceStream
+            23 => 0, // GraphicsCharInput is not provided by the graphical host.
             24 => u32::from(
                 self.graphical_host && matches!(argument, WINTYPE_TEXT_BUFFER | WINTYPE_GRAPHICS),
             ),
@@ -2917,6 +2937,15 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn graphical_gestalt_does_not_claim_graphics_character_input() {
+        let mut vm =
+            Vm::new(Story::from_bytes(&image_with_program(&[0x81, 0x20]), None).unwrap()).unwrap();
+        vm.set_graphical_host(true);
+        assert_eq!(vm.glk_gestalt(22, 0), 1);
+        assert_eq!(vm.glk_gestalt(23, 0), 0);
+    }
+
+    #[test]
     fn undo_and_restart_restore_heap_ownership() {
         let program = [0x81, 0x25, 0x00, 0x81, 0x26, 0x00];
         let mut vm =
@@ -3049,6 +3078,7 @@ pub(crate) mod tests {
         ];
         let story = Story::from_bytes(&image_with_program(&program), None).unwrap();
         let mut vm = Vm::new(story).unwrap();
+        assert_eq!(vm.open_window(&[0, 0, 0, WINTYPE_TEXT_BUFFER, 0]), 1);
 
         assert_eq!(vm.run_steps(32).unwrap(), RunState::WaitingForLine);
         assert_eq!(
