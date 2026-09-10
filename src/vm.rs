@@ -2772,11 +2772,11 @@ impl Vm {
         let mut index = 0u32;
         while structure_count == u32::MAX || index < structure_count {
             let structure = start.wrapping_add(index.wrapping_mul(structure_size));
-            let candidate = self.memory_key(structure.wrapping_add(key_offset), key_size)?;
-            if candidate[..key_size as usize] == key[..key_size as usize] {
+            let candidate = structure.wrapping_add(key_offset);
+            if self.memory.key_equals(candidate, key_size, &key)? {
                 return Ok(search_result(structure, index, options));
             }
-            if options & 0x02 != 0 && candidate[..key_size as usize].iter().all(|byte| *byte == 0) {
+            if options & 0x02 != 0 && self.memory.key_is_zero(candidate, key_size)? {
                 break;
             }
             index = index.wrapping_add(1);
@@ -2802,8 +2802,8 @@ impl Vm {
         while low < high {
             let index = low + (high - low) / 2;
             let structure = start.wrapping_add(index.wrapping_mul(structure_size));
-            let candidate = self.memory_key(structure.wrapping_add(key_offset), key_size)?;
-            match candidate[..key_size as usize].cmp(&key[..key_size as usize]) {
+            let candidate = structure.wrapping_add(key_offset);
+            match self.memory.key_cmp(candidate, key_size, &key)? {
                 Ordering::Less => low = index + 1,
                 Ordering::Greater => high = index,
                 Ordering::Equal => return Ok(search_result(structure, index, options)),
@@ -2825,11 +2825,11 @@ impl Vm {
         let key = self.search_key(&key_bytes, key_size, options)?;
         let mut remaining = self.memory.len() / 4 + 1;
         while structure != 0 && remaining > 0 {
-            let candidate = self.memory_key(structure.wrapping_add(key_offset), key_size)?;
-            if candidate[..key_size as usize] == key[..key_size as usize] {
+            let candidate = structure.wrapping_add(key_offset);
+            if self.memory.key_equals(candidate, key_size, &key)? {
                 return Ok(structure);
             }
-            if options & 0x02 != 0 && candidate[..key_size as usize].iter().all(|byte| *byte == 0) {
+            if options & 0x02 != 0 && self.memory.key_is_zero(candidate, key_size)? {
                 break;
             }
             structure = self.memory.read32(structure.wrapping_add(next_offset))?;
@@ -2857,15 +2857,10 @@ impl Vm {
         if key_size == 0 {
             return Ok([0; 4]);
         }
-        let mut result = [0; 4];
-        for (offset, byte) in result.iter_mut().take(key_size as usize).enumerate() {
-            *byte = self.memory.read8(
-                address
-                    .checked_add(offset as u32)
-                    .ok_or(VmError::MemoryRead(address))?,
-            )?;
+        if !matches!(key_size, 1 | 2 | 4) {
+            return Err(VmError::InvalidSearchKeySize(key_size));
         }
-        Ok(result)
+        self.memory.key(address, key_size)
     }
 }
 

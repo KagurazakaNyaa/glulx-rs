@@ -252,6 +252,9 @@ impl Memory {
     }
 
     pub fn read16(&self, address: u32) -> Result<u16, VmError> {
+        if let Ok(raw) = self.slice(address, 2) {
+            return Ok(u16::from_be_bytes(raw.try_into().expect("length checked")));
+        }
         let next = address.checked_add(1).ok_or(VmError::MemoryRead(address))?;
         Ok(u16::from_be_bytes([
             self.read8(address)?,
@@ -260,6 +263,9 @@ impl Memory {
     }
 
     pub fn read32(&self, address: u32) -> Result<u32, VmError> {
+        if let Ok(raw) = self.slice(address, 4) {
+            return Ok(u32::from_be_bytes(raw.try_into().expect("length checked")));
+        }
         let end = address.checked_add(3).ok_or(VmError::MemoryRead(address))?;
         Ok(u32::from_be_bytes([
             self.read8(address)?,
@@ -267,6 +273,79 @@ impl Memory {
             self.read8(address + 2)?,
             self.read8(end)?,
         ]))
+    }
+
+    pub(crate) fn key(&self, address: u32, length: u32) -> Result<[u8; 4], VmError> {
+        let length = usize::try_from(length).map_err(|_| VmError::MemoryRead(address))?;
+        let end = address
+            .checked_add(length as u32)
+            .ok_or(VmError::MemoryRead(address))?;
+        let mut result = [0; 4];
+        if length > result.len() || end > self.len() {
+            return Err(VmError::MemoryRead(address));
+        }
+        if let Ok(raw) = self.slice(address, length as u32) {
+            result[..length].copy_from_slice(raw);
+        } else {
+            for (offset, byte) in result.iter_mut().take(length).enumerate() {
+                *byte = self.read8(address + offset as u32)?;
+            }
+        }
+        Ok(result)
+    }
+
+    pub(crate) fn key_equals(
+        &self,
+        address: u32,
+        length: u32,
+        key: &[u8; 4],
+    ) -> Result<bool, VmError> {
+        let length = usize::try_from(length).map_err(|_| VmError::MemoryRead(address))?;
+        if length > key.len() {
+            return Err(VmError::MemoryRead(address));
+        }
+        if let Ok(raw) = self.slice(address, length as u32) {
+            return Ok(raw == &key[..length]);
+        }
+        for (offset, expected) in key.iter().take(length).enumerate() {
+            if self.read8(address + offset as u32)? != *expected {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    pub(crate) fn key_is_zero(&self, address: u32, length: u32) -> Result<bool, VmError> {
+        let length = usize::try_from(length).map_err(|_| VmError::MemoryRead(address))?;
+        if length > 4 {
+            return Err(VmError::MemoryRead(address));
+        }
+        if let Ok(raw) = self.slice(address, length as u32) {
+            return Ok(raw.iter().all(|byte| *byte == 0));
+        }
+        for offset in 0..length {
+            if self.read8(address + offset as u32)? != 0 {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    pub(crate) fn key_cmp(
+        &self,
+        address: u32,
+        length: u32,
+        key: &[u8; 4],
+    ) -> Result<std::cmp::Ordering, VmError> {
+        let length = usize::try_from(length).map_err(|_| VmError::MemoryRead(address))?;
+        if length > key.len() {
+            return Err(VmError::MemoryRead(address));
+        }
+        if let Ok(raw) = self.slice(address, length as u32) {
+            return Ok(raw.cmp(&key[..length]));
+        }
+        let candidate = self.key(address, length as u32)?;
+        Ok(candidate[..length].cmp(&key[..length]))
     }
 
     pub fn write8(&mut self, address: u32, value: u8) -> Result<(), VmError> {
@@ -442,6 +521,22 @@ impl Memory {
             .filter(|end| *end <= self.len())
             .map(|_| ())
             .ok_or(VmError::MemoryWrite(address))
+    }
+
+    fn slice(&self, address: u32, length: u32) -> Result<&[u8], VmError> {
+        let end = address
+            .checked_add(length)
+            .filter(|end| *end <= self.len())
+            .ok_or(VmError::MemoryRead(address))?;
+        if end <= self.ram_start {
+            Ok(&self.initial[address as usize..end as usize])
+        } else if address >= self.ram_start {
+            let start = (address - self.ram_start) as usize;
+            let end = (end - self.ram_start) as usize;
+            Ok(&self.bytes[start..end])
+        } else {
+            Err(VmError::MemoryRead(address))
+        }
     }
 
     fn mark_dirty_range(&mut self, address: u32, length: u32) {
