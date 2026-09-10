@@ -103,13 +103,48 @@ enum Width {
     Word,
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy)]
 enum Operand {
     Zero,
     Constant(u32),
     Memory(u32),
     Stack,
     Local(u32),
+}
+
+const DECODE_CACHE_SIZE: usize = 2048;
+
+#[derive(Clone, Copy)]
+struct DecodeEntry {
+    address: u32,
+    next_pc: u32,
+    opcode: u32,
+    operands: [Operand; 8],
+    valid: bool,
+}
+
+impl Default for DecodeEntry {
+    fn default() -> Self {
+        Self {
+            address: 0,
+            next_pc: 0,
+            opcode: 0,
+            operands: [const { Operand::Zero }; 8],
+            valid: false,
+        }
+    }
+}
+
+struct DecodeCache {
+    entries: Box<[DecodeEntry]>,
+}
+
+impl Default for DecodeCache {
+    fn default() -> Self {
+        Self {
+            entries: vec![DecodeEntry::default(); DECODE_CACHE_SIZE].into_boxed_slice(),
+        }
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
@@ -495,6 +530,12 @@ pub struct Vm {
     #[serde(skip)]
     image_info: BTreeMap<u32, Option<[u32; 2]>>,
     #[serde(skip)]
+    decoded_cache: DecodeCache,
+    #[serde(skip)]
+    decode_cache_hits: u64,
+    #[serde(skip)]
+    decode_cache_misses: u64,
+    #[serde(skip)]
     presentation_revision: u64,
     #[serde(skip)]
     presentation_pending: bool,
@@ -618,6 +659,9 @@ impl Vm {
             accelerated_return: None,
             text_appearance: TextAppearance::default(),
             image_info: BTreeMap::new(),
+            decoded_cache: DecodeCache::default(),
+            decode_cache_hits: 0,
+            decode_cache_misses: 0,
             presentation_revision: 0,
             presentation_pending: false,
             instructions_executed: 0,
@@ -772,7 +816,7 @@ impl Vm {
 
     pub(crate) fn diagnostic_summary(&self) -> String {
         format!(
-            "vm={:?} pc={:#x} viewport={:?} windows={} requests={} events={:?} select={} graphics={} instructions={} polls={} poll_yields={}",
+            "vm={:?} pc={:#x} viewport={:?} windows={} requests={} events={:?} select={} graphics={} instructions={} polls={} poll_yields={} decode_hits={} decode_misses={}",
             self.state,
             self.pc,
             self.viewport_size,
@@ -783,7 +827,9 @@ impl Vm {
             self.graphics.len(),
             self.instructions_executed,
             self.poll_calls,
-            self.poll_yields
+            self.poll_yields,
+            self.decode_cache_hits,
+            self.decode_cache_misses
         )
     }
 
@@ -822,12 +868,7 @@ impl Vm {
             return self.return_from_function(value);
         }
         let instruction_address = self.pc;
-        let opcode = self.fetch_opcode()?;
-        let count = operand_count(opcode).ok_or(VmError::UnsupportedOpcode {
-            opcode,
-            address: instruction_address,
-        })?;
-        let operands = self.fetch_operands(count)?;
+        let (opcode, operands) = self.fetch_decoded(instruction_address)?;
         macro_rules! load {
             ($index:expr) => {
                 self.load_operand(&operands[$index], Width::Word)?
@@ -1518,6 +1559,33 @@ impl Vm {
             }
         }
         Ok(())
+    }
+
+    fn fetch_decoded(&mut self, address: u32) -> Result<(u32, [Operand; 8]), VmError> {
+        let cacheable = address < self.memory.ram_start();
+        let index = (address as usize >> 2) & (DECODE_CACHE_SIZE - 1);
+        if cacheable {
+            let entry = self.decoded_cache.entries[index];
+            if entry.valid && entry.address == address {
+                self.decode_cache_hits = self.decode_cache_hits.wrapping_add(1);
+                self.pc = entry.next_pc;
+                return Ok((entry.opcode, entry.operands));
+            }
+            self.decode_cache_misses = self.decode_cache_misses.wrapping_add(1);
+        }
+        let opcode = self.fetch_opcode()?;
+        let count = operand_count(opcode).ok_or(VmError::UnsupportedOpcode { opcode, address })?;
+        let operands = self.fetch_operands(count)?;
+        if cacheable && self.pc <= self.memory.ram_start() {
+            self.decoded_cache.entries[index] = DecodeEntry {
+                address,
+                next_pc: self.pc,
+                opcode,
+                operands,
+                valid: true,
+            };
+        }
+        Ok((opcode, operands))
     }
 
     fn fetch_opcode(&mut self) -> Result<u32, VmError> {
@@ -3293,6 +3361,15 @@ pub(crate) mod tests {
         let mut vm = Vm::new(story).unwrap();
         assert_eq!(vm.run_steps(16).unwrap(), RunState::Halted);
         assert_eq!(vm.take_output(), "B");
+    }
+
+    #[test]
+    fn decoded_cache_reuses_rom_instruction_metadata() {
+        let story = Story::from_bytes(&image_with_program(&[0x20, 0x01, 0xff]), None).unwrap();
+        let mut vm = Vm::new(story).unwrap();
+        assert_eq!(vm.run_steps(128).unwrap(), RunState::Running);
+        assert!(vm.decode_cache_hits > 0);
+        assert!(vm.decode_cache_misses > 0);
     }
 
     #[test]
