@@ -111,10 +111,19 @@ Windows 使用 Job Object 的进程提交内存限制。macOS 暂不支持进程
 复现微基准并生成 JSON 证据：
 
 ```sh
-python3 tools/benchmark-engine.py --output /tmp/glulx-engine-benchmark.json
+python3 tools/benchmark-engine.py --output "<output-dir>/glulx-engine-benchmark.json"
 ```
 
 工具内部使用 release、单线程和 `benchmark_` ignored tests；比较多次运行时应固定机器、电源模式、构建工具链和工作树 commit。
+
+真实故事可用独立工具测量启动时间和 Linux 峰值 RSS/HWM；工具使用临时工作目录，不写入故事目录：
+
+```sh
+python3 tools/benchmark-stories.py \
+  "<story-dir>/story-a.gblorb" \
+  "<story-dir>/story-b.gblorb" \
+  --output "<output-dir>/glulx-real-story-baseline.json"
+```
 
 ## 翻译
 
@@ -149,15 +158,15 @@ python3 tools/check-reference.py --reference /path/to/glulxe --candidate target/
 可以在本地生成原创媒体样本，检查图像环绕、可点击图片、窗口缩放和 MOD 播放：
 
 ```sh
-python3 tools/make-media-fixture.py /tmp/glulx-media.gblorb
-cargo run -- /tmp/glulx-media.gblorb
+python3 tools/make-media-fixture.py "<output-dir>/glulx-media.gblorb"
+cargo run -- "<output-dir>/glulx-media.gblorb"
 ```
 
 段落样式和网格交互有单独的原创样本：
 
 ```sh
-python3 tools/make-style-fixture.py /tmp/glulx-styles.ulx
-cargo run -- /tmp/glulx-styles.ulx
+python3 tools/make-style-fixture.py "<output-dir>/glulx-styles.ulx"
+cargo run -- "<output-dir>/glulx-styles.ulx"
 ```
 
 Linux 桌面输入和图形回归工具使用隔离的 Xvfb 显示环境：

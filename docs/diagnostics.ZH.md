@@ -23,7 +23,7 @@ Settings 支持原生字体选择器（Windows、macOS、Linux GTK 3）和字体
 如需指定其他日志位置：
 
 ```powershell
-.\glulx-rs.exe --diagnostics "D:\Logs\player.log" "<游戏文件路径>"
+.\glulx-rs.exe --diagnostics "<log-path>" "<游戏文件路径>"
 ```
 
 仍然会打开图形界面。重现闪烁或无响应后再等约 10 秒，然后退出；

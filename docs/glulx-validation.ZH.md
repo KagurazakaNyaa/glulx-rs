@@ -13,8 +13,8 @@ RUSTC_WRAPPER= cargo fmt --all -- --check
 RUSTC_WRAPPER= cargo test --all-targets
 RUSTC_WRAPPER= cargo clippy --all-targets -- -D warnings
 RUSTC_WRAPPER= cargo build --release
-python3 tools/check-opcodes.py --spec /path/to/Glulx-Spec.md --output /tmp/glulx-opcode-audit.tsv
-python3 tools/check-reference.py --reference /path/to/glulxe --candidate target/debug/glulx-rs --fixtures /path/to/fixtures
+python3 tools/check-opcodes.py --spec "<spec-path>/Glulx-Spec.md" --output "<output-dir>/glulx-opcode-audit.tsv"
+python3 tools/check-reference.py --reference "<glulxe-path>" --candidate target/debug/glulx-rs --fixtures "<fixtures-dir>"
 ```
 
 Rust 测试 181 passed / 0 failed（179 个库测试、2 个 CLI 测试）；Clippy（warnings 视为错误）及 release 构建通过。
@@ -116,8 +116,8 @@ Windows/macOS 尚未运行本轮 GUI 测试。未完成任何长篇游戏全通�
 以下 fixture 完全由仓库脚本生成，包含原创 PNG 和四声道 MOD，不依赖下载游戏：
 
 ```sh
-python3 tools/make-media-fixture.py /tmp/glulx-media.gblorb
-cargo run -- /tmp/glulx-media.gblorb
+python3 tools/make-media-fixture.py "<output-dir>/glulx-media.gblorb"
+cargo run -- "<output-dir>/glulx-media.gblorb"
 ```
 
 在 Linux Xvfb 中，窗口分别调整为 1100×820、700×820：三种行内图片对齐正确，
@@ -136,9 +136,9 @@ cargo run -- /tmp/glulx-media.gblorb
 原创样式 fixture 覆盖居中标题、悬挂缩进和两端对齐段落、右对齐、网格 LINK 及预填输入：
 
 ```sh
-python3 tools/make-style-fixture.py /tmp/glulx-styles.ulx
-cargo run -- /tmp/glulx-styles.ulx
-python3 tools/check-input-ui.py --candidate target/debug/glulx-rs --output /tmp/glulx-input-ui --input-feature /path/to/inputfeaturetest.ulx
+python3 tools/make-style-fixture.py "<output-dir>/glulx-styles.ulx"
+cargo run -- "<output-dir>/glulx-styles.ulx"
+python3 tools/check-input-ui.py --candidate target/debug/glulx-rs --output "<output-dir>/glulx-input-ui" --input-feature "<fixtures-dir>/inputfeaturetest.ulx"
 ```
 
 样式故事经 Linux Xvfb 验收：点击网格 LINK，预填 Ada 改为 Grace Hopper 并提交，正常关闭重开后保留事件、文本和网格。Rust 绘制测试还验证实际中文 glyph、宽字形单格压缩、斜体/字重/颜色、网格链接命中和编辑。
@@ -151,7 +151,7 @@ python3 tools/check-input-ui.py --candidate target/debug/glulx-rs --output /tmp/
 ## 媒体格式与后续边界
 
 ```sh
-python3 tools/check-graphics-ui.py --candidate target/debug/glulx-rs --output /tmp/glulx-graphics-ui
+python3 tools/check-graphics-ui.py --candidate target/debug/glulx-rs --output "<output-dir>/glulx-graphics-ui"
 python3 tools/check-audio-codecs.py
 ```
 
@@ -172,11 +172,11 @@ Blorb RIdx 必须位于首块且唯一；RDes 解析验证 UTF-8、无条目间 
 ## 独立资源、终端输入、SONG 与真实 light 字重
 
 ```sh
-python3 tools/check-resource-maps.py --fixture /path/to/resstreamtest.gblorb --candidate target/debug/glulx-rs --reference /path/to/glulxe --output /tmp/resource-maps
-python3 tools/check-resource-ui.py --candidate target/debug/glulx-rs --output /tmp/resource-ui
+python3 tools/check-resource-maps.py --fixture "<fixtures-dir>/resstreamtest.gblorb" --candidate target/debug/glulx-rs --reference "<glulxe-path>" --output "<output-dir>/resource-maps"
+python3 tools/check-resource-ui.py --candidate target/debug/glulx-rs --output "<output-dir>/resource-ui"
 python3 tools/check-terminal.py --candidate target/debug/glulx-rs
-python3 tools/make-song-fixture.py /tmp/glulx-song.gblorb
-python3 tools/check-song-ui.py --candidate target/debug/glulx-rs --output /tmp/song-ui
+python3 tools/make-song-fixture.py "<output-dir>/glulx-song.gblorb"
+python3 tools/check-song-ui.py --candidate target/debug/glulx-rs --output "<output-dir>/song-ui"
 ```
 
 - 资源模型：新增 8 个 Rust 测试覆盖无执行文件的包、128 字节 IFhd、冲突、原子失败、发现优先级/歧义、散装类型和新旧桌面快照。官方资源流故事在原始包、raw 加显式包、自动发现和散装目录四种方式下逐字输出一致，并与归一化解释器版本后的 Glulxe 输出一致。

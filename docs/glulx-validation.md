@@ -13,8 +13,8 @@ RUSTC_WRAPPER= cargo fmt --all -- --check
 RUSTC_WRAPPER= cargo test --all-targets
 RUSTC_WRAPPER= cargo clippy --all-targets -- -D warnings
 RUSTC_WRAPPER= cargo build --release
-python3 tools/check-opcodes.py --spec /path/to/Glulx-Spec.md --output /tmp/glulx-opcode-audit.tsv
-python3 tools/check-reference.py --reference /path/to/glulxe --candidate target/debug/glulx-rs --fixtures /path/to/fixtures
+python3 tools/check-opcodes.py --spec "<spec-path>/Glulx-Spec.md" --output "<output-dir>/glulx-opcode-audit.tsv"
+python3 tools/check-reference.py --reference "<glulxe-path>" --candidate target/debug/glulx-rs --fixtures "<fixtures-dir>"
 ```
 
 Rust tests: 181 passed / 0 failed (179 library, 2 CLI); Clippy with warnings as errors and the release build passed. Scripts do not download fixtures or modify repository game resources; synthetic stories and saves use temporary directories. Without `--fixtures`, synthetic IFZS bidirectional interoperability, double stack order, Inform acceleration, zero-length memory, and deep-string differential checks still run. Dispatch and operand counts match 150/150 official opcodes; all 124/124 official Glk dispatch selectors are present. These two checks establish table completeness only; execution semantics still require runtime tests.
@@ -99,8 +99,8 @@ Further validation must record Windows/macOS system and build versions, individu
 This fixture is generated entirely by repository scripts, with original PNG and four-channel MOD content and no downloaded game dependency:
 
 ```sh
-python3 tools/make-media-fixture.py /tmp/glulx-media.gblorb
-cargo run -- /tmp/glulx-media.gblorb
+python3 tools/make-media-fixture.py "<output-dir>/glulx-media.gblorb"
+cargo run -- "<output-dir>/glulx-media.gblorb"
 ```
 
 Under Linux Xvfb, resize the window to 1100×820 and 700×820: all three inline image alignments are correct, left/right margins shrink with window width, and text wraps beside images then returns to full width below them. Clicking an image produces `Image hyperlink received.`; audio completion produces `MOD playback completed.`. After normal exit and restart without a story argument, the text, images, and pending input remain. The original Sensory Jam AIFF/photo/restoration checks were rerun to confirm media changes preserved existing paths.
@@ -112,9 +112,9 @@ The synthetic story ignores non-input events such as Arrange so resizing cannot 
 The original style fixture covers centered headings, hanging indents and justified paragraphs, right alignment, grid LINK, and prefilled input:
 
 ```sh
-python3 tools/make-style-fixture.py /tmp/glulx-styles.ulx
-cargo run -- /tmp/glulx-styles.ulx
-python3 tools/check-input-ui.py --candidate target/debug/glulx-rs --output /tmp/glulx-input-ui --input-feature /path/to/inputfeaturetest.ulx
+python3 tools/make-style-fixture.py "<output-dir>/glulx-styles.ulx"
+cargo run -- "<output-dir>/glulx-styles.ulx"
+python3 tools/check-input-ui.py --candidate target/debug/glulx-rs --output "<output-dir>/glulx-input-ui" --input-feature "<fixtures-dir>/inputfeaturetest.ulx"
 ```
 
 The style story passed under Linux Xvfb: click grid LINK, change prefilled Ada to Grace Hopper, submit, and close/reopen normally with events, text, and grid retained. Rust rendering tests also verify actual Chinese glyphs, compression of wide glyphs into a single cell, oblique/weight/color, grid link hits, and editing.
@@ -126,7 +126,7 @@ Graphics regressions verify that resizing immediately retains visible top-left p
 ## Media Formats and Further Edge Cases
 
 ```sh
-python3 tools/check-graphics-ui.py --candidate target/debug/glulx-rs --output /tmp/glulx-graphics-ui
+python3 tools/check-graphics-ui.py --candidate target/debug/glulx-rs --output "<output-dir>/glulx-graphics-ui"
 python3 tools/check-audio-codecs.py
 ```
 
@@ -146,11 +146,11 @@ A further 18 audio checks verify that 8/22.05/48 kHz input resampled to 44.1 kHz
 ## Separate Resources, Terminal Input, SONG and Light Weight
 
 ```sh
-python3 tools/check-resource-maps.py --fixture /path/to/resstreamtest.gblorb --candidate target/debug/glulx-rs --reference /path/to/glulxe --output /tmp/resource-maps
-python3 tools/check-resource-ui.py --candidate target/debug/glulx-rs --output /tmp/resource-ui
+python3 tools/check-resource-maps.py --fixture "<fixtures-dir>/resstreamtest.gblorb" --candidate target/debug/glulx-rs --reference "<glulxe-path>" --output "<output-dir>/resource-maps"
+python3 tools/check-resource-ui.py --candidate target/debug/glulx-rs --output "<output-dir>/resource-ui"
 python3 tools/check-terminal.py --candidate target/debug/glulx-rs
-python3 tools/make-song-fixture.py /tmp/glulx-song.gblorb
-python3 tools/check-song-ui.py --candidate target/debug/glulx-rs --output /tmp/song-ui
+python3 tools/make-song-fixture.py "<output-dir>/glulx-song.gblorb"
+python3 tools/check-song-ui.py --candidate target/debug/glulx-rs --output "<output-dir>/song-ui"
 ```
 
 - Resource model: eight new Rust tests cover resource-only archives, 128-byte IFhd validation, conflicts, atomic failure, discovery precedence/ambiguity, loose file types and old/current desktop snapshots. The official resource-stream story produces identical output as a bundled story, raw story plus explicit archive, auto-discovered archive and loose directory; output also matches Glulxe after interpreter-version normalization.

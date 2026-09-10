@@ -150,11 +150,21 @@ Stricter inherited system limits remain in effect.
 Run the microbenchmarks and write JSON evidence with:
 
 ```sh
-python3 tools/benchmark-engine.py --output /tmp/glulx-engine-benchmark.json
+python3 tools/benchmark-engine.py --output "<output-dir>/glulx-engine-benchmark.json"
 ```
 
 The tool uses release mode, one test thread and the `benchmark_` ignored tests. For comparisons, keep
 the machine, power mode, toolchain and working-tree commit fixed.
+
+For real stories, use the separate tool to measure startup time and peak Linux RSS/HWM. It uses a
+temporary working directory and does not write beside the stories:
+
+```sh
+python3 tools/benchmark-stories.py \
+  "<story-dir>/story-a.gblorb" \
+  "<story-dir>/story-b.gblorb" \
+  --output "<output-dir>/glulx-real-story-baseline.json"
+```
 
 ## Translation
 
@@ -219,15 +229,15 @@ An original media fixture can be generated locally to inspect image wrapping,
 clickable pictures, window resizing and MOD playback:
 
 ```sh
-python3 tools/make-media-fixture.py /tmp/glulx-media.gblorb
-cargo run -- /tmp/glulx-media.gblorb
+python3 tools/make-media-fixture.py "<output-dir>/glulx-media.gblorb"
+cargo run -- "<output-dir>/glulx-media.gblorb"
 ```
 
 Paragraph styles and grid interaction have a separate original fixture:
 
 ```sh
-python3 tools/make-style-fixture.py /tmp/glulx-styles.ulx
-cargo run -- /tmp/glulx-styles.ulx
+python3 tools/make-style-fixture.py "<output-dir>/glulx-styles.ulx"
+cargo run -- "<output-dir>/glulx-styles.ulx"
 ```
 
 Linux desktop input and graphics regression tools use an isolated Xvfb display:
