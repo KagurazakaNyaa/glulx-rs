@@ -64,7 +64,7 @@ The matrix describes covered behavior and regression entry points; it does not c
 
 ## Reference Fixtures
 
-Reference implementation revisions are Glulxe `56ab8743bab565de307bd892c555d8d8897ed517` and CheapGlk `14d8aaf6e4150669762bd4646a5368e75c1eeee6`. Fixtures come from the official Glulx fixture page or IF Archive and are not distributed with this repository. Commands accept their locations through `--fixtures`, as shown above and in the [checklist](glulx-spec-checklist.md).
+Reference implementation revisions are Glulxe `56ab8743bab565de307bd892c555d8d8897ed517` and CheapGlk `14d8aaf6e4150669762bd4646a5368e75c1eeee6`. Fixtures come from the official Glulx fixture page or IF Archive and are not distributed with this repository. Commands accept their locations through `--fixtures`, as shown above and in [compatibility](compatibility.md).
 
 The maintained fixture set covers Glulxercise, Unicode, resource streams, Adventure, Sensory Jam, input extensions, date/time, and multi-window startup. Exact fixture hashes and reference command options belong in the test run artifact, not in a machine-specific repository path.
 

@@ -15,9 +15,9 @@ The player implements Glulx 3.1.3 and Glk 0.7.6 with explicitly bounded optional
 capabilities; it is not yet a drop-in replacement for every Git or Glulxe workflow. See [docs/compatibility.md](docs/compatibility.md) for the
 exact implemented surface.
 
-The specification-based [compatibility checklist](docs/glulx-spec-checklist.md)
-tracks implemented features, remaining gaps, and validation work against the
-public Glulx, Glk, and Blorb specifications.
+Current implementation scope is documented in [compatibility](docs/compatibility.md),
+reproducible evidence in the [validation record](docs/glulx-validation.md), and
+open specification boundaries in the [current audit](docs/glulx-remaining-spec-audit.md).
 
 ## Run
 

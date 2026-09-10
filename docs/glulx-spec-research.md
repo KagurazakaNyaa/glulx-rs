@@ -2,7 +2,7 @@
 
 [English](glulx-spec-research.md) | [中文](glulx-spec-research.ZH.md)
 
-Reviewed: 2026-09-10. The official Glulx/Glk/Blorb home pages and the complete Glulx 3.1.3, Glk 0.7.6, and Blorb 2.0.5 specifications were read. For implementation status, see the [compatibility checklist](glulx-spec-checklist.md). This document records specification evidence so implementation plans or unrelated documentation are not mistaken for the specification. Current implementation boundaries are summarized in the [remaining capability audit](glulx-remaining-spec-audit.md).
+Reviewed: 2026-09-10. The official Glulx/Glk/Blorb home pages and the complete Glulx 3.1.3, Glk 0.7.6, and Blorb 2.0.5 specifications were read. For implementation status, see [compatibility](compatibility.md) and the [current audit](glulx-remaining-spec-audit.md). This document records specification evidence so implementation plans or unrelated documentation are not mistaken for the specification.
 
 ## Correct Entry Points and Versions
 

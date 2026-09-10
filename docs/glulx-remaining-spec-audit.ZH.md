@@ -2,7 +2,7 @@
 
 [English](glulx-remaining-spec-audit.md) | [中文](glulx-remaining-spec-audit.ZH.md)
 
-更新：2026-09-10。本文件描述当前实现状态 commit `f9c855d` 的规范边界和风险，不记录历史实现过程。详细测试命令见[验收记录](glulx-validation.ZH.md)，实现清单见[规范清单](glulx-spec-checklist.ZH.md)。
+更新：2026-09-10。本文件描述当前实现状态 commit `f9c855d` 的规范边界和风险，不记录历史实现过程。详细测试命令见[验收记录](glulx-validation.ZH.md)，实现限制见[兼容性说明](compatibility.ZH.md)。
 
 ## 来源与判定口径
 

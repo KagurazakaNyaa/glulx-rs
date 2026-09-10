@@ -2,7 +2,7 @@
 
 [English](compatibility.md) | [中文](compatibility.ZH.md)
 
-实现目标为 Glulx 3.1.3 和 Glk 0.7.6。覆盖范围及可复现证据见[规范清单](glulx-spec-checklist.ZH.md)和[验收记录](glulx-validation.ZH.md)。这不代表已证明完全符合规范。
+实现目标为 Glulx 3.1.3 和 Glk 0.7.6。可复现证据见[验收记录](glulx-validation.ZH.md)，开放规范边界见[当前规范复核](glulx-remaining-spec-audit.ZH.md)。这不代表已证明完全符合规范。
 
 ## 已实现
 

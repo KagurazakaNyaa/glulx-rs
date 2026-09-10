@@ -8,7 +8,7 @@
 
 播放器实现了 Glulx 3.1.3 和 Glk 0.7.6，并明确限定可选能力的支持范围；目前还不能直接替代所有 Git 或 Glulxe 工作流程。具体实现范围见[兼容性说明](docs/compatibility.ZH.md)。
 
-基于规范的[兼容性清单](docs/glulx-spec-checklist.ZH.md) 对照公开的 Glulx、Glk 和 Blorb 规范，跟踪已实现功能、剩余缺口和验证工作。
+当前实现范围见[兼容性说明](docs/compatibility.ZH.md)，可复现证据见[验收记录](docs/glulx-validation.ZH.md)，规范边界和开放风险见[当前规范复核](docs/glulx-remaining-spec-audit.ZH.md)。
 
 ## 运行
 

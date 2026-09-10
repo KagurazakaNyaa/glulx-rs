@@ -64,7 +64,7 @@ headless profile 现在会把诊断 heartbeat 保留到 JSON 产物。在启动 
 
 ## 参考样本
 
-参考实现版本为 Glulxe `56ab8743bab565de307bd892c555d8d8897ed517` 和 CheapGlk `14d8aaf6e4150669762bd4646a5368e75c1eeee6`。样本来自官方 Glulx 样本页或 IF Archive，不随仓库分发。通过 `--fixtures` 传入样本位置，命令见上方及[规范清单](glulx-spec-checklist.ZH.md)。
+参考实现版本为 Glulxe `56ab8743bab565de307bd892c555d8d8897ed517` 和 CheapGlk `14d8aaf6e4150669762bd4646a5368e75c1eeee6`。样本来自官方 Glulx 样本页或 IF Archive，不随仓库分发。通过 `--fixtures` 传入样本位置，命令见上方及[兼容性说明](compatibility.ZH.md)。
 
 维护的样本覆盖 Glulxercise、Unicode、资源流、Adventure、Sensory Jam、输入扩展、日期时间和多窗口启动。精确 hash 和参考命令选项应保存在测试产物中，不应写入机器专属的仓库路径。
 

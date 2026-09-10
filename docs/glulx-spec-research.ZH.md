@@ -2,7 +2,7 @@
 
 [English](glulx-spec-research.md) | [中文](glulx-spec-research.ZH.md)
 
-复核日期：2026-09-10。已实际读取官方 Glulx/Glk/Blorb 首页及 Glulx 3.1.3、Glk 0.7.6、Blorb 2.0.5 正文。具体实现状态见 [兼容性 checklist](glulx-spec-checklist.ZH.md)；这里记录规范依据，避免将实现计划或其他文档误当作规范。当前实现边界见 [剩余规范复核](glulx-remaining-spec-audit.ZH.md)。
+复核日期：2026-09-10。已实际读取官方 Glulx/Glk/Blorb 首页及 Glulx 3.1.3、Glk 0.7.6、Blorb 2.0.5 正文。具体实现状态见[兼容性说明](compatibility.ZH.md)和[当前规范复核](glulx-remaining-spec-audit.ZH.md)；这里记录规范依据，避免将实现计划或其他文档误当作规范。
 
 ## 正确入口与版本
 
