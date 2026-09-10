@@ -1217,26 +1217,26 @@ impl Vm {
             0x125 => {
                 let _stage = crate::diagnostics::stage("undo-save");
                 let destination = self.destination(&operands[0])?;
-                let cost = self.memory.snapshot_byte_len()
-                    + self.stack.bytes.len()
-                    + self.heap_blocks.len() * 8;
-                let budget = crate::memory::ResourceLimits::bytes(self.resource_limits.undo_mib);
-                if cost > budget {
-                    self.store_destination(&destination, 1, Width::Word)?;
-                    return Ok(());
-                }
-                self.trim_undo(cost);
-                let previous_pages = self.undo.back().map(|undo| &undo.memory_pages);
-                self.undo.push_back(UndoState {
+                let snapshot = UndoState {
                     memory: None,
                     memory_len: self.memory.len(),
-                    memory_pages: self.memory.snapshot_pages(previous_pages),
+                    memory_pages: self
+                        .memory
+                        .snapshot_pages(self.undo.back().map(|undo| &undo.memory_pages)),
                     stack: self.stack.clone(),
                     pc: self.pc,
                     destination: destination.clone(),
                     heap_next: self.heap_next,
                     heap_blocks: self.heap_blocks.clone(),
-                });
+                };
+                let cost = snapshot.byte_len();
+                let budget = crate::memory::ResourceLimits::bytes(self.resource_limits.undo_mib);
+                if budget == 0 || cost > budget {
+                    self.store_destination(&destination, 1, Width::Word)?;
+                    return Ok(());
+                }
+                self.trim_undo(cost);
+                self.undo.push_back(snapshot);
                 self.memory.clear_dirty_pages();
                 self.store_destination(&destination, 0, Width::Word)?;
             }
@@ -3518,6 +3518,27 @@ pub(crate) mod tests {
             ..Default::default()
         });
         assert!(vm.undo.is_empty());
+    }
+
+    #[test]
+    fn undo_budget_counts_snapshot_pages_not_the_story_image() {
+        let mut image = image_with_program(&[0x81, 0x25, 0x0d, 0x20, 0x81, 0x20]);
+        let size = 2 * 1024 * 1024;
+        image[12..16].copy_from_slice(&(size as u32).to_be_bytes());
+        image[16..20].copy_from_slice(&(size as u32).to_be_bytes());
+        image.resize(size, 0);
+        update_checksum(&mut image);
+        let story = Story::from_bytes(&image, None).unwrap();
+        let mut vm = Vm::new(story).unwrap();
+        vm.set_resource_limits(crate::memory::ResourceLimits {
+            undo_mib: 1,
+            ..Default::default()
+        });
+
+        vm.run_steps(1).unwrap();
+
+        assert_eq!(vm.undo.len(), 1);
+        assert_eq!(vm.memory.read32(0x120).unwrap(), 0);
     }
 
     #[test]
