@@ -30,9 +30,8 @@ impl Vm {
         }
         self.memory.validate_session(&original)?;
         for undo in &mut self.undo {
-            if let Some(memory) = undo.memory.take() {
+            if let Some(mut memory) = undo.memory.take() {
                 memory.validate_session(&original)?;
-                let mut memory = memory;
                 memory.mark_all_pages_dirty();
                 undo.memory_len = memory.len();
                 undo.memory_pages = memory.snapshot_pages(None);

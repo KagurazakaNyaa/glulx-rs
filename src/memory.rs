@@ -109,7 +109,8 @@ impl Memory {
             if address < self.ext_start {
                 baseline.copy_from_slice(&self.initial[page_start..page_end]);
             }
-            let current = &self.bytes[page_start..page_end];
+            let current = &self.bytes
+                [page_start - self.ram_start as usize..page_end - self.ram_start as usize];
             if current == baseline {
                 pages.remove(&address);
             } else if previous
@@ -136,16 +137,22 @@ impl Memory {
             .extend((self.ram_start..self.len()).step_by(256));
     }
 
-    pub(crate) fn validate_session(&self, story: &Story) -> Result<(), VmError> {
-        if self.bytes.len() > self.maximum as usize
+    pub(crate) fn validate_session(&mut self, story: &Story) -> Result<(), VmError> {
+        // Older desktop sessions stored Memory.bytes from address zero. Convert
+        // that representation before validating the current RAM-relative one.
+        if self.bytes.len() >= self.original_end as usize {
+            if self.bytes.len() < self.ram_start as usize {
+                return Err(VmError::InvalidSave);
+            }
+            self.bytes = self.bytes.split_off(self.ram_start as usize);
+        }
+        if self.len() > self.maximum
             || self.ram_start != story.header.ram_start
             || self.ext_start != story.header.ext_start
             || self.original_end != story.header.end_mem
             || self.initial != story.image
-            || self.bytes.len() < self.original_end as usize
-            || !self.bytes.len().is_multiple_of(256)
-            || self.bytes.get(..self.ram_start as usize)
-                != story.image.get(..self.ram_start as usize)
+            || self.len() < self.original_end
+            || !self.len().is_multiple_of(256)
         {
             return Err(VmError::InvalidSave);
         }
@@ -167,11 +174,14 @@ impl Memory {
             });
         }
         let mut bytes = Vec::new();
+        let writable_len = story.header.end_mem - story.header.ram_start;
         bytes
-            .try_reserve_exact(story.header.end_mem as usize)
+            .try_reserve_exact(writable_len as usize)
             .map_err(|_| VmError::MemoryAllocation(story.header.end_mem))?;
-        bytes.extend_from_slice(&story.image);
-        bytes.resize(story.header.end_mem as usize, 0);
+        bytes.extend_from_slice(
+            &story.image[story.header.ram_start as usize..story.header.ext_start as usize],
+        );
+        bytes.resize(writable_len as usize, 0);
         Ok(Self {
             maximum,
             bytes,
@@ -202,11 +212,11 @@ impl Memory {
     }
 
     pub fn len(&self) -> u32 {
-        self.bytes.len() as u32
+        self.ram_start.saturating_add(self.bytes.len() as u32)
     }
 
     pub fn is_empty(&self) -> bool {
-        self.bytes.is_empty()
+        self.len() == 0
     }
 
     pub fn ram_start(&self) -> u32 {
@@ -214,39 +224,56 @@ impl Memory {
     }
 
     pub fn read8(&self, address: u32) -> Result<u8, VmError> {
-        self.bytes
-            .get(address as usize)
-            .copied()
-            .ok_or(VmError::MemoryRead(address))
+        if address < self.ram_start {
+            self.initial
+                .get(address as usize)
+                .copied()
+                .ok_or(VmError::MemoryRead(address))
+        } else {
+            self.bytes
+                .get((address - self.ram_start) as usize)
+                .copied()
+                .ok_or(VmError::MemoryRead(address))
+        }
     }
 
     pub fn read16(&self, address: u32) -> Result<u16, VmError> {
-        let raw = self.slice(address, 2)?;
-        Ok(u16::from_be_bytes(raw.try_into().expect("length checked")))
+        let next = address.checked_add(1).ok_or(VmError::MemoryRead(address))?;
+        Ok(u16::from_be_bytes([
+            self.read8(address)?,
+            self.read8(next)?,
+        ]))
     }
 
     pub fn read32(&self, address: u32) -> Result<u32, VmError> {
-        let raw = self.slice(address, 4)?;
-        Ok(u32::from_be_bytes(raw.try_into().expect("length checked")))
+        let end = address.checked_add(3).ok_or(VmError::MemoryRead(address))?;
+        Ok(u32::from_be_bytes([
+            self.read8(address)?,
+            self.read8(address + 1)?,
+            self.read8(address + 2)?,
+            self.read8(end)?,
+        ]))
     }
 
     pub fn write8(&mut self, address: u32, value: u8) -> Result<(), VmError> {
         self.check_write(address, 1)?;
-        self.bytes[address as usize] = value;
+        self.bytes[(address - self.ram_start) as usize] = value;
         self.mark_dirty_range(address, 1);
         Ok(())
     }
 
     pub fn write16(&mut self, address: u32, value: u16) -> Result<(), VmError> {
         self.check_write(address, 2)?;
-        self.bytes[address as usize..address as usize + 2].copy_from_slice(&value.to_be_bytes());
+        let start = (address - self.ram_start) as usize;
+        self.bytes[start..start + 2].copy_from_slice(&value.to_be_bytes());
         self.mark_dirty_range(address, 2);
         Ok(())
     }
 
     pub fn write32(&mut self, address: u32, value: u32) -> Result<(), VmError> {
         self.check_write(address, 4)?;
-        self.bytes[address as usize..address as usize + 4].copy_from_slice(&value.to_be_bytes());
+        let start = (address - self.ram_start) as usize;
+        self.bytes[start..start + 4].copy_from_slice(&value.to_be_bytes());
         self.mark_dirty_range(address, 4);
         Ok(())
     }
@@ -256,7 +283,8 @@ impl Memory {
             return Ok(());
         }
         self.check_write(address, length)?;
-        self.bytes[address as usize..(address + length) as usize].fill(0);
+        let start = (address - self.ram_start) as usize;
+        self.bytes[start..start + length as usize].fill(0);
         self.mark_dirty_range(address, length);
         Ok(())
     }
@@ -265,12 +293,24 @@ impl Memory {
         if length == 0 {
             return Ok(());
         }
-        self.slice(source, length)?;
+        let source_end = source
+            .checked_add(length)
+            .filter(|end| *end <= self.len())
+            .ok_or(VmError::MemoryRead(source))?;
         self.check_write(destination, length)?;
-        self.bytes.copy_within(
-            source as usize..(source + length) as usize,
-            destination as usize,
-        );
+        let destination_offset = (destination - self.ram_start) as usize;
+        if source >= self.ram_start {
+            self.bytes.copy_within(
+                (source - self.ram_start) as usize..(source_end - self.ram_start) as usize,
+                destination_offset,
+            );
+        } else {
+            let copied = (source..source_end)
+                .map(|address| self.read8(address))
+                .collect::<Result<Vec<_>, _>>()?;
+            self.bytes[destination_offset..destination_offset + length as usize]
+                .copy_from_slice(&copied);
+        }
         self.mark_dirty_range(destination, length);
         Ok(())
     }
@@ -291,7 +331,7 @@ impl Memory {
             return Ok(false);
         }
         let old_size = self.len();
-        self.bytes.resize(new_size as usize, 0);
+        self.bytes.resize((new_size - self.ram_start) as usize, 0);
         if old_size != new_size {
             self.mark_dirty_range(old_size.min(new_size), old_size.abs_diff(new_size));
         }
@@ -300,10 +340,12 @@ impl Memory {
 
     pub fn restart(&mut self, protected: Option<(u32, u32)>) {
         let protected_bytes = self.protected_bytes(protected, self.original_end);
-        self.bytes.resize(self.original_end as usize, 0);
-        self.bytes[self.ram_start as usize..self.ext_start as usize]
+        self.bytes
+            .resize((self.original_end - self.ram_start) as usize, 0);
+        let initial_end = (self.ext_start - self.ram_start) as usize;
+        self.bytes[..initial_end]
             .copy_from_slice(&self.initial[self.ram_start as usize..self.ext_start as usize]);
-        self.bytes[self.ext_start as usize..].fill(0);
+        self.bytes[initial_end..].fill(0);
         self.restore_protected(protected_bytes);
         self.mark_all_pages_dirty();
     }
@@ -344,9 +386,10 @@ impl Memory {
         if !self.resize(target_len)? {
             return Err(VmError::MemoryAllocation(target_len));
         }
-        self.bytes[self.ram_start as usize..self.ext_start as usize]
+        let initial_end = (self.ext_start - self.ram_start) as usize;
+        self.bytes[..initial_end]
             .copy_from_slice(&self.initial[self.ram_start as usize..self.ext_start as usize]);
-        self.bytes[self.ext_start as usize..].fill(0);
+        self.bytes[initial_end..].fill(0);
         for (&address, page) in pages {
             if address < self.ram_start
                 || address.checked_add(256).is_none_or(|end| end > target_len)
@@ -355,7 +398,8 @@ impl Memory {
             {
                 return Err(VmError::InvalidSave);
             }
-            self.bytes[address as usize..address as usize + 256].copy_from_slice(page.as_slice());
+            let start = (address - self.ram_start) as usize;
+            self.bytes[start..start + 256].copy_from_slice(page.as_slice());
         }
         self.restore_protected(protected_bytes);
         self.mark_all_pages_dirty();
@@ -373,14 +417,6 @@ impl Memory {
             out.push(char::from(byte));
             cursor = cursor.wrapping_add(1);
         }
-    }
-
-    pub(crate) fn slice(&self, address: u32, length: u32) -> Result<&[u8], VmError> {
-        let end = address
-            .checked_add(length)
-            .filter(|end| *end <= self.len())
-            .ok_or(VmError::MemoryRead(address))?;
-        Ok(&self.bytes[address as usize..end as usize])
     }
 
     fn check_write(&self, address: u32, length: u32) -> Result<(), VmError> {
@@ -420,8 +456,15 @@ impl Memory {
         let mut bytes = vec![0; (end - start) as usize];
         let source_end = end.min(self.len());
         if start < source_end {
-            bytes[..(source_end - start) as usize]
-                .copy_from_slice(&self.bytes[start as usize..source_end as usize]);
+            for (offset, byte) in bytes
+                .iter_mut()
+                .take((source_end - start) as usize)
+                .enumerate()
+            {
+                *byte = self
+                    .read8(start + offset as u32)
+                    .expect("protected range checked");
+            }
         }
         Some((start, bytes))
     }
@@ -432,7 +475,8 @@ impl Memory {
         };
         let length = bytes.len().min(self.len().saturating_sub(start) as usize);
         if length != 0 {
-            self.bytes[start as usize..start as usize + length].copy_from_slice(&bytes[..length]);
+            let start = (start - self.ram_start) as usize;
+            self.bytes[start..start + length].copy_from_slice(&bytes[..length]);
         }
     }
 }
@@ -492,6 +536,17 @@ mod tests {
         assert!(memory.resize(0x400).unwrap());
         let larger = Memory::new_with_limit(&story, MAX_MEMORY_SIZE * 2).unwrap();
         assert_eq!(larger.maximum(), MAX_MEMORY_SIZE * 2);
+    }
+
+    #[test]
+    fn memory_stores_only_the_writable_range() {
+        let story = story();
+        let memory = Memory::new_with_limit(&story, 0x400).unwrap();
+
+        assert_eq!(memory.len(), 0x200);
+        assert_eq!(memory.bytes.len(), 0x100);
+        assert_eq!(memory.read8(0x20).unwrap(), story.image[0x20]);
+        assert_eq!(memory.read8(0x100).unwrap(), 0);
     }
 
     #[test]
