@@ -481,4 +481,38 @@ mod tests {
         assert_eq!(restored.hyperlink_at([1, 1]), Some(42));
         assert_eq!(restored.hyperlink_at([2, 2]), Some(0));
     }
+
+    #[test]
+    #[ignore = "manual performance measurement"]
+    fn benchmark_canvas_rasterize() {
+        let context = egui::Context::default();
+        let source = ImageAsset::new(
+            &context,
+            Arc::new(image::RgbaImage::from_pixel(
+                64,
+                64,
+                image::Rgba([255, 0, 0, 128]),
+            )),
+        );
+        let mut canvas = Canvas::new([512, 384], 0x0000ff);
+        for index in 0..64 {
+            canvas.draw(
+                &context,
+                source.clone(),
+                [((index % 8) * 64) as i32, ((index / 8) * 48) as i32],
+                [96, 96],
+            );
+        }
+        let started = std::time::Instant::now();
+        let pixels = canvas.rasterize();
+        let elapsed = started.elapsed();
+        assert_eq!((pixels.width(), pixels.height()), (512, 384));
+        eprintln!(
+            "BENCHMARK name=canvas_rasterize width={} height={} operations={} elapsed_ns={}",
+            canvas.size[0],
+            canvas.size[1],
+            canvas.operations.len(),
+            elapsed.as_nanos()
+        );
+    }
 }

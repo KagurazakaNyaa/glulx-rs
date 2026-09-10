@@ -1206,6 +1206,73 @@ mod cache_tests {
     }
 
     #[test]
+    #[ignore = "manual performance measurement"]
+    fn benchmark_text_layout() {
+        let chars = 16_384;
+        let context = egui::Context::default();
+        let view = WindowView {
+            id: 1,
+            kind: 3,
+            rect: [0, 0, 640, 1200],
+            runs: vec![crate::vm::TextRun {
+                text: "A paragraph that wraps beside a narrow window. ".repeat(chars / 47),
+                style: 0,
+                hyperlink: 0,
+                image: None,
+                flow_break: false,
+            }],
+            grid: String::new(),
+            grid_cells: vec![],
+            grid_size: [0, 0],
+            grid_cursor: [0, 0],
+            appearance: Default::default(),
+            hints: Default::default(),
+        };
+        let mut images = ImageCache::default();
+        let mut decoder = ImageDecodeWorker::default();
+        let mut results = HashMap::new();
+        let mut layouts = LayoutCache::default();
+        let settings = PlayerSettings::default();
+        let mut render = |layouts: &mut LayoutCache| {
+            let started = std::time::Instant::now();
+            let mut output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(640.0, 1200.0),
+                    )),
+                    ..Default::default()
+                },
+                |root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        show(
+                            ui,
+                            &view,
+                            &settings,
+                            None,
+                            &mut images,
+                            &mut decoder,
+                            &mut results,
+                            layouts,
+                            1,
+                        );
+                    });
+                },
+            );
+            output.textures_delta.clear();
+            started.elapsed()
+        };
+        let cold = render(&mut layouts);
+        let warm = render(&mut layouts);
+        assert!(layouts.0.contains_key(&1));
+        eprintln!(
+            "BENCHMARK name=text_layout chars={chars} cold_ns={} warm_ns={}",
+            cold.as_nanos(),
+            warm.as_nanos()
+        );
+    }
+
+    #[test]
     fn text_image_cache_evicts_payloads_and_zero_disables_retention() {
         let image = crate::vm::tests::image_with_program(&[0x81, 0x20]);
         let pixels = image::RgbaImage::new(512, 512);
