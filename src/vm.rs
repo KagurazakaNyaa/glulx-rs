@@ -3387,10 +3387,7 @@ pub(crate) mod tests {
         let mut vm = Vm::new(story).unwrap();
         let iterations = std::hint::black_box(5_000_000usize);
         let started = std::time::Instant::now();
-        assert_eq!(
-            vm.run_steps(iterations).unwrap(),
-            RunState::Running
-        );
+        assert_eq!(vm.run_steps(iterations).unwrap(), RunState::Running);
         assert_eq!(vm.pc, 0x43);
         let elapsed = started.elapsed();
         eprintln!(

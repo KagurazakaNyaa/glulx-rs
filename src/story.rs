@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use thiserror::Error;
@@ -148,7 +149,7 @@ pub struct Story {
     pub path: Option<PathBuf>,
     pub title: String,
     pub header: StoryHeader,
-    pub image: Vec<u8>,
+    pub image: Arc<Vec<u8>>,
     /// The original story container, separate from any selected resources.
     pub container: Option<Vec<u8>>,
     #[serde(default)]
@@ -183,7 +184,7 @@ impl Story {
     ) -> Result<Self, StoryError> {
         let path = path.as_ref();
         let bytes = std::fs::read(path)?;
-        let mut story = Self::from_bytes(&bytes, path.file_stem().and_then(|s| s.to_str()))?;
+        let mut story = Self::from_owned_bytes(bytes, path.file_stem().and_then(|s| s.to_str()))?;
         story.path = Some(path.to_path_buf());
         let resource_path = match selection {
             ResourceSelection::Path(path) => Some(path),
@@ -197,20 +198,23 @@ impl Story {
     }
 
     pub fn from_bytes(bytes: &[u8], title: Option<&str>) -> Result<Self, StoryError> {
+        Self::from_owned_bytes(bytes.to_vec(), title)
+    }
+
+    fn from_owned_bytes(bytes: Vec<u8>, title: Option<&str>) -> Result<Self, StoryError> {
         let (image, container, resources) = if bytes.starts_with(FORM_MAGIC) {
-            (
-                extract_glul_chunk(bytes)?.to_vec(),
-                Some(bytes.to_vec()),
-                parse_resource_index(bytes)?,
-            )
+            let resources = parse_resource_index(&bytes)?;
+            let image = extract_glul_chunk(&bytes)?.to_vec();
+            (image, Some(bytes), resources)
         } else {
-            (bytes.to_vec(), None, HashMap::new())
+            (bytes, None, HashMap::new())
         };
         let header = StoryHeader::parse(&image)?;
         let mut image = image;
         image.truncate(header.ext_start as usize);
+        let image = Arc::new(image);
         if let Some(bytes) = &container {
-            validate_blorb_identity(bytes, &image, false)?;
+            validate_blorb_identity(bytes, image.as_slice(), false)?;
         }
         let mut story = Self {
             path: None,
@@ -232,7 +236,7 @@ impl Story {
     /// IFhd must match the first 128 bytes of the original executable.
     pub fn attach_blorb(&mut self, bytes: &[u8]) -> Result<(), StoryError> {
         let resources = parse_resource_index(bytes)?;
-        validate_blorb_identity(bytes, &self.image, true)?;
+        validate_blorb_identity(bytes, self.image.as_slice(), true)?;
         let original_title = self
             .external_resources
             .as_ref()
@@ -282,7 +286,7 @@ impl Story {
             .as_ref()
             .map_or(&self.title, |external| &external.original_title);
         let mut story = Self::from_bytes(
-            self.container.as_deref().unwrap_or(&self.image),
+            self.container.as_deref().unwrap_or(self.image.as_slice()),
             Some(title),
         )?;
         if let Some(external) = &self.external_resources {
@@ -637,7 +641,10 @@ pub(crate) mod tests {
         blorb.extend_from_slice(b"GLUL");
         blorb.extend_from_slice(&(image.len() as u32).to_be_bytes());
         blorb.extend_from_slice(&image);
-        assert_eq!(Story::from_bytes(&blorb, None).unwrap().image, image);
+        assert_eq!(
+            Story::from_bytes(&blorb, None).unwrap().image.as_slice(),
+            image.as_slice()
+        );
     }
 
     #[test]
@@ -829,7 +836,7 @@ pub(crate) mod tests {
         let mut story = Story::from_bytes(&image, Some("Executable")).unwrap();
         let header = story.header;
         story.attach_blorb(&resources).unwrap();
-        assert_eq!(story.image, image);
+        assert_eq!(story.image.as_slice(), image.as_slice());
         assert_eq!(story.header, header);
         assert!(story.container.is_none());
         assert_eq!(story.title, "Resources");

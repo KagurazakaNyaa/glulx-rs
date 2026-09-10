@@ -223,7 +223,7 @@ mod tests {
             assert_eq!(restored.story_path(), Some(story_path.as_path()));
             assert_eq!(restored.resource_path(), Some(resource_path.as_path()));
             assert_eq!(restored.story_title(), "External title");
-            assert_eq!(restored.story.image, image);
+            assert_eq!(restored.story.image.as_slice(), image.as_slice());
             assert_eq!(restored.story.container.is_some(), bundled_story);
             assert_eq!(restored.memory.read32(0x100).unwrap(), 0x12345678);
             assert_eq!(restored.image_resource(2), Some(&b"picture"[..]));
@@ -262,7 +262,7 @@ mod tests {
                 .remove("external_resources");
             let restored: Vm = serde_json::from_value(serialized).unwrap();
             let restored = restored.validate_session().unwrap();
-            assert_eq!(restored.story.image, image);
+            assert_eq!(restored.story.image.as_slice(), image.as_slice());
             assert_eq!(restored.story_title(), "Legacy");
             assert_eq!(
                 restored.story.resource(*b"Data", 1),

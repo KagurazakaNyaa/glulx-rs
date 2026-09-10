@@ -62,7 +62,7 @@ pub struct Memory {
     #[serde(skip, default = "default_memory_limit")]
     maximum: u32,
     bytes: Vec<u8>,
-    initial: Vec<u8>,
+    initial: Arc<Vec<u8>>,
     ram_start: u32,
     ext_start: u32,
     original_end: u32,
@@ -154,7 +154,7 @@ impl Memory {
         Ok(Self {
             maximum,
             bytes,
-            initial: story.image.clone(),
+            initial: Arc::clone(&story.image),
             ram_start: story.header.ram_start,
             ext_start: story.header.ext_start,
             original_end: story.header.end_mem,

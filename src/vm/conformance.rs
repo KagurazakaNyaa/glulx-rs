@@ -1,5 +1,6 @@
 use super::tests::{image_with_program, push_glk_arguments};
 use super::*;
+use std::sync::Arc;
 
 fn vm() -> Vm {
     Vm::new(Story::from_bytes(&image_with_program(&[0x81, 0x20]), None).unwrap()).unwrap()
@@ -299,7 +300,7 @@ fn random_ranges_determinism_verify_and_capabilities() {
     assert_eq!(sequences[0], sequences[1]);
     step(&mut vm, 0x121, &[], &[8]);
     assert_eq!(vm.stack.pop_u32().unwrap(), 0);
-    vm.story.image[40] ^= 1;
+    Arc::make_mut(&mut vm.story.image)[40] ^= 1;
     step(&mut vm, 0x121, &[], &[8]);
     assert_eq!(vm.stack.pop_u32().unwrap(), 1);
     for selector in [9, 11, 12, 13] {
