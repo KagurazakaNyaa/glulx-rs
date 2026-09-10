@@ -205,7 +205,11 @@ impl Vm {
         Ok([3, window, length, terminator])
     }
     pub(super) fn select_poll(&mut self, address: u32) -> Result<(), VmError> {
-        self.presentation_revision = self.presentation_revision.wrapping_add(1);
+        self.poll_calls = self.poll_calls.wrapping_add(1);
+        if std::mem::take(&mut self.presentation_pending) {
+            self.presentation_revision = self.presentation_revision.wrapping_add(1);
+            self.poll_yields = self.poll_yields.wrapping_add(1);
+        }
         self.poll_events()?;
         let event = self
             .events
@@ -215,6 +219,12 @@ impl Vm {
             .unwrap_or([0, 0, 0, 0]);
         self.write_event(address, event)
     }
+    /// Wake at the actual timer deadline, rather than the host's idle cadence.
+    pub(crate) fn next_timer_delay(&self) -> Option<Duration> {
+        self.timer
+            .map(|(_, next)| next.saturating_duration_since(Instant::now()))
+    }
+
     pub fn poll_events(&mut self) -> Result<(), VmError> {
         self.poll_sound();
         if let Some((interval, next)) = &mut self.timer
@@ -244,6 +254,7 @@ impl Vm {
             "resize {:?} -> {:?} state={:?}",
             self.viewport_size, size, self.state
         ));
+        self.presentation_pending = true;
         self.viewport_size = size;
         self.layout_windows();
         let limits: Vec<_> = self
@@ -284,6 +295,7 @@ impl Vm {
         address: u32,
         destination: Destination,
     ) -> Result<(), VmError> {
+        self.presentation_pending = false;
         self.presentation_revision = self.presentation_revision.wrapping_add(1);
         self.pending_select = Some(PendingSelect {
             event_address: address,

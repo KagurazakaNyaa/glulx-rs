@@ -429,6 +429,14 @@ pub struct Vm {
     decoded_picture: Option<(u32, std::sync::Arc<image::RgbaImage>)>,
     #[serde(skip)]
     presentation_revision: u64,
+    #[serde(skip)]
+    presentation_pending: bool,
+    #[serde(skip)]
+    instructions_executed: u64,
+    #[serde(skip)]
+    poll_calls: u64,
+    #[serde(skip)]
+    poll_yields: u64,
     graphical_host: bool,
     #[serde(skip)]
     terminal_host: bool,
@@ -539,6 +547,10 @@ impl Vm {
             image_info: BTreeMap::new(),
             decoded_picture: None,
             presentation_revision: 0,
+            presentation_pending: false,
+            instructions_executed: 0,
+            poll_calls: 0,
+            poll_yields: 0,
             graphical_host: true,
             terminal_host: false,
             audio: sound::AudioDevice::default(),
@@ -676,6 +688,7 @@ impl Vm {
             {
                 break;
             }
+            self.instructions_executed = self.instructions_executed.wrapping_add(1);
             self.step()?;
         }
         Ok(self.state)
@@ -683,7 +696,7 @@ impl Vm {
 
     pub(crate) fn diagnostic_summary(&self) -> String {
         format!(
-            "vm={:?} pc={:#x} viewport={:?} windows={} requests={} events={:?} select={} graphics={}",
+            "vm={:?} pc={:#x} viewport={:?} windows={} requests={} events={:?} select={} graphics={} instructions={} polls={} poll_yields={}",
             self.state,
             self.pc,
             self.viewport_size,
@@ -691,7 +704,10 @@ impl Vm {
             self.requests.len(),
             self.events.iter().map(|event| event[0]).collect::<Vec<_>>(),
             self.pending_select.is_some(),
-            self.graphics.len()
+            self.graphics.len(),
+            self.instructions_executed,
+            self.poll_calls,
+            self.poll_yields
         )
     }
 
@@ -704,6 +720,7 @@ impl Vm {
 
     pub fn restart(&mut self) -> Result<(), VmError> {
         self.presentation_revision = 0;
+        self.presentation_pending = true;
         if let Some(events) = &mut self.text_buffer_events {
             events.clear();
         }
@@ -1754,6 +1771,7 @@ impl Vm {
     }
 
     fn glk_write_char(&mut self, stream: u32, character: char) {
+        self.presentation_pending = true;
         let stream = if stream == 0 {
             self.glk_current_stream
         } else {
@@ -1869,6 +1887,12 @@ impl Vm {
         argument_count: u32,
         destination: Destination,
     ) -> Result<(), VmError> {
+        // Conservatively retain presentation boundaries after other host calls
+        // (including input/window/media changes). A poll by itself is not a
+        // change and must not throttle computation to one poll per UI frame.
+        if selector != 0xc1 {
+            self.presentation_pending = true;
+        }
         let mut arguments = Vec::with_capacity(argument_count as usize);
         for _ in 0..argument_count {
             arguments.push(self.stack.pop_u32()?);
@@ -2378,6 +2402,7 @@ impl Vm {
             return;
         }
         self.text_metrics = Some(metrics);
+        self.presentation_revision = self.presentation_revision.wrapping_add(1);
         self.layout_windows();
         if self.glk_root != 0 && !self.events.iter().any(|event| event[0] == 5) {
             self.events.push_back([5, 0, 0, 0]);
@@ -3195,6 +3220,43 @@ pub(crate) mod tests {
         assert!(restored.set_memory_limit(0x200).is_err());
         restored.set_memory_limit(0x400).unwrap();
         assert_eq!(restored.validate_session().unwrap().memory.maximum(), 0x400);
+    }
+
+    #[test]
+    fn select_poll_still_publishes_output_before_following_instructions() {
+        let poll = [0x40, 0x82, 1, 0, 0x81, 0x30, 0x12, 0, 0, 0xc1, 1];
+        let mut code = vec![0x81, 0x49, 0x11, 2, 0, 0x70, 1, b'A'];
+        code.extend(poll);
+        code.extend([0x70, 1, b'B']);
+        code.extend(poll);
+        code.extend([0x81, 0x20]);
+        let mut vm = Vm::new(Story::from_bytes(&image_with_program(&code), None).unwrap()).unwrap();
+        assert_eq!(vm.run_presentation_steps(1024).unwrap(), RunState::Running);
+        assert_eq!(vm.take_output(), "A");
+        assert_eq!(vm.run_presentation_steps(1024).unwrap(), RunState::Running);
+        assert_eq!(vm.take_output(), "B");
+        assert_eq!(vm.run_presentation_steps(1024).unwrap(), RunState::Halted);
+    }
+
+    #[test]
+    fn empty_select_poll_does_not_force_one_render_frame_per_poll() {
+        let mut code = Vec::new();
+        for _ in 0..16 {
+            code.extend([0x40, 0x82, 0x01, 0x00]); // event address
+            code.extend([0x81, 0x30, 0x12, 0, 0, 0xc1, 1]); // select_poll
+        }
+        code.extend([0x81, 0x20]);
+        let mut vm = Vm::new(Story::from_bytes(&image_with_program(&code), None).unwrap()).unwrap();
+        let mut slices = 0;
+        while vm.state() == RunState::Running {
+            vm.run_presentation_steps(1024).unwrap();
+            slices += 1;
+        }
+        eprintln!("16 empty polls required {slices} presentation slices");
+        assert_eq!(
+            slices, 1,
+            "nonblocking event polls must not wait for a new render frame"
+        );
     }
 
     #[test]

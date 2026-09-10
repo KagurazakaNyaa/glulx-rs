@@ -13,6 +13,8 @@ struct State {
     vm: String,
     frames: u64,
     slices: u64,
+    vm_time: Duration,
+    ui_time: Duration,
 }
 
 struct Logger {
@@ -37,6 +39,8 @@ pub fn start(path: &Path) -> io::Result<()> {
                 vm: String::new(),
                 frames: 0,
                 slices: 0,
+                vm_time: Duration::ZERO,
+                ui_time: Duration::ZERO,
             }),
             started: now,
         })
@@ -57,19 +61,23 @@ pub fn start(path: &Path) -> io::Result<()> {
     std::thread::Builder::new()
         .name("diagnostic-heartbeat".into())
         .spawn(|| {
+            let mut previous = (Instant::now(), Duration::ZERO, Duration::ZERO, 0, 0);
             loop {
                 std::thread::sleep(Duration::from_secs(2));
                 let logger = LOGGER.get().unwrap();
                 let message = {
                     let state = logger.state.lock().unwrap_or_else(|e| e.into_inner());
-                    format!(
-                        "heartbeat stage={} stage_ms={} frames={} slices={} {}",
-                        state.stage,
-                        state.since.elapsed().as_millis(),
-                        state.frames,
-                        state.slices,
-                        state.vm
-                    )
+                    let now = Instant::now();
+                    let message = format!(
+                        "heartbeat stage={} stage_ms={} frames={} slices={} interval_ms={} vm_ms={} ui_ms={} frame_delta={} slice_delta={} {}",
+                        state.stage, state.since.elapsed().as_millis(), state.frames, state.slices,
+                        now.duration_since(previous.0).as_millis(),
+                        state.vm_time.saturating_sub(previous.1).as_millis(),
+                        state.ui_time.saturating_sub(previous.2).as_millis(),
+                        state.frames - previous.3, state.slices - previous.4, state.vm
+                    );
+                    previous = (now, state.vm_time, state.ui_time, state.frames, state.slices);
+                    message
                 };
                 record(format_args!("{message}"));
             }
@@ -125,6 +133,11 @@ impl Drop for Stage {
                     .state
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
+                match name {
+                    "vm-slice" => state.vm_time += elapsed,
+                    "ui" => state.ui_time += elapsed,
+                    _ => {}
+                }
                 state.stage = previous;
                 state.since = since;
             }
