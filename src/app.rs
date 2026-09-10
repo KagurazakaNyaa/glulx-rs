@@ -237,6 +237,7 @@ pub struct PlayerApp {
     presented_revision: u64,
     text_layout_revisions: BTreeMap<u32, u64>,
     text_layouts: text_buffer::LayoutCache,
+    grid_galleys: text_grid::GalleyCache,
     presented_state: RunState,
     image_cache: HashMap<u32, (std::sync::Arc<canvas::ImageAsset>, u64)>,
     image_cache_tick: u64,
@@ -358,6 +359,7 @@ impl PlayerApp {
             presented_revision: 0,
             text_layout_revisions: BTreeMap::new(),
             text_layouts: Default::default(),
+            grid_galleys: Default::default(),
             presented_state: RunState::Running,
             image_cache: HashMap::new(),
             image_cache_tick: 0,
@@ -1164,8 +1166,14 @@ impl PlayerApp {
                                                 maximum_length: vm.line_input_max_len(),
                                             })
                                     });
-                                    let response =
-                                        text_grid::show(ui, rect, view, &self.settings, editor);
+                                    let response = text_grid::show(
+                                        ui,
+                                        rect,
+                                        view,
+                                        &self.settings,
+                                        editor,
+                                        &mut self.grid_galleys,
+                                    );
                                     if let Some([x, y]) = response.cell {
                                         click = Some((view.id, x, y));
                                     }
@@ -1654,6 +1662,7 @@ impl eframe::App for PlayerApp {
             if let Some(vm) = &mut self.vm {
                 vm.set_text_metrics(self.fonts.metrics.clone());
             }
+            self.grid_galleys.clear();
             self.pending_font_metrics = false;
         }
         if context.input_mut(|input| {

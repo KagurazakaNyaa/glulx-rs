@@ -1,11 +1,82 @@
 //! A grid cell has identical geometry for text, styles, editing and hit tests.
 
-use std::sync::Arc;
+use std::{collections::HashMap, hash::Hash, sync::Arc};
 
 use eframe::egui::{self, RichText};
 
 use super::{PlayerSettings, color_word, rgb};
 use crate::vm::{GRID_CELL_HEIGHT, GRID_CELL_WIDTH, GridCell, WindowView};
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct GridGalleyKey {
+    character: char,
+    style: u32,
+    hyperlink: u32,
+    font_size: u32,
+    weight: i32,
+    oblique: bool,
+    proportional: bool,
+    foreground: [u8; 4],
+}
+
+#[derive(Default)]
+pub(super) struct GalleyCache {
+    entries: HashMap<GridGalleyKey, Arc<egui::Galley>>,
+}
+
+impl GalleyCache {
+    const MAX_ENTRIES: usize = 8192;
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    fn get(
+        &mut self,
+        ui: &egui::Ui,
+        cell: &GridCell,
+        view: &WindowView,
+        foreground: egui::Color32,
+    ) -> Arc<egui::Galley> {
+        let style = view.style(cell.style);
+        let key = GridGalleyKey {
+            character: cell.character,
+            style: cell.style,
+            hyperlink: cell.hyperlink,
+            font_size: style.font_size.to_bits(),
+            weight: style.weight,
+            oblique: style.oblique,
+            proportional: style.proportional,
+            foreground: foreground.to_array(),
+        };
+        if let Some(galley) = self.entries.get(&key) {
+            return galley.clone();
+        }
+        let mut rich = RichText::new(cell.character)
+            .family(super::fonts::family(style))
+            .size(style.font_size)
+            .color(foreground);
+        if style.oblique {
+            rich = rich.italics();
+        }
+        if cell.hyperlink != 0 {
+            rich = rich.underline();
+        }
+        let mut job = egui::text::LayoutJob::default();
+        rich.append_to(
+            &mut job,
+            ui.style(),
+            egui::FontSelection::Default,
+            egui::Align::BOTTOM,
+        );
+        let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
+        if self.entries.len() >= Self::MAX_ENTRIES {
+            self.entries.clear();
+        }
+        self.entries.insert(key, galley.clone());
+        galley
+    }
+}
 
 pub(super) struct GridEditor<'a> {
     pub text: &'a mut String,
@@ -66,6 +137,7 @@ fn paint_cell(
     cell: &GridCell,
     view: &WindowView,
     settings: &PlayerSettings,
+    galleys: &mut GalleyCache,
 ) {
     let style = view.style(cell.style);
     let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
@@ -78,24 +150,7 @@ fn paint_cell(
     } else {
         color_word(style.foreground)
     };
-    let mut rich = RichText::new(cell.character)
-        .family(super::fonts::family(style))
-        .size(style.font_size)
-        .color(foreground);
-    if style.oblique {
-        rich = rich.italics();
-    }
-    if cell.hyperlink != 0 {
-        rich = rich.underline();
-    }
-    let mut job = egui::text::LayoutJob::default();
-    rich.append_to(
-        &mut job,
-        ui.style(),
-        egui::FontSelection::Default,
-        egui::Align::BOTTOM,
-    );
-    let galley = fit_galley(ui.fonts_mut(|fonts| fonts.layout_job(job)), rect.width());
+    let galley = fit_galley(galleys.get(ui, cell, view, foreground), rect.width());
     let origin = rect.min + (rect.size() - galley.size()) * 0.5;
     if style.weight > 0 {
         // Egui's `RichText::strong` only changes the text color. A second
@@ -111,6 +166,7 @@ pub(super) fn show(
     view: &WindowView,
     settings: &PlayerSettings,
     editor: Option<GridEditor<'_>>,
+    galleys: &mut GalleyCache,
 ) -> GridResponse {
     let mut result = GridResponse::default();
     ui.painter()
@@ -124,7 +180,7 @@ pub(super) fn show(
         let y = index as u32 / view.grid_size[0];
         let rect = cell_rect(rect, x, y);
         if rect.intersects(ui.clip_rect()) {
-            paint_cell(ui, rect, cell, view, settings);
+            paint_cell(ui, rect, cell, view, settings, galleys);
         }
     }
 
@@ -230,6 +286,7 @@ mod tests {
     ) -> (egui::FullOutput, GridResponse) {
         let mut editor = editor;
         let mut response = GridResponse::default();
+        let mut galleys = GalleyCache::default();
         let mut output = context.run_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
@@ -243,7 +300,14 @@ mod tests {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     let rect =
                         egui::Rect::from_min_size(egui::pos2(28.0, 22.0), egui::vec2(80.0, 48.0));
-                    response = show(ui, rect, view, &PlayerSettings::default(), editor.take());
+                    response = show(
+                        ui,
+                        rect,
+                        view,
+                        &PlayerSettings::default(),
+                        editor.take(),
+                        &mut galleys,
+                    );
                 });
             },
         );
