@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    ops::{Deref, DerefMut, Range},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -135,6 +136,68 @@ pub enum ResourceSelection {
     Path(PathBuf),
 }
 
+#[derive(Debug, Clone)]
+pub struct StoryImage {
+    backing: Arc<Vec<u8>>,
+    range: Range<usize>,
+}
+
+impl PartialEq for StoryImage {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl Eq for StoryImage {}
+
+impl StoryImage {
+    fn owned(bytes: Vec<u8>) -> Self {
+        let end = bytes.len();
+        Self {
+            backing: Arc::new(bytes),
+            range: 0..end,
+        }
+    }
+
+    fn from_backing(backing: Arc<Vec<u8>>, range: Range<usize>) -> Self {
+        Self { backing, range }
+    }
+
+    fn truncate(&mut self, length: usize) {
+        self.range.end = self.range.start + length;
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        &self.backing[self.range.clone()]
+    }
+}
+
+impl Deref for StoryImage {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+impl DerefMut for StoryImage {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut Arc::make_mut(&mut self.backing)[self.range.clone()]
+    }
+}
+
+impl serde::Serialize for StoryImage {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.as_slice().serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for StoryImage {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::owned(Vec::<u8>::deserialize(deserializer)?))
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 struct ExternalResources {
     path: Option<PathBuf>,
@@ -149,9 +212,9 @@ pub struct Story {
     pub path: Option<PathBuf>,
     pub title: String,
     pub header: StoryHeader,
-    pub image: Arc<Vec<u8>>,
+    pub image: Arc<StoryImage>,
     /// The original story container, separate from any selected resources.
-    pub container: Option<Vec<u8>>,
+    pub container: Option<Arc<Vec<u8>>>,
     #[serde(default)]
     external_resources: Option<ExternalResources>,
     #[serde(skip)]
@@ -160,9 +223,9 @@ pub struct Story {
 
 impl Story {
     pub(crate) fn snapshot_byte_len(&self) -> usize {
-        self.image
-            .len()
-            .saturating_add(self.container.as_ref().map_or(0, Vec::len))
+        self.container
+            .as_ref()
+            .map_or(self.image.len(), |bytes| bytes.len())
             .saturating_add(
                 self.external_resources
                     .as_ref()
@@ -202,15 +265,18 @@ impl Story {
     }
 
     fn from_owned_bytes(bytes: Vec<u8>, title: Option<&str>) -> Result<Self, StoryError> {
-        let (image, container, resources) = if bytes.starts_with(FORM_MAGIC) {
+        let (backing, image_range, container, resources) = if bytes.starts_with(FORM_MAGIC) {
             let resources = parse_resource_index(&bytes)?;
-            let image = extract_glul_chunk(&bytes)?.to_vec();
-            (image, Some(bytes), resources)
+            let image_range = extract_glul_range(&bytes)?;
+            let backing = Arc::new(bytes);
+            (Arc::clone(&backing), image_range, Some(backing), resources)
         } else {
-            (bytes, None, HashMap::new())
+            let end = bytes.len();
+            let backing = Arc::new(bytes);
+            (backing, 0..end, None, HashMap::new())
         };
+        let mut image = StoryImage::from_backing(backing, image_range);
         let header = StoryHeader::parse(&image)?;
-        let mut image = image;
         image.truncate(header.ext_start as usize);
         let image = Arc::new(image);
         if let Some(bytes) = &container {
@@ -286,7 +352,9 @@ impl Story {
             .as_ref()
             .map_or(&self.title, |external| &external.original_title);
         let mut story = Self::from_bytes(
-            self.container.as_deref().unwrap_or(self.image.as_slice()),
+            self.container
+                .as_ref()
+                .map_or(self.image.as_slice(), |bytes| bytes.as_slice()),
             Some(title),
         )?;
         if let Some(external) = &self.external_resources {
@@ -301,7 +369,7 @@ impl Story {
         self.external_resources
             .as_ref()
             .map(|external| external.bytes.as_slice())
-            .or(self.container.as_deref())
+            .or(self.container.as_ref().map(|bytes| bytes.as_slice()))
     }
 
     pub fn metadata(&self) -> Metadata {
@@ -478,19 +546,19 @@ fn parse_resource_index(bytes: &[u8]) -> Result<ResourceIndex, StoryError> {
     Ok(resources)
 }
 
-fn extract_glul_chunk(bytes: &[u8]) -> Result<&[u8], StoryError> {
+fn extract_glul_range(bytes: &[u8]) -> Result<Range<usize>, StoryError> {
     let chunks = blorb_chunks(bytes)?;
     let resources = parse_resource_index(bytes)?;
     if let Some(&(start, end)) = resources.get(&(u32::from_be_bytes(*b"Exec"), 0)) {
         if &bytes[start - 8..start - 4] != b"GLUL" {
             return Err(StoryError::MissingExecutable);
         }
-        return Ok(&bytes[start..end]);
+        return Ok(start..end);
     }
     chunks
         .into_iter()
         .find(|(start, _)| &bytes[*start..*start + 4] == b"GLUL")
-        .map(|(start, end)| &bytes[start + 8..end])
+        .map(|(start, end)| start + 8..end)
         .ok_or(StoryError::MissingExecutable)
 }
 
@@ -645,6 +713,18 @@ pub(crate) mod tests {
             Story::from_bytes(&blorb, None).unwrap().image.as_slice(),
             image.as_slice()
         );
+    }
+
+    #[test]
+    fn bundled_story_shares_image_with_container_storage() {
+        let image = minimal_image();
+        let blorb = resource_blorb(&[((*b"GLUL", Some((*b"Exec", 0))), &image)]);
+        let story = Story::from_bytes(&blorb, None).unwrap();
+
+        assert!(Arc::ptr_eq(
+            &story.image.backing,
+            story.container.as_ref().unwrap()
+        ));
     }
 
     #[test]

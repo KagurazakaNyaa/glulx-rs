@@ -589,7 +589,7 @@ mod tests {
     #[test]
     fn corrupt_picture_is_deferred_to_the_host_decoder() {
         let mut vm = pictured_vm();
-        let data = vm.story.container.as_mut().unwrap();
+        let data = std::sync::Arc::make_mut(vm.story.container.as_mut().unwrap());
         let idat = data.windows(4).position(|part| part == b"IDAT").unwrap();
         data[idat + 4] ^= 0xff;
         let window = vm.open_window(&[0, 0, 0, 5, 0]);

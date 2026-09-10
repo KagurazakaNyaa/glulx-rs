@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::{Story, VmError};
+use crate::{Story, VmError, story::StoryImage};
 
 pub(crate) type MemoryPage = Arc<Vec<u8>>;
 
@@ -57,12 +57,24 @@ fn default_memory_limit() -> u32 {
     MAX_MEMORY_SIZE
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+enum MemoryLayout {
+    LegacyAbsolute,
+    RamRelative,
+}
+
+fn default_memory_layout() -> MemoryLayout {
+    MemoryLayout::LegacyAbsolute
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct Memory {
     #[serde(skip, default = "default_memory_limit")]
     maximum: u32,
     bytes: Vec<u8>,
-    initial: Arc<Vec<u8>>,
+    initial: Arc<StoryImage>,
+    #[serde(default = "default_memory_layout")]
+    layout: MemoryLayout,
     ram_start: u32,
     ext_start: u32,
     original_end: u32,
@@ -140,11 +152,12 @@ impl Memory {
     pub(crate) fn validate_session(&mut self, story: &Story) -> Result<(), VmError> {
         // Older desktop sessions stored Memory.bytes from address zero. Convert
         // that representation before validating the current RAM-relative one.
-        if self.bytes.len() >= self.original_end as usize {
+        if self.layout == MemoryLayout::LegacyAbsolute {
             if self.bytes.len() < self.ram_start as usize {
                 return Err(VmError::InvalidSave);
             }
             self.bytes = self.bytes.split_off(self.ram_start as usize);
+            self.layout = MemoryLayout::RamRelative;
         }
         if self.len() > self.maximum
             || self.ram_start != story.header.ram_start
@@ -186,6 +199,7 @@ impl Memory {
             maximum,
             bytes,
             initial: Arc::clone(&story.image),
+            layout: MemoryLayout::RamRelative,
             ram_start: story.header.ram_start,
             ext_start: story.header.ext_start,
             original_end: story.header.end_mem,
