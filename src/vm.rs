@@ -155,6 +155,7 @@ impl UndoState {
 const WINTYPE_TEXT_BUFFER: u32 = 3;
 const WINTYPE_TEXT_GRID: u32 = 4;
 const WINTYPE_GRAPHICS: u32 = 5;
+const MAX_TEXT_BUFFER_CHARS: usize = 131_072;
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 struct GlkWindow {
@@ -248,6 +249,35 @@ impl GlkWindow {
             hints: BTreeMap::new(),
             echo_line: true,
             terminators: Vec::new(),
+        }
+    }
+
+    fn trim_text_history(&mut self) {
+        if self.kind != WINTYPE_TEXT_BUFFER {
+            return;
+        }
+        let mut total = self
+            .runs
+            .iter()
+            .map(|run| run.text.chars().count())
+            .sum::<usize>();
+        while total > MAX_TEXT_BUFFER_CHARS {
+            let Some(first) = self.runs.first_mut() else {
+                break;
+            };
+            let length = first.text.chars().count();
+            if length == 0 {
+                self.runs.remove(0);
+                continue;
+            }
+            let excess = total - MAX_TEXT_BUFFER_CHARS;
+            if excess >= length {
+                total -= length;
+                self.runs.remove(0);
+            } else {
+                first.text = first.text.chars().skip(excess).collect();
+                total -= excess;
+            }
         }
     }
 
@@ -1829,6 +1859,7 @@ impl Vm {
                             hyperlink: window.hyperlink,
                         });
                     }
+                    window.trim_text_history();
                     self.output.push(character);
                     if window.style != 8
                         && let Some(events) = &mut self.text_buffer_events
@@ -2945,6 +2976,27 @@ pub(crate) mod tests {
         vm.set_graphical_host(true);
         assert_eq!(vm.glk_gestalt(22, 0), 1);
         assert_eq!(vm.glk_gestalt(23, 0), 0);
+    }
+
+    #[test]
+    fn text_buffer_history_is_bounded_without_truncating_glk_output() {
+        let mut vm = Vm::new(
+            Story::from_bytes(&image_with_program(&[0x81, 0x20]), None).unwrap(),
+        )
+        .unwrap();
+        let window = vm.open_window(&[0, 0, 0, WINTYPE_TEXT_BUFFER, 0]);
+        let stream = vm.glk_windows[&window].stream;
+        let text: String = std::iter::repeat_n('x', MAX_TEXT_BUFFER_CHARS + 1).collect();
+        vm.glk_write_text(stream, &text);
+        assert_eq!(vm.output.chars().count(), MAX_TEXT_BUFFER_CHARS + 1);
+        assert_eq!(
+            vm.glk_windows[&window]
+                .runs
+                .iter()
+                .map(|run| run.text.chars().count())
+                .sum::<usize>(),
+            MAX_TEXT_BUFFER_CHARS
+        );
     }
 
     #[test]

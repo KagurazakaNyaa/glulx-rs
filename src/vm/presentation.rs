@@ -304,6 +304,7 @@ impl Vm {
                 image: Some(image),
                 flow_break: false,
             });
+            window.trim_text_history();
         } else {
             let size = image.dimensions(window.width);
             if size[0] != 0 && size[1] != 0 {
@@ -339,6 +340,7 @@ impl Vm {
                 image: None,
                 flow_break: true,
             });
+            window.trim_text_history();
         }
     }
 
