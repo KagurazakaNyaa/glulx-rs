@@ -2980,10 +2980,8 @@ pub(crate) mod tests {
 
     #[test]
     fn text_buffer_history_is_bounded_without_truncating_glk_output() {
-        let mut vm = Vm::new(
-            Story::from_bytes(&image_with_program(&[0x81, 0x20]), None).unwrap(),
-        )
-        .unwrap();
+        let mut vm =
+            Vm::new(Story::from_bytes(&image_with_program(&[0x81, 0x20]), None).unwrap()).unwrap();
         let window = vm.open_window(&[0, 0, 0, WINTYPE_TEXT_BUFFER, 0]);
         let stream = vm.glk_windows[&window].stream;
         let text: String = std::iter::repeat_n('x', MAX_TEXT_BUFFER_CHARS + 1).collect();
