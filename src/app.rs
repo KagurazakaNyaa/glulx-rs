@@ -235,6 +235,7 @@ pub struct PlayerApp {
     dirty_graphics: HashSet<u32>,
     presented_graphics: BTreeMap<u32, std::sync::Arc<DisplayedGraphics>>,
     presented_views: std::sync::Arc<[crate::vm::WindowView]>,
+    presented_content_revisions: BTreeMap<u32, u64>,
     presented_revision: u64,
     text_layout_revisions: BTreeMap<u32, u64>,
     text_layouts: text_buffer::LayoutCache,
@@ -270,6 +271,7 @@ impl PlayerApp {
         self.dirty_graphics.clear();
         self.presented_graphics.clear();
         self.presented_views = Default::default();
+        self.presented_content_revisions.clear();
         self.presented_revision = 0;
         self.text_layout_revisions.clear();
         self.presented_state = RunState::Running;
@@ -360,6 +362,7 @@ impl PlayerApp {
             dirty_graphics: HashSet::new(),
             presented_graphics: BTreeMap::new(),
             presented_views: Default::default(),
+            presented_content_revisions: BTreeMap::new(),
             presented_revision: 0,
             text_layout_revisions: BTreeMap::new(),
             text_layouts: Default::default(),
@@ -839,40 +842,88 @@ impl PlayerApp {
         }
         self.presented_revision = revision;
         self.presented_state = state;
-        let views = vm.window_views();
-        let text_changed = views.as_slice() != self.presented_views.as_ref();
+        let descriptors = vm.window_descriptors();
+        let current_ids: HashSet<u32> =
+            descriptors.iter().map(|descriptor| descriptor.id).collect();
+        let changed_ids: Vec<u32> = descriptors
+            .iter()
+            .filter(|descriptor| {
+                let old = self
+                    .presented_views
+                    .iter()
+                    .find(|view| view.id == descriptor.id);
+                old.is_none_or(|view| {
+                    self.presented_content_revisions.get(&descriptor.id)
+                        != Some(&descriptor.content_revision)
+                        || !same_window_metadata(view, descriptor)
+                })
+            })
+            .map(|descriptor| descriptor.id)
+            .collect();
+        let removed = self
+            .presented_views
+            .iter()
+            .any(|view| !current_ids.contains(&view.id));
+        let text_changed = !changed_ids.is_empty() || removed;
         if !text_changed && self.dirty_graphics.is_empty() {
             return;
         }
         if text_changed {
-            for view in &views {
-                let old = self.presented_views.iter().find(|old| old.id == view.id);
-                if old.is_none_or(|old| {
-                    old.rect != view.rect
-                        || old.hints != view.hints
-                        || old.appearance != view.appearance
-                }) {
-                    crate::diagnostics::record(format_args!(
-                        "window-layout id={} kind={} rect={:?} font_size={} hints={:?}",
-                        view.id, view.kind, view.rect, view.appearance.font_size, view.hints
-                    ));
-                }
-            }
-            self.text_layouts.retain_windows(&views);
-            self.text_layout_revisions
-                .retain(|id, _| views.iter().any(|view| view.id == *id));
-            for view in &views {
-                let changed = self
-                    .presented_views
+            let structural = removed
+                || changed_ids
                     .iter()
-                    .find(|old| old.id == view.id)
-                    .is_none_or(|old| old != view);
-                if changed {
-                    let revision = self.text_layout_revisions.entry(view.id).or_default();
-                    *revision = revision.wrapping_add(1);
+                    .any(|id| !self.presented_views.iter().any(|view| view.id == *id));
+            let replacements: Vec<_> = changed_ids
+                .iter()
+                .filter_map(|id| vm.window_view(*id).map(|view| (*id, view)))
+                .collect();
+            if structural {
+                let mut views = self.presented_views.to_vec();
+                views.retain(|view| current_ids.contains(&view.id));
+                for (id, view) in replacements {
+                    if let Some(existing) = views.iter_mut().find(|old| old.id == id) {
+                        *existing = view;
+                    } else {
+                        views.push(view);
+                    }
+                }
+                views.sort_by_key(|view| view.id);
+                self.presented_views = views.into();
+            } else {
+                let views = std::sync::Arc::make_mut(&mut self.presented_views);
+                for (id, view) in replacements {
+                    if let Some(existing) = views.iter_mut().find(|old| old.id == id) {
+                        *existing = view;
+                    }
                 }
             }
-            self.presented_views = views.into();
+            for descriptor in descriptors
+                .iter()
+                .filter(|descriptor| changed_ids.contains(&descriptor.id))
+            {
+                crate::diagnostics::record(format_args!(
+                    "window-layout id={} kind={} rect={:?} font_size={} hints={:?}",
+                    descriptor.id,
+                    descriptor.kind,
+                    descriptor.rect,
+                    descriptor.appearance.font_size,
+                    descriptor.hints
+                ));
+            }
+            self.text_layouts
+                .retain_windows(self.presented_views.as_ref());
+            self.text_layout_revisions
+                .retain(|id, _| current_ids.contains(id));
+            for id in &changed_ids {
+                let layout_revision = self.text_layout_revisions.entry(*id).or_default();
+                *layout_revision = layout_revision.wrapping_add(1);
+            }
+            self.presented_content_revisions
+                .retain(|id, _| current_ids.contains(id));
+            for descriptor in descriptors {
+                self.presented_content_revisions
+                    .insert(descriptor.id, descriptor.content_revision);
+            }
         }
         self.dirty_graphics.clear();
         for canvas in self.graphics.values_mut() {
@@ -1735,6 +1786,18 @@ fn idle_repaint_delay(vm: Option<&Vm>) -> std::time::Duration {
     } else {
         timer
     }
+}
+
+fn same_window_metadata(
+    view: &crate::vm::WindowView,
+    descriptor: &crate::vm::WindowDescriptor,
+) -> bool {
+    view.kind == descriptor.kind
+        && view.rect == descriptor.rect
+        && view.grid_size == descriptor.grid_size
+        && view.grid_cursor == descriptor.grid_cursor
+        && view.appearance == descriptor.appearance
+        && view.hints == descriptor.hints
 }
 
 /// Spend a short time budget advancing the story before presenting a frame.

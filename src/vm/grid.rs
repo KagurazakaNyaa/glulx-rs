@@ -46,6 +46,9 @@ impl GlkWindow {
     }
 
     pub(super) fn resize_grid(&mut self, width: u32, height: u32) {
+        if width == self.width && height == self.height {
+            return;
+        }
         let count = width as usize * height as usize;
         let mut characters = vec![' '; count];
         let mut styles = vec![0; count];
@@ -62,6 +65,7 @@ impl GlkWindow {
         self.grid = characters;
         self.grid_styles = styles;
         self.grid_hyperlinks = hyperlinks;
+        self.content_revision = self.content_revision.wrapping_add(1);
     }
 
     pub(super) fn grid_cells(&self) -> Vec<GridCell> {

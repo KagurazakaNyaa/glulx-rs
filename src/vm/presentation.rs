@@ -167,6 +167,18 @@ pub struct WindowView {
     pub appearance: TextAppearance,
     pub hints: BTreeMap<(u32, u32), u32>,
 }
+
+#[derive(Clone, PartialEq)]
+pub(crate) struct WindowDescriptor {
+    pub id: u32,
+    pub kind: u32,
+    pub rect: [u32; 4],
+    pub grid_size: [u32; 2],
+    pub grid_cursor: [u32; 2],
+    pub appearance: TextAppearance,
+    pub hints: BTreeMap<(u32, u32), u32>,
+    pub content_revision: u64,
+}
 impl WindowView {
     pub fn style(&self, style: u32) -> ResolvedStyle {
         ResolvedStyle::resolve(self.kind, style, &self.hints, self.appearance)
@@ -356,27 +368,55 @@ impl Vm {
         self.terminal_host = enabled;
     }
 
+    pub(crate) fn window_descriptors(&self) -> Vec<WindowDescriptor> {
+        self.glk_windows
+            .iter()
+            .filter(|(_, w)| w.kind != 1)
+            .map(|(&id, w)| WindowDescriptor {
+                id,
+                kind: w.kind,
+                rect: w.rect,
+                grid_size: [w.width, w.height],
+                grid_cursor: [w.cursor_x, w.cursor_y],
+                appearance: self.text_appearance,
+                hints: w.hints.clone(),
+                content_revision: w.content_revision,
+            })
+            .collect()
+    }
+
+    fn make_window_view(&self, id: u32, w: &GlkWindow) -> WindowView {
+        WindowView {
+            id,
+            kind: w.kind,
+            rect: w.rect,
+            runs: w.runs.clone(),
+            grid_cells: w.grid_cells(),
+            grid_size: [w.width, w.height],
+            grid_cursor: [w.cursor_x, w.cursor_y],
+            appearance: self.text_appearance,
+            grid: w
+                .grid
+                .chunks(w.width.max(1) as usize)
+                .map(|row| row.iter().collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            hints: w.hints.clone(),
+        }
+    }
+
+    pub(crate) fn window_view(&self, id: u32) -> Option<WindowView> {
+        self.glk_windows
+            .get(&id)
+            .filter(|w| w.kind != 1)
+            .map(|w| self.make_window_view(id, w))
+    }
+
     pub fn window_views(&self) -> Vec<WindowView> {
         self.glk_windows
             .iter()
             .filter(|(_, w)| w.kind != 1)
-            .map(|(&id, w)| WindowView {
-                id,
-                kind: w.kind,
-                rect: w.rect,
-                runs: w.runs.clone(),
-                grid_cells: w.grid_cells(),
-                grid_size: [w.width, w.height],
-                grid_cursor: [w.cursor_x, w.cursor_y],
-                appearance: self.text_appearance,
-                grid: w
-                    .grid
-                    .chunks(w.width.max(1) as usize)
-                    .map(|row| row.iter().collect::<String>())
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                hints: w.hints.clone(),
-            })
+            .map(|(&id, w)| self.make_window_view(id, w))
             .collect()
     }
     pub(super) fn style_call(&mut self, selector: u32, args: &[u32]) -> Result<u32, VmError> {
@@ -762,6 +802,25 @@ mod tests {
             panic!("expected graphics draw");
         };
         assert_eq!(request.hyperlink, 77);
+    }
+
+    #[test]
+    fn window_descriptors_track_content_per_window() {
+        let mut vm = pictured_vm();
+        let first = vm.open_window(&[0, 0, 0, WINTYPE_TEXT_BUFFER, 0]);
+        let second = vm.open_window(&[first, 0x12, 1, WINTYPE_TEXT_BUFFER, 0]);
+        let before = vm.window_descriptors();
+        vm.glk_write_char(vm.glk_windows[&first].stream, 'A');
+        let after = vm.window_descriptors();
+        let revision = |descriptors: &[WindowDescriptor], id| {
+            descriptors
+                .iter()
+                .find(|descriptor| descriptor.id == id)
+                .unwrap()
+                .content_revision
+        };
+        assert!(revision(&after, first) > revision(&before, first));
+        assert_eq!(revision(&after, second), revision(&before, second));
     }
 
     #[test]

@@ -12,6 +12,7 @@ mod unicode;
 mod windows;
 use events::Request;
 pub use grid::{GRID_CELL_HEIGHT, GRID_CELL_WIDTH, GRID_FONT_SIZE, GridCell};
+pub(crate) use presentation::WindowDescriptor;
 pub use presentation::{BufferImage, ResolvedStyle, TextAppearance, TextRun, WindowView};
 #[cfg(test)]
 mod conformance;
@@ -184,6 +185,8 @@ struct GlkWindow {
     echo_stream: u32,
     write_count: u32,
     rect: [u32; 4],
+    #[serde(default)]
+    content_revision: u64,
     runs: Vec<TextRun>,
     style: u32,
     hyperlink: u32,
@@ -243,6 +246,7 @@ impl GlkWindow {
             echo_stream: 0,
             write_count: 0,
             rect: [0; 4],
+            content_revision: 0,
             runs: Vec::new(),
             style: 0,
             hyperlink: 0,
@@ -1840,6 +1844,7 @@ impl Vm {
                 if kind == WINTYPE_TEXT_GRID {
                     if let Some(window) = self.glk_windows.get_mut(&window_id) {
                         window.put_grid_char(character);
+                        window.content_revision = window.content_revision.wrapping_add(1);
                     }
                 } else if kind == WINTYPE_TEXT_BUFFER {
                     let window = self.glk_windows.get_mut(&window_id).unwrap();
@@ -1860,6 +1865,7 @@ impl Vm {
                         });
                     }
                     window.trim_text_history();
+                    window.content_revision = window.content_revision.wrapping_add(1);
                     self.output.push(character);
                     if window.style != 8
                         && let Some(events) = &mut self.text_buffer_events
@@ -2041,6 +2047,7 @@ impl Vm {
                     return self.store_destination(&destination, 0, Width::Word);
                 }
                 if let Some(window) = self.glk_windows.get_mut(&window_id) {
+                    window.content_revision = window.content_revision.wrapping_add(1);
                     window.runs.clear();
                     window.grid.fill(' ');
                     window.grid_styles.fill(0);
