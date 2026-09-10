@@ -2,7 +2,7 @@
 
 [English](glulx-implementation-notes.md) | [中文](glulx-implementation-notes.ZH.md)
 
-Reviewed: 2026-09-08. Based on the [Glulx 3.1.3 specification](https://eblong.com/zarf/glulx/Glulx-Spec.html) and downloaded copies of Glulxe's [serial.c](https://github.com/erkyrath/glulxe/blob/master/serial.c) and [exec.c](https://github.com/erkyrath/glulxe/blob/master/exec.c). The initial research used master as of that date; subsequent work pinned Glulxe revision `56ab8743bab565de307bd892c555d8d8897ed517` and completed bidirectional save interoperability with synthetic stories and Adventure. See the [validation record](glulx-validation.md).
+Reviewed: 2026-09-10. Based on the [Glulx 3.1.3 specification](https://eblong.com/zarf/glulx/Glulx-Spec.html) and Glulxe's [serial.c](https://github.com/erkyrath/glulxe/blob/master/serial.c) and [exec.c](https://github.com/erkyrath/glulxe/blob/master/exec.c). The current reference revision is `56ab8743bab565de307bd892c555d8d8897ed517`; save interoperability coverage is recorded in the [current validation record](glulx-validation.md).
 
 ## IFZS Persistent Saves
 

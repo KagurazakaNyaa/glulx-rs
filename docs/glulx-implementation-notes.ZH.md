@@ -2,7 +2,7 @@
 
 [English](glulx-implementation-notes.md) | [中文](glulx-implementation-notes.ZH.md)
 
-核对日期：2026-09-08。依据 [Glulx 3.1.3 正文](https://eblong.com/zarf/glulx/Glulx-Spec.html)、实际下载读取的 [Glulxe serial.c](https://github.com/erkyrath/glulxe/blob/master/serial.c) 和 [exec.c](https://github.com/erkyrath/glulxe/blob/master/exec.c)。初次调研使用当日 master；后续已固定 Glulxe revision `56ab8743bab565de307bd892c555d8d8897ed517`，并完成合成故事及 Adventure 双向存档互操作，见 [验收记录](glulx-validation.ZH.md)。
+核对日期：2026-09-10。依据 [Glulx 3.1.3 正文](https://eblong.com/zarf/glulx/Glulx-Spec.html)、[Glulxe serial.c](https://github.com/erkyrath/glulxe/blob/master/serial.c) 和 [exec.c](https://github.com/erkyrath/glulxe/blob/master/exec.c)。当前参考 revision 为 `56ab8743bab565de307bd892c555d8d8897ed517`；存档互操作覆盖见[当前验收记录](glulx-validation.ZH.md)。
 
 ## IFZS 持久存档
 

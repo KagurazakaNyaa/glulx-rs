@@ -52,8 +52,9 @@ terminal column display as `?` and report CannotPrint; Unicode input/file data i
 ## Limits
 
 VM memory defaults to 1024 MiB and is configurable. Undo retains at most 16 snapshots
-within a configurable payload budget (default 256 MiB), counting memory, initial images,
-stacks and heap records; allocator/container overhead is excluded. The log transcript retains
+within a configurable payload budget (default 256 MiB), counting retained page snapshots,
+stack bytes and heap-record payloads; the shared story image and current VM address space are
+not charged, and allocator/container overhead is excluded. The log transcript retains
 at most 4 MiB or 100,000 lines and uses virtualized display rows; this limits player history,
 not the VM's raw output. See the
 [separate resource and process limits](../README.md#performance-and-memory-limits). Older snapshots are evicted and an oversized save

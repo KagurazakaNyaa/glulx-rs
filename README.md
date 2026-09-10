@@ -84,7 +84,7 @@ The interface supports English and Chinese. **Settings → Interface language** 
 ## Performance and memory limits
 
 Use release or diagnostic builds for gameplay performance. Operand decoding and search comparisons
-now avoid temporary heap allocations. The repository provides two fixed microbenchmarks: five million
+now avoid temporary heap allocations. The repository provides a fixed microbenchmark suite: five million
 branch dispatches, 1,000 linear searches through 16,384 records, 4/8/16 KiB text output,
 sparse/dense dirty-page snapshots on 64 MiB memory, 16 KiB cold/warm text layout, and
 512x384 CPU canvas rasterization. The benchmark tool records the
@@ -95,7 +95,7 @@ Every budget in Settings supports **fixed MiB** or **1%–100% of startup memory
 | Setting | Default MiB | What is counted |
 | --- | ---: | --- |
 | Game memory | 1024 | VM address space including the game heap; excludes stack, original story copies and undo; capped by Glulx at 4 GiB minus 256 bytes |
-| Undo snapshots | 256 | Retained memory, initial images, stacks and heap-record payloads; oldest snapshots are evicted; an oversized snapshot fails |
+| Undo snapshots | 256 | Retained page snapshots, stack bytes and heap-record payloads; the shared story image is not charged; oldest snapshots are evicted; an oversized snapshot fails |
 | Graphics image cache | 512 | Cached RGBA and texture pixel payloads, evicted by least recent use |
 | Text image cache | 256 | Cached texture pixel payloads, evicted by least recent use |
 | Each decoded image | 256 | RGBA output for one picture; oversized resources fail |

@@ -9,8 +9,9 @@ terminal display/input host is selected for interactive TTYs.
 ## Modules
 
 `Story` validates the executable header and memory layout, parses Blorb resource
-indexes, and exposes metadata and cover resources. `Memory` enforces ROM protection,
-address checks and a bounded allocation policy.
+indexes, and exposes metadata and cover resources. Its executable image is shared
+with `Memory`'s initial-image baseline; file loading transfers owned container bytes
+where possible. `Memory` enforces ROM protection, address checks and a bounded allocation policy.
 
 `Vm` owns instruction decoding, execution, stacks and the Glk object model. Its
 bounded run interface keeps the GUI responsive. Unsupported instructions are typed
@@ -60,7 +61,9 @@ Desktop session storage remains separate.
 `save` implements portable IFZS. It validates identity, memory, heap and stack
 continuations before replacing execution state. RNG, Glk, I/O system, the string
 table and protection definition remain independent of restore/undo/restart.
-Undo stores bounded execution snapshots, sharing the same state boundary.
+Undo stores bounded execution snapshots, sharing the same state boundary. Its payload
+budget counts retained dirty pages, stack bytes and heap-record data, not the shared
+story image or current VM address space.
 Acceleration registrations/parameters are also outside portable snapshots. Accelerated
 calls use deferred completion so nested filter/string continuations do not recurse
 on the native stack; desktop snapshots retain pending completion.

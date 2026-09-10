@@ -2,7 +2,7 @@
 
 [English](glulx-spec-checklist.md) | [中文](glulx-spec-checklist.ZH.md)
 
-Updated: 2026-09-08. The original checklist's main gaps were addressed in `4c16443`; acceleration functions, MOD, and inline text images in `c5fcc20`; windows, input, fonts, and styles in `4870bcf`; and media, streams, dates, and save edge cases in `5816d37`. This update adds previously unlisted player capabilities, optional extensions, and validation work. `[x]` means implementation and the listed validation are complete, not exhaustive conformance certification; new work uses `[ ]`. Specification evidence, classifications, and acceptance criteria are in the [remaining capability audit](glulx-remaining-spec-audit.md). Test details, fixture versions, and reproduction commands are in the [validation record](glulx-validation.md); implementation limits are in [compatibility](compatibility.md).
+Updated: 2026-09-10. The current repository state is `1a27dd4`. `[x]` means implementation and the listed validation are complete, not exhaustive conformance certification; open work uses `[ ]`. Specification evidence, classifications, and acceptance criteria are in the [remaining capability audit](glulx-remaining-spec-audit.md). Test details, fixture versions, and reproduction commands are in the [validation record](glulx-validation.md); implementation limits are in [compatibility](compatibility.md).
 
 ## Specification Boundaries
 
@@ -25,7 +25,7 @@ Evidence: [VM](../src/vm.rs), [Memory](../src/memory.rs), [saves](../src/vm/save
 - [x] `accelfunc/accelparam` and Inform acceleration functions 1–13; unknown functions unregister and unknown parameters are legally ignored. Properties, classes, privacy, and old/new object layouts match Glulxe in differential tests.
 - [x] Glulx gestalt matches implementation: 3.1.3, Float, Double, ExtUndo, and acceleration setup; functions 1–13 all advertise support.
 - [x] Startup and `setrandom(0)` use system entropy; nonzero seeds are repeatable, with positive/negative/zero range regressions.
-- [x] Multiple undo levels and correct hasundo/discardundo results; at most 16 states sharing a 256 MiB estimated budget.
+- [x] Multiple undo levels and correct hasundo/discardundo results; at most 16 states share a 256 MiB payload budget charged to retained page snapshots, stack bytes, and heap-record payloads.
 - [x] restore/undo/restart do not roll back RNG, I/O system, string table, Glk objects, or protection definition; restart retains undo.
 - [x] Heap allocation, coalescing, shrinkage on free, and save/undo ownership; regressions for the 1 GiB memory limit, failed allocation, and protection spanning extended memory.
 
@@ -53,7 +53,8 @@ Evidence: [window tree](../src/vm/windows.rs), [streams](../src/vm/streams.rs), 
 
 ## Validation and Maintenance
 
-- [x] 181 Rust tests (179 library and 2 CLI) pass; domain-specific matrices and edge-case coverage are in the validation record.
+- [x] 270 library tests and 6 CLI tests pass; 6 performance tests remain ignored for manual measurement. Domain-specific matrices and edge-case coverage are in the validation record.
+- [x] `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo build --release` pass on the current repository.
 - [x] Final integrated Glulxercise general, single-precision, and double-precision runs yielded 92 passing sections, passing all three rounds; an earlier random-distribution threshold failure is also retained in the validation record.
 - [x] All 94 results for Inform acceleration functions 1–13 exactly match Glulxe; the synthetic media story verifies image reflow, clicks, MOD completion events, and session restoration.
 - [x] Pinned Glulxe/CheapGlk revisions, synthetic-story and Adventure bidirectional save validation, and exact normalized Unicode/resource-stream output comparison.
@@ -88,7 +89,7 @@ Evidence: [window tree](../src/vm/windows.rs), [streams](../src/vm/streams.rs), 
 - [ ] Expanded media fixture matrix: PNG/JPEG variants, sampled-audio bit depths/sample rates/channels, and historical tracker variants; record support and failure behavior individually.
 - [ ] Physical audio-output validation: relate synchronized starts, pause/resume, fades, and completion notifications to actual output, adding evidence beyond software sample-frame checks.
 
-Separate resources, terminal input and the listed optional player additions are implemented and have local validation. Cross-platform validation remains pending. Validation tasks above do not imply known missing functionality; existing passing records remain valid.
+Separate resources, terminal input and the listed optional player additions are implemented and have local validation. Cross-platform validation remains pending. These items are validation work, not known missing functionality.
 
 ## Platform Validation Matrix
 
@@ -105,4 +106,4 @@ On-device records should retain the OS version, architecture, build commit, Rust
 
 ## Current Limits and Specification Scope
 
-Grids retain uniform cell sizes as specified, ignoring hints 0–3/6 that change cell layout; available light faces render at light weight; missing faces fall back to regular and report that accurately. Missing glyphs return CannotPrint, and fallback fonts can be loaded. MOD/XM/S3M/IT are supported without claiming every historical dialect or bit-exact playback against specific hardware. Blorb Rect/Reso/APal/Loop are in Z-machine scope. VM memory defaults to 1 GiB; undo retains at most 16 states sharing a 256 MiB estimated budget. Decoded RGBA output has a configurable limit (256 MiB by default), and the decoder allocation budget is twice that limit; draw destination dimensions are not subject to this source-image limit. These resource limits are current implementation policy; undo estimates include memory/stack/story image but exclude heap indexes and allocator overhead, and are not marked as missing features. Container reading still tolerates nonzero padding and unindexed GLUL fallback; see the audit. Rejection of every invalid container is not claimed.
+Grids retain uniform cell sizes as specified, ignoring hints 0–3/6 that change cell layout; available light faces render at light weight; missing faces fall back to regular and report that accurately. Missing glyphs return CannotPrint, and fallback fonts can be loaded. MOD/XM/S3M/IT are supported without claiming every historical dialect or bit-exact playback against specific hardware. Blorb Rect/Reso/APal/Loop are in Z-machine scope. VM memory defaults to 1 GiB; undo retains at most 16 states sharing a 256 MiB payload budget charged to retained page snapshots, stack bytes, and heap-record payloads. Decoded RGBA output has a configurable limit (256 MiB by default), and the decoder allocation budget is twice that limit; draw destination dimensions are not subject to this source-image limit. These resource limits are current implementation policy; allocator and container overhead are excluded from the undo accounting. Container reading still tolerates nonzero padding and unindexed GLUL fallback; see the audit. Rejection of every invalid container is not claimed.

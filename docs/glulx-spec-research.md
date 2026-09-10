@@ -2,7 +2,7 @@
 
 [English](glulx-spec-research.md) | [中文](glulx-spec-research.ZH.md)
 
-Researched and reviewed: 2026-09-08. The official Glulx/Glk/Blorb home pages and the complete Glulx 3.1.3, Glk 0.7.6, and Blorb 2.0.5 specifications were read. For implementation status, see the [compatibility checklist](glulx-spec-checklist.md). This document records specification evidence so implementation plans or old documentation are not mistaken for the specification. Gaps and validation requirements after `5816d37` are covered in the [remaining capability audit](glulx-remaining-spec-audit.md).
+Reviewed: 2026-09-10. The official Glulx/Glk/Blorb home pages and the complete Glulx 3.1.3, Glk 0.7.6, and Blorb 2.0.5 specifications were read. For implementation status, see the [compatibility checklist](glulx-spec-checklist.md). This document records specification evidence so implementation plans or unrelated documentation are not mistaken for the specification. Current implementation boundaries are summarized in the [remaining capability audit](glulx-remaining-spec-audit.md).
 
 ## Correct Entry Points and Versions
 
@@ -32,4 +32,4 @@ Note: the [old lowercase URL](https://eblong.com/zarf/glulx/glulx-spec.html) rem
 
 Map each requirement to `operand_count/step/gestalt/glk/glk_gestalt` in [vm.rs](../src/vm.rs), [memory.rs](../src/memory.rs), [story.rs](../src/story.rs), and [app.rs](../src/app.rs). Record implemented branches, constant returns, no-op placeholders, and fully usable capabilities separately. Passing tests proves only the cases executed, not every specification boundary.
 
-Behavioral differential testing can use the officially linked [Glulxe reference implementation](https://github.com/erkyrath/glulxe) and the project's existing reference, [Git](https://github.com/DavidKinder/Git). The initial research did not run interpreters; subsequent Glulxe differential testing and bidirectional save interoperability are complete. Versions and results are in the [validation record](glulx-validation.md).
+Behavioral differential testing uses the officially linked [Glulxe reference implementation](https://github.com/erkyrath/glulxe) and the project's existing [Git](https://github.com/DavidKinder/Git) reference where applicable. Current versions and validation scope are in the [validation record](glulx-validation.md).

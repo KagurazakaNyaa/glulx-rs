@@ -2,7 +2,7 @@
 
 [English](glulx-spec-research.md) | [中文](glulx-spec-research.ZH.md)
 
-调研及复核日期：2026-09-08。已实际读取官方 Glulx/Glk/Blorb 首页及 Glulx 3.1.3、Glk 0.7.6、Blorb 2.0.5 正文。具体实现状态见 [兼容性 checklist](glulx-spec-checklist.ZH.md)；这里记录规范依据，避免将实现计划或旧文档当作规范。`5816d37` 之后的缺口及验收要求另见 [剩余能力复核](glulx-remaining-spec-audit.ZH.md)。
+复核日期：2026-09-10。已实际读取官方 Glulx/Glk/Blorb 首页及 Glulx 3.1.3、Glk 0.7.6、Blorb 2.0.5 正文。具体实现状态见 [兼容性 checklist](glulx-spec-checklist.ZH.md)；这里记录规范依据，避免将实现计划或其他文档误当作规范。当前实现边界见 [剩余规范复核](glulx-remaining-spec-audit.ZH.md)。
 
 ## 正确入口与版本
 
@@ -32,4 +32,4 @@
 
 将每条要求映射到 [vm.rs](../src/vm.rs) 的 `operand_count/step/gestalt/glk/glk_gestalt`、[memory.rs](../src/memory.rs)、[story.rs](../src/story.rs) 与 [app.rs](../src/app.rs)。已有分支、返回固定值、无操作占位和完整可用能力应分开记录。测试通过只证明已执行用例，不证明所有规范边界。
 
-行为差分可使用官方入口链接的 [Glulxe 参考实现](https://github.com/erkyrath/glulxe)，以及项目既有参考 [Git](https://github.com/DavidKinder/Git)。初次调研未运行解释器；后续 Glulxe 差分及双向存档互操作已完成，具体版本和结果见 [验收记录](glulx-validation.ZH.md)。
+行为差分使用官方入口链接的 [Glulxe 参考实现](https://github.com/erkyrath/glulxe) 以及项目既有参考 [Git](https://github.com/DavidKinder/Git)。当前版本和验收范围见[验收记录](glulx-validation.ZH.md)。
