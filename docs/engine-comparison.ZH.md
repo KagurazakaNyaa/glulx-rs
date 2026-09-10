@@ -123,7 +123,7 @@ Git 的 `savefile.c`/`saveundo.c`处理可移植存档、栈和页表，不保�
 | 异步宿主工作 | 故事、图片、采样/MOD/普通 SONG 音频准备已使用有序且有界的 worker | 纹理上传、布局、软件栅格化、`play_multi` SONG 批处理和会话编码仍在 owner/UI |
 | 指令缓存 | ROM decoded cache 已实现，RAM 代码不缓存 | 没有 Git 风格 block compiler、peephole 或 JIT |
 | undo | 256 字节页差分、dirty-page 跟踪、共享页、旧会话迁移已实现 | 页表是 Rust `BTreeMap`，不是 Git 的原始指针数组；预算入口仍按完整长度估算 |
-| Glk/呈现热路径 | 参数使用固定小缓冲，翻译关闭时不捕获，transcript 显示采用虚拟行，变化窗口发布有界 | 逐字符 Glk 输出和变化窗口内的完整向量仍不同于 GarglK 的 dirty 行 |
+| Glk/呈现热路径 | 参数使用固定小缓冲，翻译关闭时不捕获，transcript 最多保留 4 MiB/100,000 行且显示采用虚拟行，变化窗口发布有界 | 逐字符 Glk 输出和变化窗口内的完整向量仍不同于 GarglK 的 dirty 行 |
 | 字体/排版 | 已有字体 fallback、样式 hint、布局缓存和 CJK 分段测试；`4eccf8b` 修复了文本/网格窄斜体字形四边形自相交 | 真实八种字体组合、FreeType 字距和跨项目像素差分仍需实机验收 |
 
 ## 来源

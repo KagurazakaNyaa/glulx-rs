@@ -68,8 +68,9 @@ on the native stack; desktop snapshots retain pending completion.
 `session` validates a versioned desktop snapshot that also retains story resources,
 Glk objects, pending input and audio progress. The app adds graphics canvases and
 resumes timers/audio. Eframe storage saves every 30 seconds and on normal exit;
-startup without an explicit story attempts to resume it. This local snapshot is
-separate from game-requested, portable saves. The synchronous desktop serializer
+startup without an explicit story attempts to resume it. The log transcript retains
+at most 4 MiB or 100,000 lines and uses virtualized display rows. This local snapshot
+is separate from game-requested, portable saves. The synchronous desktop serializer
 expands byte arrays into RON integer lists. A 16 MiB raw-payload guard skips
 large story/memory/canvas snapshots before serialization and clears any stale
 previous session; settings and game-requested IFZS saves remain available.

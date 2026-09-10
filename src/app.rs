@@ -31,6 +31,8 @@ const STORAGE_KEY: &str = "glulx-rs-settings";
 // RON expands each byte into a decimal integer, then eframe copies the whole
 // string. Large media packages must not enter this synchronous UI-thread path.
 const MAX_DESKTOP_SNAPSHOT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_TRANSCRIPT_BYTES: usize = 4 * 1024 * 1024;
+const MAX_TRANSCRIPT_LINES: usize = 100_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -340,6 +342,42 @@ impl PlayerApp {
                 self.transcript_lines.last_mut().unwrap().end = end;
             }
         }
+        self.trim_transcript();
+    }
+
+    fn trim_transcript(&mut self) {
+        if self.transcript.len() <= MAX_TRANSCRIPT_BYTES
+            && self.transcript_lines.len() <= MAX_TRANSCRIPT_LINES
+        {
+            return;
+        }
+        let byte_cut = self.transcript.len().saturating_sub(MAX_TRANSCRIPT_BYTES);
+        let byte_cut = if byte_cut == 0 {
+            0
+        } else if let Some(offset) = self.transcript[byte_cut..].find('\n') {
+            byte_cut + offset + 1
+        } else {
+            let mut offset = byte_cut;
+            while offset < self.transcript.len() && !self.transcript.is_char_boundary(offset) {
+                offset += 1;
+            }
+            offset
+        };
+        let line_count = self
+            .transcript_lines
+            .len()
+            .saturating_sub(MAX_TRANSCRIPT_LINES);
+        let line_cut = self
+            .transcript_lines
+            .get(line_count.saturating_sub(1))
+            .map_or(0, |line| {
+                line.end + usize::from(self.transcript.as_bytes().get(line.end) == Some(&b'\n'))
+            });
+        let cut = byte_cut.max(line_cut);
+        if cut != 0 {
+            self.transcript.drain(..cut);
+            self.rebuild_transcript_index();
+        }
     }
 
     fn desktop_snapshot_too_large(&self) -> bool {
@@ -485,6 +523,7 @@ impl PlayerApp {
                     app.vm = Some(vm);
                     app.transcript = session.transcript;
                     app.rebuild_transcript_index();
+                    app.trim_transcript();
                     app.input = session.input;
                     for canvas in session.canvases {
                         if let Some(pixels) =
@@ -2261,6 +2300,17 @@ mod tests {
             .map(|range| app.transcript[range.clone()].to_owned())
             .collect::<Vec<_>>();
         assert_eq!(lines, ["first", "second", "third"]);
+    }
+
+    #[test]
+    fn transcript_history_is_bounded_and_keeps_latest_text() {
+        let context = egui::Context::default();
+        let mut app = PlayerApp::new(&eframe::CreationContext::_new_kittest(context), None);
+        app.append_transcript(&"x".repeat(MAX_TRANSCRIPT_BYTES + 32));
+        app.append_transcript("tail");
+        assert!(app.transcript.len() <= MAX_TRANSCRIPT_BYTES);
+        assert!(app.transcript.ends_with("tail"));
+        assert_eq!(app.transcript_lines.len(), 1);
     }
 
     #[test]
