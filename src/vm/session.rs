@@ -8,7 +8,7 @@ impl Vm {
             self.story
                 .snapshot_byte_len()
                 .saturating_add(self.memory.snapshot_byte_len()),
-            |bytes, undo| bytes.saturating_add(undo.memory.snapshot_byte_len()),
+            |bytes, undo| bytes.saturating_add(undo.byte_len()),
         )
     }
 
@@ -29,8 +29,26 @@ impl Vm {
             return Err(VmError::InvalidSave);
         }
         self.memory.validate_session(&original)?;
-        for undo in &self.undo {
-            undo.memory.validate_session(&original)?;
+        for undo in &mut self.undo {
+            if let Some(memory) = undo.memory.take() {
+                memory.validate_session(&original)?;
+                undo.memory_len = memory.len();
+                undo.memory_pages = memory.snapshot_pages(None);
+            }
+            if undo.memory_len < original.header.end_mem
+                || undo.memory_len > self.memory.maximum()
+                || !undo.memory_len.is_multiple_of(256)
+                || undo.memory_pages.values().any(|page| page.len() != 256)
+                || undo.memory_pages.keys().any(|address| {
+                    *address < original.header.ram_start
+                        || address
+                            .checked_add(256)
+                            .is_none_or(|end| end > undo.memory_len)
+                        || !address.is_multiple_of(256)
+                })
+            {
+                return Err(VmError::InvalidSave);
+            }
         }
         save::validate_stack(&self.stack, self.memory.len())?;
         for (&id, window) in &self.glk_windows {
@@ -273,5 +291,49 @@ mod tests {
                 Err(VmError::InvalidSave)
             ));
         }
+    }
+
+    #[test]
+    fn sessions_migrate_legacy_full_undo_memory_to_pages() {
+        let program = [0x81, 0x25, 0x0d, 0x20, 0x81, 0x20];
+        let story =
+            Story::from_bytes(&super::super::tests::image_with_program(&program), None).unwrap();
+        let mut vm = Vm::new(story).unwrap();
+        vm.run_steps(1).unwrap();
+        vm.memory.write8(0x120, 9).unwrap();
+
+        let mut serialized = serde_json::to_value(&vm).unwrap();
+        let legacy_memory = serde_json::to_value(&vm.memory).unwrap();
+        let undo = serialized["undo"]
+            .as_array_mut()
+            .unwrap()
+            .first_mut()
+            .unwrap();
+        undo["memory"] = legacy_memory;
+        undo.as_object_mut().unwrap().remove("memory_len");
+        undo.as_object_mut().unwrap().remove("memory_pages");
+
+        let restored: Vm = serde_json::from_value(serialized).unwrap();
+        let restored = restored.validate_session().unwrap();
+        let undo = restored.undo.front().unwrap();
+        assert!(undo.memory.is_none());
+        assert_eq!(undo.memory_len, restored.memory.len());
+        assert_eq!(undo.memory_pages[&0x100].as_slice()[0x20], 9);
+    }
+
+    #[test]
+    fn sessions_reject_undo_pages_with_invalid_lengths() {
+        let program = [0x81, 0x25, 0x0d, 0x20, 0x81, 0x20];
+        let story =
+            Story::from_bytes(&super::super::tests::image_with_program(&program), None).unwrap();
+        let mut vm = Vm::new(story).unwrap();
+        vm.run_steps(1).unwrap();
+        let mut serialized = serde_json::to_value(&vm).unwrap();
+        serialized["undo"][0]["memory_pages"]["256"] = serde_json::json!([0]);
+        let restored: Vm = serde_json::from_value(serialized).unwrap();
+        assert!(matches!(
+            restored.validate_session(),
+            Err(VmError::InvalidSave)
+        ));
     }
 }

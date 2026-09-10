@@ -156,7 +156,14 @@ struct PendingSelect {
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 struct UndoState {
-    memory: Memory,
+    // Legacy desktop sessions serialized a full Memory here. New snapshots
+    // retain only changed 256-byte pages; validation migrates the old form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    memory: Option<Memory>,
+    #[serde(default)]
+    memory_len: u32,
+    #[serde(default)]
+    memory_pages: BTreeMap<u32, crate::memory::MemoryPage>,
     stack: Stack,
     pc: u32,
     destination: Destination,
@@ -166,7 +173,16 @@ struct UndoState {
 
 impl UndoState {
     fn byte_len(&self) -> usize {
-        self.memory.snapshot_byte_len() + self.stack.bytes.len() + self.heap_blocks.len() * 8
+        self.memory.as_ref().map_or_else(
+            || {
+                self.memory_pages
+                    .len()
+                    .saturating_mul(256)
+                    .saturating_add(self.memory_pages.len().saturating_mul(8))
+            },
+            Memory::snapshot_byte_len,
+        ) + self.stack.bytes.len()
+            + self.heap_blocks.len() * 8
     }
 }
 
@@ -566,7 +582,7 @@ impl Vm {
         let required = self
             .undo
             .iter()
-            .map(|undo| undo.memory.len())
+            .map(|undo| undo.memory.as_ref().map_or(undo.memory_len, Memory::len))
             .chain(std::iter::once(self.memory.len()))
             .max()
             .unwrap();
@@ -575,7 +591,14 @@ impl Vm {
         }
         self.memory.set_maximum(maximum)?;
         for undo in &mut self.undo {
-            undo.memory.set_maximum(maximum)?;
+            if let Some(memory) = &mut undo.memory {
+                memory.set_maximum(maximum)?;
+            } else if undo.memory_len > maximum {
+                return Err(VmError::MemoryLimit {
+                    required: undo.memory_len,
+                    maximum,
+                });
+            }
         }
         Ok(())
     }
@@ -1162,8 +1185,11 @@ impl Vm {
                     return Ok(());
                 }
                 self.trim_undo(cost);
+                let previous_pages = self.undo.back().map(|undo| &undo.memory_pages);
                 self.undo.push_back(UndoState {
-                    memory: self.memory.clone(),
+                    memory: None,
+                    memory_len: self.memory.len(),
+                    memory_pages: self.memory.snapshot_pages(previous_pages),
                     stack: self.stack.clone(),
                     pc: self.pc,
                     destination: destination.clone(),
@@ -1175,7 +1201,15 @@ impl Vm {
             0x126 => {
                 let failure_destination = self.destination(&operands[0])?;
                 if let Some(undo) = self.undo.pop_back() {
-                    self.memory.restore(&undo.memory, self.protection)?;
+                    if let Some(memory) = undo.memory {
+                        self.memory.restore(&memory, self.protection)?;
+                    } else {
+                        self.memory.restore_pages(
+                            undo.memory_len,
+                            &undo.memory_pages,
+                            self.protection,
+                        )?;
+                    }
                     self.stack = undo.stack;
                     self.pc = undo.pc;
                     self.pending_select = None;

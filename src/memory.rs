@@ -1,4 +1,8 @@
+use std::{collections::BTreeMap, sync::Arc};
+
 use crate::{Story, VmError};
+
+pub(crate) type MemoryPage = Arc<Vec<u8>>;
 
 /// Per-VM allocation ceiling; failed growth is reported through setmemsize/malloc.
 pub const MAX_MEMORY_SIZE: u32 = 1024 * 1024 * 1024;
@@ -64,6 +68,34 @@ pub struct Memory {
 impl Memory {
     pub(crate) fn snapshot_byte_len(&self) -> usize {
         self.bytes.len().saturating_add(self.initial.len())
+    }
+
+    pub(crate) fn snapshot_pages(
+        &self,
+        previous: Option<&BTreeMap<u32, MemoryPage>>,
+    ) -> BTreeMap<u32, MemoryPage> {
+        let mut pages = previous.cloned().unwrap_or_default();
+        pages.retain(|address, _| address.saturating_add(256) <= self.len());
+        for address in (self.ram_start..self.len()).step_by(256) {
+            let mut baseline = [0; 256];
+            let page_start = address as usize;
+            let page_end = page_start + 256;
+            if address < self.ext_start {
+                baseline.copy_from_slice(&self.initial[page_start..page_end]);
+            }
+            let current = &self.bytes[page_start..page_end];
+            if current == baseline {
+                pages.remove(&address);
+            } else if previous
+                .and_then(|pages| pages.get(&address))
+                .is_some_and(|page| page.as_slice() == current)
+            {
+                // Keep the shared page from the previous snapshot.
+            } else {
+                pages.insert(address, Arc::new(current.to_vec()));
+            }
+        }
+        pages
     }
 
     pub(crate) fn validate_session(&self, story: &Story) -> Result<(), VmError> {
@@ -246,6 +278,39 @@ impl Memory {
         Ok(())
     }
 
+    pub(crate) fn restore_pages(
+        &mut self,
+        target_len: u32,
+        pages: &BTreeMap<u32, MemoryPage>,
+        protected: Option<(u32, u32)>,
+    ) -> Result<(), VmError> {
+        if target_len < self.original_end
+            || target_len > self.maximum
+            || !target_len.is_multiple_of(256)
+        {
+            return Err(VmError::InvalidSave);
+        }
+        let protected_bytes = self.protected_bytes(protected, target_len);
+        if !self.resize(target_len)? {
+            return Err(VmError::MemoryAllocation(target_len));
+        }
+        self.bytes[self.ram_start as usize..self.ext_start as usize]
+            .copy_from_slice(&self.initial[self.ram_start as usize..self.ext_start as usize]);
+        self.bytes[self.ext_start as usize..].fill(0);
+        for (&address, page) in pages {
+            if address < self.ram_start
+                || address.checked_add(256).is_none_or(|end| end > target_len)
+                || !address.is_multiple_of(256)
+                || page.len() != 256
+            {
+                return Err(VmError::InvalidSave);
+            }
+            self.bytes[address as usize..address as usize + 256].copy_from_slice(page.as_slice());
+        }
+        self.restore_protected(protected_bytes);
+        Ok(())
+    }
+
     pub fn c_string(&self, address: u32) -> Result<String, VmError> {
         let mut out = String::new();
         let mut cursor = address;
@@ -361,6 +426,36 @@ mod tests {
         assert!(memory.resize(0x400).unwrap());
         let larger = Memory::new_with_limit(&story, MAX_MEMORY_SIZE * 2).unwrap();
         assert_eq!(larger.maximum(), MAX_MEMORY_SIZE * 2);
+    }
+
+    #[test]
+    fn page_snapshots_share_unchanged_pages_and_restore_protected_bytes() {
+        let story = story();
+        let mut memory = Memory::new_with_limit(&story, 0x400).unwrap();
+        assert!(memory.resize(0x400).unwrap());
+        memory.write8(0x100, 1).unwrap();
+        memory.write8(0x200, 2).unwrap();
+        let first = memory.snapshot_pages(None);
+        memory.write8(0x100, 3).unwrap();
+        let second = memory.snapshot_pages(Some(&first));
+        assert!(!std::sync::Arc::ptr_eq(
+            first.get(&0x100).unwrap(),
+            second.get(&0x100).unwrap()
+        ));
+        assert!(std::sync::Arc::ptr_eq(
+            first.get(&0x200).unwrap(),
+            second.get(&0x200).unwrap()
+        ));
+
+        memory.write8(0x100, 9).unwrap();
+        memory.write8(0x101, 8).unwrap();
+        memory.write8(0x200, 7).unwrap();
+        memory
+            .restore_pages(0x400, &second, Some((0x100, 1)))
+            .unwrap();
+        assert_eq!(memory.read8(0x100).unwrap(), 9);
+        assert_eq!(memory.read8(0x101).unwrap(), 0);
+        assert_eq!(memory.read8(0x200).unwrap(), 2);
     }
 
     #[test]
