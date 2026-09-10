@@ -807,6 +807,17 @@ mod tests {
     }
 
     #[test]
+    fn graphics_windows_accept_hyperlink_requests() {
+        let mut vm = pictured_vm();
+        vm.set_graphical_host(true);
+        let window = vm.open_window(&[0, 0, 0, WINTYPE_GRAPHICS, 0]);
+        assert_eq!(vm.glk_gestalt(12, WINTYPE_GRAPHICS), 1);
+        super::super::tests::push_glk_arguments(&mut vm, &[window]);
+        vm.glk(0x102, 1, Destination::Discard).unwrap();
+        assert!(vm.hyperlink_requests.contains(&window));
+    }
+
+    #[test]
     fn window_descriptors_track_content_per_window() {
         let mut vm = pictured_vm();
         let first = vm.open_window(&[0, 0, 0, WINTYPE_TEXT_BUFFER, 0]);

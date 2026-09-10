@@ -2270,7 +2270,7 @@ impl Vm {
                     if selector == 0xd4 && matches!(window.kind, 4 | 5) {
                         self.mouse_requests.insert(id);
                     }
-                    if selector == 0x102 && matches!(window.kind, 3 | 4) {
+                    if selector == 0x102 && matches!(window.kind, 3..=5) {
                         self.hyperlink_requests.insert(id);
                     }
                 }
@@ -2506,7 +2506,7 @@ impl Vm {
             8..=10 | 21 => u32::from(self.sound_available()), // Sound capabilities
             11 => 1,                                          // Hyperlinks
             13 => u32::from(self.sound_available()),          // MOD tracker music
-            12 => u32::from(self.graphical_host && matches!(argument, 3 | 4)), // HyperlinkInput
+            12 => u32::from(self.graphical_host && matches!(argument, 3..=5)), // HyperlinkInput
             17..=18 => u32::from(self.graphical_host || self.terminal_host), // Line input echo / terminators
             19 => u32::from(
                 (self.graphical_host || self.terminal_host)
