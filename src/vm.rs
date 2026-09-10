@@ -1233,6 +1233,7 @@ impl Vm {
                     heap_next: self.heap_next,
                     heap_blocks: self.heap_blocks.clone(),
                 });
+                self.memory.clear_dirty_pages();
                 self.store_destination(&destination, 0, Width::Word)?;
             }
             0x126 => {

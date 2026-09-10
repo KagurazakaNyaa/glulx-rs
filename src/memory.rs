@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use crate::{Story, VmError};
 
@@ -63,6 +66,8 @@ pub struct Memory {
     ram_start: u32,
     ext_start: u32,
     original_end: u32,
+    #[serde(skip)]
+    dirty_pages: BTreeSet<u32>,
 }
 
 impl Memory {
@@ -76,7 +81,10 @@ impl Memory {
     ) -> BTreeMap<u32, MemoryPage> {
         let mut pages = previous.cloned().unwrap_or_default();
         pages.retain(|address, _| address.saturating_add(256) <= self.len());
-        for address in (self.ram_start..self.len()).step_by(256) {
+        for &address in &self.dirty_pages {
+            if address < self.ram_start || address.saturating_add(256) > self.len() {
+                continue;
+            }
             let mut baseline = [0; 256];
             let page_start = address as usize;
             let page_end = page_start + 256;
@@ -96,6 +104,15 @@ impl Memory {
             }
         }
         pages
+    }
+
+    pub(crate) fn clear_dirty_pages(&mut self) {
+        self.dirty_pages.clear();
+    }
+
+    pub(crate) fn mark_all_pages_dirty(&mut self) {
+        self.dirty_pages
+            .extend((self.ram_start..self.len()).step_by(256));
     }
 
     pub(crate) fn validate_session(&self, story: &Story) -> Result<(), VmError> {
@@ -141,6 +158,7 @@ impl Memory {
             ram_start: story.header.ram_start,
             ext_start: story.header.ext_start,
             original_end: story.header.end_mem,
+            dirty_pages: BTreeSet::new(),
         })
     }
 
@@ -194,18 +212,21 @@ impl Memory {
     pub fn write8(&mut self, address: u32, value: u8) -> Result<(), VmError> {
         self.check_write(address, 1)?;
         self.bytes[address as usize] = value;
+        self.mark_dirty_range(address, 1);
         Ok(())
     }
 
     pub fn write16(&mut self, address: u32, value: u16) -> Result<(), VmError> {
         self.check_write(address, 2)?;
         self.bytes[address as usize..address as usize + 2].copy_from_slice(&value.to_be_bytes());
+        self.mark_dirty_range(address, 2);
         Ok(())
     }
 
     pub fn write32(&mut self, address: u32, value: u32) -> Result<(), VmError> {
         self.check_write(address, 4)?;
         self.bytes[address as usize..address as usize + 4].copy_from_slice(&value.to_be_bytes());
+        self.mark_dirty_range(address, 4);
         Ok(())
     }
 
@@ -215,6 +236,7 @@ impl Memory {
         }
         self.check_write(address, length)?;
         self.bytes[address as usize..(address + length) as usize].fill(0);
+        self.mark_dirty_range(address, length);
         Ok(())
     }
 
@@ -228,6 +250,7 @@ impl Memory {
             source as usize..(source + length) as usize,
             destination as usize,
         );
+        self.mark_dirty_range(destination, length);
         Ok(())
     }
 
@@ -246,7 +269,11 @@ impl Memory {
         {
             return Ok(false);
         }
+        let old_size = self.len();
         self.bytes.resize(new_size as usize, 0);
+        if old_size != new_size {
+            self.mark_dirty_range(old_size.min(new_size), old_size.abs_diff(new_size));
+        }
         Ok(true)
     }
 
@@ -257,6 +284,7 @@ impl Memory {
             .copy_from_slice(&self.initial[self.ram_start as usize..self.ext_start as usize]);
         self.bytes[self.ext_start as usize..].fill(0);
         self.restore_protected(protected_bytes);
+        self.mark_all_pages_dirty();
     }
 
     pub fn restore(
@@ -275,6 +303,7 @@ impl Memory {
         *self = snapshot.clone();
         self.maximum = maximum;
         self.restore_protected(protected_bytes);
+        self.mark_all_pages_dirty();
         Ok(())
     }
 
@@ -308,6 +337,7 @@ impl Memory {
             self.bytes[address as usize..address as usize + 256].copy_from_slice(page.as_slice());
         }
         self.restore_protected(protected_bytes);
+        self.mark_all_pages_dirty();
         Ok(())
     }
 
@@ -341,6 +371,21 @@ impl Memory {
             .filter(|end| *end <= self.len())
             .map(|_| ())
             .ok_or(VmError::MemoryWrite(address))
+    }
+
+    fn mark_dirty_range(&mut self, address: u32, length: u32) {
+        if length == 0 {
+            return;
+        }
+        let start = address.max(self.ram_start) & !255;
+        let end = address
+            .saturating_add(length.saturating_sub(1))
+            .min(self.len().saturating_sub(1))
+            & !255;
+        if start > end {
+            return;
+        }
+        self.dirty_pages.extend((start..=end).step_by(256));
     }
 
     fn protected_bytes(

@@ -19,7 +19,7 @@ GarglK 的 CMake 在这个提交中把 vendored Git 标为 1.3.8，并为它启�
 ## 结论
 
 1. **执行器仍是最大差异。** glulx-rs 逐条执行大型 Rust `match`，并以 2048 项固定直接索引缓存保存 ROM 指令的操作码、模式和立即数；它跳过了重复解码，但没有 Git 那种把一段指令编译为内部代码的 block compiler、peephole 重写或 native/JIT 后端。Git 用 Glulx 地址哈希表查找编译块，未命中时编译并按运行次数压缩代码缓存。
-2. **undo 的实际页复制已经接近 Git，但预算入口仍不同。** glulx-rs 以 256 字节页记录相对故事初始状态的差异，并在相邻记录间共享 `Arc` 页；栈、heap 元数据和页表仍按记录保存。Git 为每个 RAM 页保留指针表，未改变页指向初始映像或上一条记录，改变页才分配副本。glulx-rs 当前 `saveundo` 的预算检查仍按完整内存/初始映像长度估算，随后生成页快照时还会遍历 RAM 页面，因此大内存游戏的准入检查和快照生成开销还没有完全变成按页成本。
+2. **undo 的实际页复制已经接近 Git，但预算入口仍不同。** glulx-rs 以 256 字节页记录相对故事初始状态的差异，并在相邻记录间共享 `Arc` 页；写入会标记 dirty pages，页快照只比较这些页，栈、heap 元数据和页表仍按记录保存。Git 为每个 RAM 页保留指针表，未改变页指向初始映像或上一条记录，改变页才分配副本。glulx-rs 当前 `saveundo` 的预算入口仍按完整内存/初始映像长度估算，因此大内存游戏的准入检查开销还没有完全变成按页成本。
 3. **活动 VM/Glk 的所有权仍是单一 owner。** glulx-rs 中正在执行的 VM、Glk 状态、窗口视图和 eframe UI 在同一逻辑线程；故事加载 worker 可以在安装前构造新的 `Vm` 并初始化音频，但不会与已安装的 VM 并发共享。其他后台线程负责图片解码、音频资源准备、翻译和诊断心跳。GarglK 的 launcher 通过 `QProcess` 隔离解释器进程，但 Git VM 与该进程内的 Qt Glk 仍由同一解释器线程驱动。
 4. **宿主大块工作已部分异步。** GUI 故事读取、VM 建立、图片解码、采样/MOD 和普通 SONG 音频准备已通过带请求 ID 的 worker 返回；纹理上传、软件画布栅格化、文本布局、变化窗口复制和桌面会话序列化仍在 UI 线程。`play_multi` 为保持多声道同一采样帧起播，仍在 VM owner 内同步准备其批量音源。
 5. **内存策略是 glulx-rs 的独有能力。** 游戏地址空间、进程硬上限、undo、图形缓存、文本图片、解码图片、音频资源和 SONG PCM 分开设额度。固定 MiB 或百分比都可以写入配置，命令行覆盖只对本次运行生效；Linux 使用 cgroup 上限或 `MemAvailable`，Windows 使用 `GlobalMemoryStatusEx` 的可用物理内存，并可用 `RLIMIT_AS`/Windows Job Object 设置进程上限。
@@ -44,7 +44,7 @@ Git 的 [解释器入口](https://github.com/DavidKinder/Git/blob/8f5604e10c6194
 
 glulx-rs 的 [资源预算](https://github.com/KagurazakaNyaa/glulx-rs/blob/4eccf8b527349d3ae226be44194f1925477f94ee/src/memory.rs)默认值为 undo 256 MiB、图形缓存 512 MiB、文本图片 256 MiB、单图解码 256 MiB、音频资源 256 MiB、SONG PCM 128 MiB。`Budget` 可以是整数 MiB 或 `1%` 到 `100%`；配置文件与命令行分别由 [memory policy](https://github.com/KagurazakaNyaa/glulx-rs/blob/4eccf8b527349d3ae226be44194f1925477f94ee/src/memory_budget.rs) 解析，命令行覆盖不写回配置。
 
-页快照以故事初始 RAM 和扩展区零值为基线，只保存不同页；恢复时重建目标长度、覆盖保存页，并恢复当前 `protection` 区域。旧桌面会话中的完整 `Memory` 会在 [session validation](https://github.com/KagurazakaNyaa/glulx-rs/blob/4eccf8b527349d3ae226be44194f1925477f94ee/src/vm/session.rs) 中迁移为页表。这个格式只影响桌面会话和 VM undo，不改变可移植 IFZS 的 `CMem`/`Stks`/`MAll` 合同；`saveundo` 的预算入口按完整内存/初始映像长度估算，而实际的完整 RAM 遍历发生在页快照生成阶段，这是下一步可继续优化的热点。
+页快照以故事初始 RAM 和扩展区零值为基线，只保存不同页；恢复时重建目标长度、覆盖保存页，并恢复当前 `protection` 区域。写入、扩容、restart 和 restore 会更新 dirty-page 集合，成功保存 undo 后清空它。旧桌面会话中的完整 `Memory` 会在 [session validation](https://github.com/KagurazakaNyaa/glulx-rs/blob/4eccf8b527349d3ae226be44194f1925477f94ee/src/vm/session.rs) 中迁移为页表。这个格式只影响桌面会话和 VM undo，不改变可移植 IFZS 的 `CMem`/`Stks`/`MAll` 合同；预算入口仍按完整内存/初始映像长度估算，这是下一步可继续优化的热点。
 
 Git 的 [Windows 端口](https://github.com/DavidKinder/Git/blob/8f5604e10c6194f7d0a6222491eaeb236a70a874/git_windows.c)默认使用 256 KiB 代码缓存和 2 MiB undo，并用 `CreateFileMapping`/`MapViewOfFile` 传入游戏映像。Git README 将 `cacheSize` 定义为重编译代码缓存，将 `undoSize` 定义为 undo 总预算；这两个数不能直接与 glulx-rs 的多类 MiB 预算相加。GarglK CMake 的 Git 目标实际编译 `git_unix.c`，所以这个 mmap 结论只适用于 Git 的独立 Windows 端口，不适用于 GarglK 当前构建。
 
@@ -122,7 +122,7 @@ Git 的 `savefile.c`/`saveundo.c`处理可移植存档、栈和页表，不保�
 | 可观测性 | 已有 `vm-slice`、UI、publish、布局、图形上传、音频准备、undo 和会话阶段计时 | 输入事件到每个阶段的跨线程 trace 仍可进一步细化 |
 | 异步宿主工作 | 故事、图片、采样/MOD/普通 SONG 音频准备已使用有序且有界的 worker | 纹理上传、布局、软件栅格化、`play_multi` SONG 批处理和会话编码仍在 owner/UI |
 | 指令缓存 | ROM decoded cache 已实现，RAM 代码不缓存 | 没有 Git 风格 block compiler、peephole 或 JIT |
-| undo | 256 字节页差分、共享页、旧会话迁移已实现 | 页表是 Rust `BTreeMap`，不是 Git 的原始指针数组 |
+| undo | 256 字节页差分、dirty-page 跟踪、共享页、旧会话迁移已实现 | 页表是 Rust `BTreeMap`，不是 Git 的原始指针数组；预算入口仍按完整长度估算 |
 | Glk/呈现热路径 | 参数使用固定小缓冲，翻译关闭时不捕获，transcript 显示采用虚拟行，变化窗口发布有界 | 逐字符 Glk 输出和变化窗口内的完整向量仍不同于 GarglK 的 dirty 行 |
 | 字体/排版 | 已有字体 fallback、样式 hint、布局缓存和 CJK 分段测试；`4eccf8b` 修复了文本/网格窄斜体字形四边形自相交 | 真实八种字体组合、FreeType 字距和跨项目像素差分仍需实机验收 |
 
