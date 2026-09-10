@@ -2,7 +2,7 @@
 
 [English](glulx-validation.md) | [中文](glulx-validation.ZH.md)
 
-更新：2026-09-10。当前实现状态 commit 为 `71e6889`；本地验收环境为 Linux x86_64。本文件描述当前代码，不宣称穷尽 Glulx、Glk、媒体或跨平台符合性。
+更新：2026-09-10。当前实现状态 commit 为 `bad16fb`；本地验收环境为 Linux x86_64。本文件描述当前代码，不宣称穷尽 Glulx、Glk、媒体或跨平台符合性。
 
 ## 当前验证
 
@@ -15,7 +15,7 @@ RUSTC_WRAPPER= cargo build --release
 
 当前检查通过：
 
-- 278 个库测试通过；6 个手动性能测试保持 ignored。
+- 272 个库测试通过；6 个手动性能测试保持 ignored。
 - 6 个 CLI 测试通过。
 - 格式检查、全目标 Clippy 和 release 构建通过。
 - undo 回归证明：2 MiB 故事在 1 MiB undo 预算下可以保留单页快照；共享故事映像不计入该快照预算。
@@ -40,6 +40,8 @@ python3 tools/benchmark-stories.py \
 真实故事测量是启动/驻留内存 workload，不是完整通关。当前剩余的主要内存成本是故事容器、执行映像、VM 内存和媒体/资源数据；仓库目前没有使用 mmap 或 block compiler。
 
 当前 release 测量对代表性的 650 MB 和 705 MB Blorb 文件记录峰值 HWM `755844 KiB` 和 `819592 KiB`。这些数字受机器和故事内容影响，仅作为对比证据，不是统一上限。
+
+headless profile 现在会把诊断 heartbeat 保留到 JSON 产物。在启动 workload 的首个两秒区间，代表性故事执行约 278 万条指令，VM-slice 用时约 92 ms，最终进入 `WaitingForChar`，decoded-cache 命中约 265 万次、未命中约 10.6 万次。这个 workload 没有显示 VM dispatch 是主要 CPU 成本；考虑 block compilation 前应先使用更长的脚本路线。
 
 ## 覆盖矩阵
 
@@ -85,6 +87,7 @@ python3 tools/make-media-fixture.py "<output-dir>/glulx-media.gblorb"
 python3 tools/make-style-fixture.py "<output-dir>/glulx-styles.ulx"
 python3 tools/check-graphics-ui.py --candidate target/debug/glulx-rs --output "<output-dir>/glulx-graphics-ui"
 python3 tools/check-terminal.py --candidate target/debug/glulx-rs
+python3 tools/benchmark-stories.py --command-file "<fixture-dir>/input.txt" "<story-dir>/story.gblorb"
 ```
 
 参考检查需要单独提供样本和解释器路径，不得依赖开发者机器的专属绝对路径。

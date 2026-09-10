@@ -2,7 +2,7 @@
 
 [English](glulx-remaining-spec-audit.md) | [中文](glulx-remaining-spec-audit.ZH.md)
 
-更新：2026-09-10。本文件描述当前实现状态 commit `71e6889` 的规范边界和风险，不记录历史实现过程。详细测试命令见[验收记录](glulx-validation.ZH.md)，实现清单见[规范清单](glulx-spec-checklist.ZH.md)。
+更新：2026-09-10。本文件描述当前实现状态 commit `bad16fb` 的规范边界和风险，不记录历史实现过程。详细测试命令见[验收记录](glulx-validation.ZH.md)，实现清单见[规范清单](glulx-spec-checklist.ZH.md)。
 
 ## 来源与判定口径
 
@@ -34,6 +34,6 @@
 1. 修改 VM、资源或宿主行为时，按[验收记录](glulx-validation.ZH.md)重新运行当前 Linux 参考、GUI 和 TTY 工具。
 2. 补充 Windows/macOS 实机的 GUI、字体/DPI、终端输入、文件提示、音频和会话恢复记录。
 3. 扩展媒体矩阵，覆盖 codec、位深、采样率、声道数和历史 tracker 变体；成功和失败都要记录。
-4. 在长时间真实故事 workload 上 profile 剩余内存和 CPU 成本，再决定 mmap、block compilation 或进一步 UI 优化。
+4. 将当前 headless profile 扩展到包含图像/音频的更长脚本路线，再根据测量结果选择 mmap、block compilation 或进一步 UI 优化。
 
 这些是工程和验收工作，不表示当前实现违反了某条强制 Glulx/Glk 规则。

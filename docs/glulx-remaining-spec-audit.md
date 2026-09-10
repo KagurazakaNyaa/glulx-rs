@@ -2,7 +2,7 @@
 
 [English](glulx-remaining-spec-audit.md) | [中文](glulx-remaining-spec-audit.ZH.md)
 
-Updated: 2026-09-10. This audit describes the current implementation state at commit `71e6889`. It is a current scope and risk record, not a historical implementation log. Detailed test commands are in the [validation record](glulx-validation.md), and the implementation checklist is in [glulx-spec-checklist.md].
+Updated: 2026-09-10. This audit describes the current implementation state at commit `bad16fb`. It is a current scope and risk record, not a historical implementation log. Detailed test commands are in the [validation record](glulx-validation.md), and the implementation checklist is in [glulx-spec-checklist.md].
 
 ## Sources and Classification
 
@@ -34,6 +34,6 @@ The review uses the [Glulx 3.1.3 specification](https://eblong.com/zarf/glulx/Gl
 1. Run the current Linux reference, GUI, and TTY scripts from the [validation record](glulx-validation.md) when changing VM, resource, or host behavior.
 2. Add Windows and macOS on-device records for GUI, fonts/DPI, terminal input, file prompts, audio, and session restoration.
 3. Expand the media matrix with codec, bit-depth, sample-rate, channel-count, and historical tracker variants; record failure behavior as well as successful playback.
-4. Profile remaining memory and CPU costs on long-running real-story workloads before choosing mmap, block compilation, or further UI changes.
+4. Extend the current headless profile to a longer scripted route with images/audio, then choose between mmap, block compilation, and further UI changes from measured costs.
 
 These priorities are engineering and validation work, not claims that the current implementation violates a mandatory Glulx or Glk rule.

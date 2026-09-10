@@ -2,7 +2,7 @@
 
 [English](glulx-spec-checklist.md) | [中文](glulx-spec-checklist.ZH.md)
 
-Updated: 2026-09-10. The current implementation state is `71e6889`. `[x]` means implementation and the listed validation are complete, not exhaustive conformance certification; open work uses `[ ]`. Specification evidence, classifications, and acceptance criteria are in the [remaining capability audit](glulx-remaining-spec-audit.md). Test details, fixture versions, and reproduction commands are in the [validation record](glulx-validation.md); implementation limits are in [compatibility](compatibility.md).
+Updated: 2026-09-10. The current implementation state is `bad16fb`. `[x]` means implementation and the listed validation are complete, not exhaustive conformance certification; open work uses `[ ]`. Specification evidence, classifications, and acceptance criteria are in the [remaining capability audit](glulx-remaining-spec-audit.md). Test details, fixture versions, and reproduction commands are in the [validation record](glulx-validation.md); implementation limits are in [compatibility](compatibility.md).
 
 ## Specification Boundaries
 
@@ -53,7 +53,7 @@ Evidence: [window tree](../src/vm/windows.rs), [streams](../src/vm/streams.rs), 
 
 ## Validation and Maintenance
 
-- [x] 278 library tests and 6 CLI tests pass; 6 performance tests remain ignored for manual measurement. Domain-specific matrices and edge-case coverage are in the validation record.
+- [x] 272 library tests and 6 CLI tests pass; 6 performance tests remain ignored for manual measurement. Domain-specific matrices and edge-case coverage are in the validation record.
 - [x] `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo build --release` pass on the current repository.
 - [x] Final integrated Glulxercise general, single-precision, and double-precision runs yielded 92 passing sections, passing all three rounds; an earlier random-distribution threshold failure is also retained in the validation record.
 - [x] All 94 results for Inform acceleration functions 1–13 exactly match Glulxe; the synthetic media story verifies image reflow, clicks, MOD completion events, and session restoration.
