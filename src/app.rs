@@ -537,10 +537,15 @@ impl PlayerApp {
     fn run_vm(&mut self) {
         self.sync_translation_capture();
         let _stage = crate::diagnostics::stage("vm-slice");
+        let capture_translation = self.settings.translation.enabled;
         let Some(vm) = &mut self.vm else {
             return;
         };
-        vm.enable_text_buffer_events();
+        if capture_translation {
+            vm.enable_text_buffer_events();
+        } else {
+            vm.disable_text_buffer_events();
+        }
         let word = |c: [u8; 3]| u32::from_be_bytes([0, c[0], c[1], c[2]]);
         vm.set_light_fonts(self.fonts.light_fonts);
         vm.set_glyph_support(self.fonts.support.clone());

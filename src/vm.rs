@@ -678,6 +678,10 @@ impl Vm {
         self.text_buffer_events.get_or_insert_with(Vec::new);
     }
 
+    pub(crate) fn disable_text_buffer_events(&mut self) {
+        self.text_buffer_events = None;
+    }
+
     pub(crate) fn take_text_buffer_events(&mut self) -> Vec<TextBufferEvent> {
         self.text_buffer_events
             .as_mut()
@@ -3526,6 +3530,21 @@ pub(crate) mod tests {
             }]
         );
         assert_eq!(vm.take_output(), "ABCD");
+    }
+
+    #[test]
+    fn disabling_text_buffer_events_drops_pending_capture_without_affecting_output() {
+        let story = Story::from_bytes(&image_with_program(&[0x81, 0x20]), None).unwrap();
+        let mut vm = Vm::new(story).unwrap();
+        let window = text_buffer_glk(&mut vm, 0x23, &[0, 0, 0, WINTYPE_TEXT_BUFFER, 0]);
+        let stream = text_buffer_glk(&mut vm, 0x2c, &[window]);
+        vm.enable_text_buffer_events();
+        text_buffer_glk(&mut vm, 0x81, &[stream, 'A' as u32]);
+        vm.disable_text_buffer_events();
+        assert!(vm.take_text_buffer_events().is_empty());
+        text_buffer_glk(&mut vm, 0x81, &[stream, 'B' as u32]);
+        assert!(vm.take_text_buffer_events().is_empty());
+        assert_eq!(vm.take_output(), "AB");
     }
 
     #[test]
