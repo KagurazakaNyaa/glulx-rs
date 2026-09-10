@@ -1,190 +1,301 @@
-# glulx-rs、GarglK 与 David Kinder Git：固定提交源码差异
+# glulx-rs、Glulxe 与 Git：基于当前实现的差异
 
-复核日期：2026-09-10。跨项目结论使用下表固定的源码提交；当前实现状态以 `f9c855d` 说明。外部项目结论来自固定提交的源码检查，不代表当天 upstream 的最新状态，也不等同于同一构建配置下的运行时基准。
+复核日期：2026-09-10。
 
-本文按三个项目的实际职责比较固定基线的实现：`glulx-rs` 同时提供 Glulx VM、Glk 状态和 eframe 播放器；Git 只提供 Glulx VM，必须链接 Glk；GarglK 提供 Glk 桌面宿主、资源处理和启动器，并在本次基线中集成 Git 1.3.8。
+本文把两个成熟实现作为不同方向的基准：
 
-## 固定比较基线
+- **Glulxe**：Glulx 参考解释器，用于行为、边界和可移植存档互操作。
+- **Git**：David Kinder 的高速 Glulx 解释器，用于执行器、缓存和内存策略。
 
-glulx-rs 的跨项目比较代码引用固定到 `4eccf8b`，不随当前分支推进而改变。GarglK 和 Git 的行为描述同样只适用于各自表中的提交；构建宏、宿主后端、字体、DPI、音频设备和操作系统会影响运行时结果。
+两者本身都不是完整桌面播放器，通常需要链接 Glk 实现。因而本文把
+`glulx-rs` 的 VM、Glk 和播放器拆开比较；不把裸 Glulxe 或裸 Git 与 eframe
+画布直接做视觉或交互比较。Gargoyle 是可以承载多个解释器的桌面 Glk 宿主，
+只在宿主边界处作为补充参照，而不是第三个 VM 基准。
 
-| 项目 | 固定源码基线 |
-| --- | --- |
-| glulx-rs | [`4eccf8b`](https://github.com/KagurazakaNyaa/glulx-rs/commit/4eccf8b527349d3ae226be44194f1925477f94ee)，当前播放器与 VM |
-| GarglK | [`9597add`](https://github.com/garglk/garglk/commit/9597add4091e5aaf6ebc31399b049158e12ca565)，2026-09-07 master |
-| David Kinder Git | [`8f5604e`](https://github.com/DavidKinder/Git/commit/8f5604e10c6194f7d0a6222491eaeb236a70a874)，master，版本 1.3.9 |
+## 比较基线
 
-GarglK 的 CMake 在这个提交中把 vendored Git 标为 1.3.8，并为它启用 `USE_INLINE`，按配置追加 `GIT_NEED_TICK`；不能把它和 Git master 1.3.9 或 Git 的其他构建选项当成同一个二进制。
+| 对象 | 固定基线 | 角色 |
+| --- | --- | --- |
+| glulx-rs | 当前仓库 [`364f9cc`](https://github.com/KagurazakaNyaa/glulx-rs/commit/364f9cc2fb75a4baeb293d54d1073825d44c170b)；最近一份代码实现为 `f9c855d` | Rust VM、Glk 状态、桌面播放器和 TTY |
+| Glulxe | [`56ab8743`](https://github.com/erkyrath/glulxe/commit/56ab8743bab565de307bd892c555d8d8897ed517) | C 参考 VM 与 Glk ABI |
+| Git | [`8f5604e`](https://github.com/DavidKinder/Git/commit/8f5604e10c6194f7d0a6222491eaeb236a70a874) | C 高速 VM 与 Glk ABI |
 
-## 当前仓库状态
-
-当前实现状态 `f9c855d` 在固定比较基线之上还包含以下实现变化：
-
-| 提交 | 当前变化 |
-| --- | --- |
-| `5c3d20e` | 故事映像和 `Memory.initial` 使用 `Arc` 共享；文件加载转移已拥有的 Blorb 字节，减少大故事启动时的复制。 |
-| `1daf7bb` | 修复画布性能测试中的 Clippy 类型转换警告。 |
-| `1a27dd4` | undo 预算按保留页、栈字节和堆记录数据计费，不再把共享故事映像和当前 VM 地址空间计入单次快照预算。 |
-| `ebab7cb` | 超预算 undo 候选在构造完整页表前按页数上限拒绝，限制临时分配峰值。 |
-| `71e6889` | VM 只为 RAMSTART 之后的可写区分配当前内存，ROM 直接从共享故事映像读取。 |
-| `bad16fb` | headless workload 将诊断 heartbeat、VM 指令数、阶段耗时和 decode 命中率写入基准 JSON。 |
-| `65173ec` | Bundled Blorb 的 container 和执行映像共享 backing buffer，减少重复驻留；真实故事 RSS 进一步下降。 |
-| `f9c855d` | RAM-relative 布局保留搜索的连续切片热路径；当前线性查找微基准约为 `22.2 µs/iteration`。 |
-
-当前本地验证为：`273` 个库测试通过、`6` 个 CLI 测试通过、`6` 个性能测试忽略；fmt、全目标 Clippy 和 release 构建通过。真实大故事基准仍显示加载后的主要成本是故事容器、VM 内存和媒体资源的驻留副本，尚未引入 mmap 或 block compiler。
+当前 `HEAD` 相对 `f9c855d` 只有文档清理，因此本文的实现判断以工作树中的
+源码为准。外部项目均固定到上表提交；构建宏、Glk 后端、字体、DPI、音频
+设备和操作系统会改变运行时结果。本文是源码和已有验证记录的比较，不是同一
+机器、同一故事、同一宿主配置下的性能排名。
 
 ## 结论
 
-1. **执行器仍是最大差异。** glulx-rs 逐条执行大型 Rust `match`，并以 2048 项固定直接索引缓存保存 ROM 指令的操作码、模式和立即数；它跳过了重复解码，但没有 Git 那种把一段指令编译为内部代码的 block compiler、peephole 重写或 native/JIT 后端。Git 用 Glulx 地址哈希表查找编译块，未命中时编译并按运行次数压缩代码缓存。
-2. **undo 的实际页复制已经接近 Git。** glulx-rs 以 256 字节页记录相对故事初始状态的差异，并在相邻记录间共享 `Arc` 页；写入会标记 dirty pages，页快照只比较这些页，栈、heap 元数据和页表仍按记录保存。当前 `saveundo` 按候选快照实际保留的页、栈字节和 heap 记录数据计费；共享故事映像和当前 VM 地址空间不计入预算。Git 为每个 RAM 页保留指针表，未改变页指向初始映像或上一条记录，改变页才分配副本。
-3. **活动 VM/Glk 的所有权仍是单一 owner。** glulx-rs 中正在执行的 VM、Glk 状态、窗口视图和 eframe UI 在同一逻辑线程；故事加载 worker 可以在安装前构造新的 `Vm` 并初始化音频，但不会与已安装的 VM 并发共享。其他后台线程负责图片解码、音频资源准备、翻译和诊断心跳。GarglK 的 launcher 通过 `QProcess` 隔离解释器进程，但 Git VM 与该进程内的 Qt Glk 仍由同一解释器线程驱动。
-4. **宿主大块工作已部分异步。** GUI 故事读取、VM 建立、图片解码、采样/MOD 和普通 SONG 音频准备已通过带请求 ID 的 worker 返回；纹理上传、软件画布栅格化、文本布局、变化窗口复制和桌面会话序列化仍在 UI 线程。`play_multi` 为保持多声道同一采样帧起播，仍在 VM owner 内同步准备其批量音源。
-5. **内存策略是 glulx-rs 的独有能力。** 游戏地址空间、进程硬上限、undo、图形缓存、文本图片、解码图片、音频资源和 SONG PCM 分开设额度。固定 MiB 或百分比都可以写入配置，命令行覆盖只对本次运行生效；Linux 使用 cgroup 上限或 `MemAvailable`，Windows 使用 `GlobalMemoryStatusEx` 的可用物理内存，并可用 `RLIMIT_AS`/Windows Job Object 设置进程上限。
-6. **排版仍不是同一算法，但窄斜体回归已修复。** glulx-rs 使用 egui `LayoutJob`/`Galley` 和两个常规字体族，斜体由 egui 的 oblique 标志绘制，加粗用轻微偏移重复绘制；当前版本还会修正窄斜体字形四边形自相交的问题，并同时覆盖文本缓冲区和网格。GarglK 为比例/等宽、普通/斜体、粗体/粗斜体建立八种 FreeType `FontFace`，并缓存字形、字距和缺字替换。Git 不负责排版。
+1. **功能覆盖已经接近可用播放器，主要差距不再是 VM 骨架。** 当前代码围绕
+   Glulx 3.1.3 目标覆盖核心指令、字符串、heap、搜索、浮点/双精度、
+   Inform 加速、IFZS、undo，以及相当完整的 Glk 窗口、流、事件、图像和声音
+   路径。库测试当前为 `273` 个通过、`6` 个手工性能测试忽略，CLI 测试为
+   `6` 个通过；这仍不是所有合法故事和所有宿主组合的证明。
+2. **与 Glulxe 的差异主要在边界合同和宿主组合，而不是已有 opcode 的数量。**
+   Glulxe 的 `exec.c`、`serial.c` 和 `glkop.c` 是当前最合适的行为 oracle；仓库
+   已有 `tools/check-reference.py`，可以比较输出、IFZS 恢复、加速、长压缩字符串
+   和共享文件流，但真实游戏路线和跨平台运行仍需扩大。
+3. **与 Git 的最大结构差异仍是执行器。** `glulx-rs` 是带 2048 项 ROM
+   decoded cache 的逐条 Rust 解释器；Git 会把指令编译成代码块并使用
+   peephole/cache 机制。当前没有 block compiler、native/JIT 或 Git 风格的
+   热路径专门化；是否值得加入必须由真实故事 profile，而不是单条指令微基准决定。
+4. **`glulx-rs` 的独特价值在集成和资源治理。** 它在一个 Rust 产品中同时拥有
+   VM、Glk 状态、eframe GUI、crossterm TTY、图片/音频解码、会话恢复和可配置
+   内存额度。Glulxe/Git 把这些责任交给外部 Glk/播放器，因此更容易替换宿主，
+   但不能单独提供同等的桌面体验。
+5. **当前最实际的风险是“能启动”到“长期兼容”的距离。** 未覆盖的重点包括
+   完整游戏路线、Windows/macOS 实机、所有 Glk 可选模块、历史 tracker 变体、
+   字体和 DPI 差异，以及异常输入下与两个 C 实现的逐项行为差异。
 
-## 执行器与时间片
+## 总体对照
 
-glulx-rs 的 [VM 执行路径](https://github.com/KagurazakaNyaa/glulx-rs/blob/4eccf8b527349d3ae226be44194f1925477f94ee/src/vm.rs)先轮询事件，再调用 `step`。`step` 解码操作码、最多八个操作数，执行整数、字符串、Glk、浮点、双精度和加速函数。ROM 地址经过 [decoded cache](https://github.com/KagurazakaNyaa/glulx-rs/blob/4eccf8b527349d3ae226be44194f1925477f94ee/src/vm.rs) 的固定索引；RAM 地址不缓存，以保留自修改代码语义。缓存不会跨桌面会话序列化，命中和未命中计数会出现在诊断摘要中。
-
-播放器的 [VM 时间片](https://github.com/KagurazakaNyaa/glulx-rs/blob/4eccf8b527349d3ae226be44194f1925477f94ee/src/app.rs)每次最多执行 1024 条指令，并在批次结束时检查约 8 ms、状态变化或呈现版本变化。这个边界保证窗口可以重绘，但单个重型 opcode 或一个批次仍可能超过目标时间；长时间只计算、不产生 Glk 边界的游戏会跨多个 eframe 周期完成一次操作。
-
-Git 的 [解释器入口](https://github.com/DavidKinder/Git/blob/8f5604e10c6194f7d0a6222491eaeb236a70a874/terp.c)把 PC、栈帧、局部变量和值栈放在局部寄存器/指针中，用 `NEXT` 跳到内部标签。它的 [代码块查找](https://github.com/DavidKinder/Git/blob/8f5604e10c6194f7d0a6222491eaeb236a70a874/compiler.h)通过地址哈希表命中已编译块，否则进入 [编译和缓存压缩](https://github.com/DavidKinder/Git/blob/8f5604e10c6194f7d0a6222491eaeb236a70a874/compiler.c)。`terp.c` 同时包含 direct-threading 分支，但是否启用取决于构建宏；GarglK 基线的 `GIT_MACROS` 只有 `USE_INLINE` 和可选 `GIT_NEED_TICK`。
-
-## 内存、限制与 undo
-
-| 项目 | glulx-rs | Git | GarglK |
+| 关注点 | glulx-rs 当前实现 | Glulxe | Git |
 | --- | --- | --- | --- |
-| 故事内存 | `Memory` 保存当前字节和初始故事映像，地址访问带边界/ROM 检查 | `gInitMem` 保存只读映像，`gMem` 保存可写的 `EndMem` | 不拥有 Glulx 地址空间，由 Git 负责 |
-| 游戏上限 | 默认 1 GiB；配置支持固定 MiB 或启动内存百分比，按 256 字节对齐 | 地址值为 32 位；端口通常只给固定缓冲区，不提供同等策略 | 没有独立的 Glulx 内存策略 |
-| 进程上限 | Linux `RLIMIT_AS`，Windows Job Object；启动时设置且保留更严格的继承上限 | 由宿主/操作系统决定 | 由 launcher/解释器进程和操作系统决定 |
-| undo | 256 字节差分页，未改变页与前一条记录共享；栈、heap 和 protection 边界单独保存 | 256 字节页指针表；未改变页共享初始映像或上一记录，改变页复制 | 宿主不实现 Git 的 undo 数据结构 |
+| VM 执行 | `src/vm.rs` 中直接解码并执行；错误返回 `VmError` | 以参考实现为目标的 C 执行循环，VM 与 Glk 分开 | C 执行器配合代码块编译器和 peephole 优化 |
+| 指令缓存 | 2048 项固定索引 decoded cache；只缓存 ROM，RAM 代码不缓存 | 以直接解释和边界清晰为主，适合做差分基线 | 按 Glulx 地址查找已编译块，缓存大小影响速度和内存 |
+| VM 内存 | ROM 从共享 `StoryImage` 读取；RAM 使用相对 `RAMSTART` 的可写 `Vec`，地址访问有边界和写保护 | `memmap` 管理故事内存，栈单独分配；`SERIALIZE_CACHE_RAM` 只影响存档缓存 | `gInitMem` 保存初始映像，`gMem` 保存运行内存；独立端口还提供映像映射路径 |
+| undo | 256 字节 dirty-page 差分，未变页通过 `Arc` 共享；最多 16 份并按 payload 预算淘汰 | `saveundo` 保存 memory、heap、stack 记录，默认链长度为 8 | 有页级 undo 指针表，并把 undo 与代码缓存等运行时预算分开管理 |
+| 可移植存档 | 输出 `CMem`、`Stks`、`MAll`；校验完成后才替换 VM | `serial.c` 是现有 Glulxe 互操作基线 | `savefile.c`/`saveundo.c` 提供自己的存档和 undo 实现 |
+| Glk 边界 | 在 VM 内直接分发 selector，并保存窗口/流/事件/fileref 状态 | `glkop.c` 转到外部 Glk provider | `glkop.c` 转到外部 Glk provider，并保留 C ABI 快速路径 |
+| 桌面和终端 | 自带 eframe GUI、crossterm TTY、管道协议和原生设置 | 不提供统一桌面 GUI；由 CheapGlk、RemGlk 等宿主承担 | 不提供统一桌面 GUI；端口和链接的 Glk 决定体验 |
+| 媒体 | Rust 图片、采样、MOD/XM/S3M/IT、SONG 和 rodio 路径；部分准备异步 | 媒体由所链接的 Glk/平台处理 | 媒体由所链接的 Glk/平台处理 |
+| 内存治理 | VM、undo、图形、文本图片、解码图片、音频和进程可分别设额度 | 取决于端口和操作系统策略 | README 和端口提供缓存/undo 选项，但不是与本项目相同的多类资源政策 |
+| 失败模型 | 非法内存、opcode、栈、存档和输入可返回带类型的错误；未知 Glk selector 记录并返回零 | 参考实现行为受 C 端口和 Glk provider 影响 | 行为受 C 端口、编译选项和 Glk provider 影响 |
 
-glulx-rs 的 [资源预算](https://github.com/KagurazakaNyaa/glulx-rs/blob/4eccf8b527349d3ae226be44194f1925477f94ee/src/memory.rs)默认值为 undo 256 MiB、图形缓存 512 MiB、文本图片 256 MiB、单图解码 256 MiB、音频资源 256 MiB、SONG PCM 128 MiB。`Budget` 可以是整数 MiB 或 `1%` 到 `100%`；配置文件与命令行分别由 [memory policy](https://github.com/KagurazakaNyaa/glulx-rs/blob/4eccf8b527349d3ae226be44194f1925477f94ee/src/memory_budget.rs) 解析，命令行覆盖不写回配置。
+外部实现的职责依据见 Glulxe 的 [README](https://github.com/erkyrath/glulxe/blob/56ab8743bab565de307bd892c555d8d8897ed517/README.md)、
+[执行器](https://github.com/erkyrath/glulxe/blob/56ab8743bab565de307bd892c555d8d8897ed517/exec.c)、
+[存档](https://github.com/erkyrath/glulxe/blob/56ab8743bab565de307bd892c555d8d8897ed517/serial.c)、
+[undo](https://github.com/erkyrath/glulxe/blob/56ab8743bab565de307bd892c555d8d8897ed517/saveundo.c)
+和 [Glk bridge](https://github.com/erkyrath/glulxe/blob/56ab8743bab565de307bd892c555d8d8897ed517/glkop.c)，
+以及 Git 的 [README](https://github.com/DavidKinder/Git/blob/8f5604e10c6194f7d0a6222491eaeb236a70a874/README.txt)、
+[执行器](https://github.com/DavidKinder/Git/blob/8f5604e10c6194f7d0a6222491eaeb236a70a874/terp.c)、
+[代码块编译器](https://github.com/DavidKinder/Git/blob/8f5604e10c6194f7d0a6222491eaeb236a70a874/compiler.c)、
+[undo](https://github.com/DavidKinder/Git/blob/8f5604e10c6194f7d0a6222491eaeb236a70a874/saveundo.c)
+和 [Glk bridge](https://github.com/DavidKinder/Git/blob/8f5604e10c6194f7d0a6222491eaeb236a70a874/glkop.c)。
 
-页快照以故事初始 RAM 和扩展区零值为基线，只保存不同页；恢复时重建目标长度、覆盖保存页，并恢复当前 `protection` 区域。写入、扩容、restart 和 restore 会更新 dirty-page 集合，成功保存 undo 后清空它。旧桌面会话中的完整 `Memory` 会在 [session validation](https://github.com/KagurazakaNyaa/glulx-rs/blob/4eccf8b527349d3ae226be44194f1925477f94ee/src/vm/session.rs) 中迁移为页表。这个格式只影响桌面会话和 VM undo，不改变可移植 IFZS 的 `CMem`/`Stks`/`MAll` 合同；页表仍是 Rust `BTreeMap`，并且候选页快照在预算判断前需要构造，后续可继续优化其临时峰值分配。
+## 1. VM 执行器
 
-Git 的 [Windows 端口](https://github.com/DavidKinder/Git/blob/8f5604e10c6194f7d0a6222491eaeb236a70a874/git_windows.c)默认使用 256 KiB 代码缓存和 2 MiB undo，并用 `CreateFileMapping`/`MapViewOfFile` 传入游戏映像。Git README 将 `cacheSize` 定义为重编译代码缓存，将 `undoSize` 定义为 undo 总预算；这两个数不能直接与 glulx-rs 的多类 MiB 预算相加。GarglK CMake 的 Git 目标实际编译 `git_unix.c`，所以这个 mmap 结论只适用于 Git 的独立 Windows 端口，不适用于 GarglK 当前构建。
+### 当前实现
 
-## Glk dispatcher 与对象边界
+`Vm::step` 负责一条指令的取码、操作数加载、执行和结果写回；
+`operand_count` 明确列出支持的 opcode，未知 opcode 返回 `UnsupportedOpcode`。
+`fetch_decoded` 对 ROM 地址缓存 opcode、操作数模式和下一条 PC，对 RAM 地址不缓存，
+以保留自修改代码语义。操作数最多八个，取码过程检查地址模式和内存边界。
 
-glulx-rs 的 [Glk dispatcher](https://github.com/KagurazakaNyaa/glulx-rs/blob/4eccf8b527349d3ae226be44194f1925477f94ee/src/vm.rs)直接匹配 selector。参数先进入最多 64 个元素的栈上缓冲，超出才分配堆数组；窗口、流、fileref、请求和事件分别由 Rust 容器管理，句柄是可序列化整数。标准窗口/流、文本输出、输入事件、图像、声音、Unicode、日期和 style hint 都在同一个 VM 模块中处理；未知 selector 记录后返回零。仍有大参数 fallback、函数参数组装和 `play_multi` 临时向量等分配点。
+播放器在 `app.rs` 中以每批最多 1024 条指令、约 8 ms 的时间片推进 VM，并在
+呈现版本变化或等待输入时交还 UI。TTY 使用更大的批次以减少交互开销。这个边界
+是产品响应性策略，不是 Glulx 语义的一部分。
 
-Git 的 [glkop ABI bridge](https://github.com/DavidKinder/Git/blob/8f5604e10c6194f7d0a6222491eaeb236a70a874/glkop.c)根据 Glk prototype 表转换整数、数组和 opaque 对象。它对常用字符输出、当前流和大小写操作保留快速路径；其余调用经过临时数组、对象指针转换、`gidispatch_call` 和结果回写。对象 ID 到 `window_t`、`stream_t`、`fileref_t`、`schanid_t` 的映射使用每类 31 桶哈希表，并维护 retained arrays。
+### 与 Glulxe 的差异
 
-GarglK 把 [Glk dispatch table](https://github.com/garglk/garglk/blob/9597add4091e5aaf6ebc31399b049158e12ca565/garglk/cheapglk/gi_dispa.c)和各类 `cheapglk` 实现编译进 `garglk-common`。因此 Git 的 `glkop.c` 是 VM 到 Glk 的桥，GarglK 的 `gi_dispa.c` 是宿主 ABI 的 dispatcher，两者是配套层而不是互相替代。
+Glulxe 更适合作为“同一故事、同一输入、同一 Glk 后端”的行为基线。当前仓库
+已经对寻址、调用栈、字符串续体、浮点特殊值、双精度 word 顺序、搜索、加速和
+异常存档做了专项测试，但仍然主要是合成故事和有限官方样本。两边在错误输入、
+宿主能力查询、时间事件和音频完成通知上的差异，应以事件/输出记录逐项确认，不能
+只看最终退出码。
 
-| 能力 | glulx-rs | GarglK + Git |
+当前执行器没有证据表明它在所有真实故事上已经成为瓶颈。已有 release 微基准
+记录约 `8.3 ns/指令`，headless 启动 workload 也记录了 decoded-cache 命中率；
+这些数字没有与 Git 在同一故事、同一编译选项、同一 Glk 后端下测量，因此不能
+推出“比 Git 慢多少”。
+
+### 与 Git 的差异
+
+Git 的核心差异不是一个更大的 `match`，而是 `compiler.c`/`compiler.h` 维护的
+代码块生命周期：从 Glulx 地址找到块，未命中时解码和编译，随后执行缓存中的
+内部代码，并按需要进行缓存淘汰或压缩。`peephole.c` 还可在编译阶段改写局部
+指令序列。`glulx-rs` 当前只做指令元数据缓存，避免了动态代码生成的 unsafe、
+平台差异和失效协议，但也没有获得 Git 的块级 dispatch 优势。
+
+后续若要靠近 Git，应先完成：
+
+1. 用长篇真实路线分离 opcode dispatch、内存访问、Glk 调用、字符串和排版成本。
+2. 设计包含 RAM 写入失效、自修改代码、`select`/输入边界和 debug trap 的块失效协议。
+3. 以 Glulxe 差分测试保护行为，再决定采用 decoded block、peephole 还是其他局部优化。
+
+## 2. 内存、heap 与 undo
+
+### 当前实现
+
+`Memory` 把共享故事映像作为 ROM 基线，只为 `RAMSTART..当前末尾` 保存可写字节；
+`setmemsize`/`malloc` 受 256 字节对齐和 VM 上限约束。写入会标记 dirty page，
+undo 快照只复制相对于故事初始 RAM 或扩展区零值的变化页，临近快照的相同页通过
+`Arc` 复用。栈、heap block 表、PC、续体目的地和内存长度另行保存。
+
+这已经使 undo 的实际数据成本接近页级实现，但数据结构仍是 Rust
+`BTreeMap<u32, Arc<Vec<u8>>>`，不是连续页指针表。候选快照还需要建立页表后再
+判断细节成本；非常大的 dirty set 仍应继续 profile。
+
+### 与两个成熟 VM 的差异
+
+- Glulxe 和 Git 都把可移植存档的 Glulx 合同与宿主窗口状态分开；当前实现也
+  将 IFZS 与桌面会话分开。IFZS 不回滚 Glk、RNG、I/O system、字符串表和保护区
+  定义，桌面会话才保存窗口、资源、输入、画布和音频进度。
+- Git 的 undo 结构直接围绕页指针和可配置 undo 缓冲设计，并把代码缓存作为另一个
+  可调运行时成本；当前实现以差分页、栈字节和 heap 记录计费，同时有图形、音频、
+  图片和进程额度，治理更细但元数据结构更重。[Git README](https://github.com/DavidKinder/Git/blob/8f5604e10c6194f7d0a6222491eaeb236a70a874/README.txt)
+  记录了这些缓存/undo 配置的语义。
+- 当前故事加载已经用 `Arc` 共享容器和执行映像，减少了重复驻留；但 VM 的可写
+  范围仍按 `end_mem - ram_start` 预留，尚未使用 mmap 或惰性页。Glulxe 的
+  `memmap` 和 Git 的独立 Windows 端口都提供各自的映像/内存管理路径，不能把它们
+  的端口行为直接等同于当前 Rust 的 `Vec`。[Glulxe memory](https://github.com/erkyrath/glulxe/blob/56ab8743bab565de307bd892c555d8d8897ed517/vm.c)
+  [Git Windows port](https://github.com/DavidKinder/Git/blob/8f5604e10c6194f7d0a6222491eaeb236a70a874/git_windows.c)
+
+因此，当前实现的内存优势是可控性和可解释的失败边界，不是绝对驻留量已经优于
+成熟 C 端口。大故事启动的现有测量仍应视为驻留 workload 证据，而不是完整性能
+或内存排名。
+
+## 3. Glk、事件与宿主边界
+
+### 当前实现
+
+`Vm` 内部保存窗口树、流、fileref、请求表、事件 FIFO、定时器、样式提示和图形
+命令。selector 在 `vm.rs` 直接分发，宿主通过 `WindowView`、`GraphicsRequest`、
+`InputRequest` 和 `provide_*` 方法与 VM 交互。图形 GUI、TTY 和管道模式通过
+`set_graphical_host`/`set_terminal_host` 报告能力差异。
+
+优点是 Rust 会话可以直接序列化整数句柄和窗口状态，输入与正在运行的 VM 也由
+单一 owner 管理；缺点是 Glk 状态和播放器假设集中在本项目的 VM API 中，尚未有
+一个可替换的公开 `GlkHost` trait。未知 selector 会记录并返回零，不能把这种
+宽容行为当成所有 Glk provider 的一致合同。
+
+### 与 Glulxe/Git 的差异
+
+Glulxe 和 Git 的 `glkop.c` 都把解释器调用转换为外部 Glk ABI；真正的窗口、文件、
+声音和图像行为由 CheapGlk、RemGlk、Gargoyle 或其他 provider 提供。这个边界让同
+一个 VM 可以接 terminal、RPC、桌面或测试宿主，也意味着比较时必须固定 provider。
+Glulxe 官方 README 明确说明需要链接 Glk library，并列出 CheapGlk、GlkTerm 和
+RemGlk 等选择；Git 也要求链接 Glk。[Glulxe README](https://github.com/erkyrath/glulxe/blob/56ab8743bab565de307bd892c555d8d8897ed517/README.md)
+  [Git README](https://github.com/DavidKinder/Git/blob/8f5604e10c6194f7d0a6222491eaeb236a70a874/README.txt)
+
+这会形成两类差异：
+
+| 层次 | 当前状态 | 兼容性含义 |
 | --- | --- | --- |
-| Glk 版本 | 按 host 能力报告 Glk 0.7.6 | `cggestal.cpp` 报告 Glk 0.7.6 |
-| 标准 selector | 在 VM 中直接实现并做 Rust 边界检查 | 由 Git prototype 和 GarglK dispatch table 分工实现 |
-| 图形/声音 | 图形播放器声明图片、缩放、超链接和音频能力；终端 host 关闭这些能力 | 能力由 GarglK 编译模块、配置和设备后端决定 |
-| 扩展 | 没有 GarglK 专有 selector | 包含 `GLK_MODULE_GARGLKTEXT`、overlay、像素窗口等宿主扩展 |
-| 图形字符输入 | 不报告支持 | GarglK 的 `cggestal.cpp` 也返回不支持 |
+| 标准 selector | 已覆盖主要窗口、流、Unicode、输入、事件、样式、图像、声音和日期路径 | 可比较 VM 到 Glk 的调用结果，但仍需按 capability/参数验证 |
+| 可选能力 | 终端关闭图像、声音、鼠标和超链接；图形字符输入不提供；部分网格布局提示被忽略 | 与 GUI provider 的差异是明确能力差异，不应算作 opcode 缺失 |
+| 事件模型 | 请求表 + FIFO 事件 + `select`/`select_poll`；玩家输入由宿主注入 | 需要比较事件顺序、取消、定时器和完成通知，不能只比较文本 |
+| 对象状态 | VM 中持有可序列化整数句柄和窗口内容 | 方便桌面会话恢复，但与 C provider 的指针注册表不是同一数据结构 |
 
-glulx-rs 的整数句柄和可序列化窗口树更适合 Rust 会话边界；Git/GarglK 的指针注册表更适合 C ABI 和即时宿主调用。不能只根据 selector 数量判断两者行为完全相同，还要分别验证 host 能力、参数边界和媒体后端。
+Gargoyle 的定位正好说明这一点：它是跨平台 IF player，构建时把 Git、Glulxe 等
+解释器作为可替换程序接入共同的 Glk/GUI 宿主，而不是另一个 Glulx VM。[Gargoyle
+interpreter build](https://github.com/garglk/garglk/blob/9597add4091e5aaf6ebc31399b049158e12ca565/terps/CMakeLists.txt)
 
-## Glulx 版本与扩展
+## 4. 已核实的兼容性差异
 
-glulx-rs 的 [故事头解析](https://github.com/KagurazakaNyaa/glulx-rs/blob/4eccf8b527349d3ae226be44194f1925477f94ee/src/story.rs)接受 `0x00020000..=0x000301ff`，并实现 1、2、4 字节局部变量、双精度和 3.1.3 undo/加速接口。Git 的 [版本检查](https://github.com/DavidKinder/Git/blob/8f5604e10c6194f7d0a6222491eaeb236a70a874/git.c)同时接受 1.0、2.0、3.0 和 3.1；Git README 仍记录 1/2 字节局部变量不支持、direct search key 必须正好 4 字节。
+这里列出已经能从当前源码和固定基线直接确认的差异；它们不是“某个实现看起来
+更成熟”的泛化判断。
 
-Git upstream 1.3.9 在 [`5ae06ca`](https://github.com/DavidKinder/Git/commit/5ae06ca59375c9e12c617d7087651753ff9dadbe)增加 `-0x80000000 / -1` 的 `div/mod` 溢出检查；当前 glulx-rs 的整数除法和取余仍使用 wrapping 语义，这是需要单独验证的兼容性差异。Git upstream 还在 [`4636165`](https://github.com/DavidKinder/Git/commit/46361650e8c9a4e3acbf1726e5d5e94d027d11b7)删除了旧的 `@git_setcacheram` 与 `@git_prunecache`；它们可能仍存在于 GarglK 所集成的 [Git 1.3.8 vendor](https://github.com/garglk/garglk/commit/af7e229a39c5af05928fba12f3f5a9e605370c2f)，但不是当前 upstream Git 的标准能力。
+### 整数 `div/mod` 溢出
 
-## 事件、输入与线程
+当前 `0x13`/`0x14` 只拒绝除数为零，然后使用 Rust 的 `wrapping_div`/
+`wrapping_rem`。对于 `0x80000000 / -1`，Glulxe 和 Git 的执行器都显式拒绝，
+而当前 VM 会产生 wrapping 结果。这是实际的语义差异，应作为高优先级兼容性
+修复，而不是留给宿主处理。[当前实现](../src/vm.rs)
+[Glulxe 执行器](https://github.com/erkyrath/glulxe/blob/56ab8743bab565de307bd892c555d8d8897ed517/exec.c)
+[Git 执行器](https://github.com/DavidKinder/Git/blob/8f5604e10c6194f7d0a6222491eaeb236a70a874/terp.c)
 
-glulx-rs 的 [event state machine](https://github.com/KagurazakaNyaa/glulx-rs/blob/4eccf8b527349d3ae226be44194f1925477f94ee/src/vm/events.rs)用 `pending_select`、请求表和 FIFO 事件队列表示等待。`select_poll` 只取 Arrange、Redraw、SoundNotify 和 Timer 等内部事件；玩家输入由 eframe 事件转成 VM 的行/字符/鼠标/超链接接口。UI 提交输入后，下一次 `logic` 才继续 VM 时间片。
+### 未知 Glk selector
 
-GarglK 的 [event list](https://github.com/garglk/garglk/blob/9597add4091e5aaf6ebc31399b049158e12ca565/garglk/event.cpp)在普通 select 中取队首，在 poll 中查找允许的内部事件。Qt 的 [select loop](https://github.com/garglk/garglk/blob/9597add4091e5aaf6ebc31399b049158e12ca565/garglk/sysqt.cpp)先处理 Qt 事件，没事件时调用 `QEventLoop::WaitForMoreEvents`，再把事件交给 Glk。GarglK 的 launcher 通过 [QProcess](https://github.com/garglk/garglk/blob/9597add4091e5aaf6ebc31399b049158e12ca565/garglk/launchqt.cpp)启动解释器；解释器内部没有额外的 VM worker。
+当前 VM 对未知 selector 记录后返回 `0`，这使兼容性失败变得宽容但不明显。
+两个 C bridge 找不到对应 prototype 时则进入 fatal error。两种策略都可以是
+产品选择，但差分工具必须把“返回零”和“解释器失败”区分记录，不能把最终文本
+相同当成完整兼容。[当前分发](../src/vm.rs)
+[Glulxe bridge](https://github.com/erkyrath/glulxe/blob/56ab8743bab565de307bd892c555d8d8897ed517/glkop.c)
+[Git bridge](https://github.com/DavidKinder/Git/blob/8f5604e10c6194f7d0a6222491eaeb236a70a874/glkop.c)
 
-图片、音频和翻译 worker 不直接访问正在运行的 `Vm`、`egui::Context` 或 Glk 对象，只返回带 ID 的结果；`StoryLoadWorker` 是例外，它在后台构造一个尚未安装的新 `Vm`，完成后再按请求 ID 交给 owner。这样可以把可阻塞的文件/媒体准备移出 UI，又不会让后台线程重排已运行 VM 的输入、Glk 调用或 undo 边界。剩余延迟主要来自长 VM 时间片、文本排版、纹理上传/软件栅格化以及仍同步的会话保存和 SONG 组装。
+### Git 自身的已知限制
 
-## 媒体、故事和资源
+Git 的 README 明列短局部变量和直接 search key 的限制；当前 `glulx-rs` 的
+局部变量和搜索路径接受 1、2、4 字节。这里不能把 Git 的限制倒推成 Glulx
+规范要求，也不能因为一个故事能在 Git 中运行就认为所有边界都已被覆盖。Git
+适合作为第二套 oracle，但每个失败都要标记为“Git 限制”还是“规范差异”。
+[Git README](https://github.com/DavidKinder/Git/blob/8f5604e10c6194f7d0a6222491eaeb236a70a874/README.txt)
+[当前局部变量与搜索](../src/vm.rs)
 
-| 路径 | glulx-rs 当前实现 | GarglK/Git 参考实现 |
+## 5. 播放器、媒体与并发
+
+这是 `glulx-rs` 相对于两个裸 VM 最大的产品级扩展，也是最容易产生错误比较的部分。
+
+- 故事读取、VM 建立、图片解码、采样/MOD/普通 SONG 准备通过带请求 ID 的 worker
+  异步完成；VM、Glk、eframe 上下文和活动会话仍由一个 owner 驱动。
+- GUI 使用 LayoutJob/Galley 和自有文本/网格布局；图形窗口保留 Fill/Image 命令，
+  在硬件路径中交给 GPU，在软件路径或快照时进行 CPU 栅格化。
+- 音频走 rodio/Symphonia 和 Rust tracker 解码器；SONG 解析 Blorb 中的 AIFF 样本
+  引用，并保留重复、暂停、通知和会话恢复语义。
+- 桌面会话是播放器快照，不是 IFZS。大型会话原始数据超过 16 MiB 时会跳过自动
+  序列化，游戏内可移植存档仍可用。
+
+Glulxe/Git 核心不负责上述统一 GUI、字体、图片缓存或音频设备；这些责任落在它们
+链接的 Glk provider 和播放器。Gargoyle 因而适合拿来比较窗口树、FreeType 字体、
+scrollback、文件对话框和多解释器发布体验，但不应拿来证明 Git VM 的指令语义。
+
+当前播放器的主要取舍是：异步准备减少 UI 阻塞，单一 VM owner 保证事件和 undo
+边界清晰；纹理上传、文本布局、软件栅格化、`play_multi` 组装和会话编码仍可能
+落在 owner/UI 路径。成熟桌面宿主拥有更长时间积累的字体、DPI、无障碍和设备兼容
+性，这些需要实机验收而不能从 Rust 单元测试推出。
+
+## 6. 存档互操作和验证强度
+
+当前验证已经覆盖：
+
+- Glulx 文件头、长度、checksum、地址模式、栈帧、局部变量和非法内存；
+- `CMem`/`UMem`、`Stks`、`MAll`、重复注释/扩展块、错误身份和损坏输入；
+- Glulxe/Adventure 双向 IFZS 样本、Inform 加速 1--13、双精度和长 Huffman 字符串；
+- 多窗口、Unicode、资源流、共享文件流、输入终止键、日期时间、图像和声音；
+- Linux GUI/TTY 冒烟及当前资源、内存和 workload 工具。
+
+`tools/check-reference.py` 的参数接受真实的参考解释器、候选程序和 fixture 目录，
+并将临时合成故事放在临时目录中；参考实现验证命令见
+[验收记录](glulx-validation.ZH.md)。这已经足以把 Glulxe 作为日常 oracle，但还
+不是成熟实现级别的完整回归矩阵。
+
+仍需补强的证据按优先级排序如下：
+
+| 优先级 | 需要补的证据 | 原因 |
 | --- | --- | --- |
-| 故事打开 | GUI 使用 `StoryLoadWorker` 完成文件读取、Blorb 解析、资源挂载和 VM 建立；只安装最新请求 | Git API 接收调用方提供的内存指针或 Glk stream；独立 Windows 端口使用文件映射，GarglK CMake 使用 `gitWithStream` 路径 |
-| 图片 | VM 校验并读取图片尺寸，同时把编码资源字节复制到图形请求；完整 RGBA 解码在 `ImageDecodeWorker`，UI 线程创建纹理并按顺序绘制 | [GarglK image loader](https://github.com/garglk/garglk/blob/9597add4091e5aaf6ebc31399b049158e12ca565/garglk/imgload.cpp)在宿主线程读取/解码，并按引用计数保留原图和缩放图 |
-| 采样/MOD 音频 | `AudioDecodeWorker` 准备采样和 MOD source；VM owner 负责声道状态、取消和通知 | Git 把声音交给所链接的 Glk；GarglK 的 Qt/SDL 后端在宿主解释器线程准备资源，设备回调另有线程 |
-| SONG | 普通播放把同一 Blorb 资源表的 AIFF 样本快照交给 `AudioDecodeWorker`；`play_multi` 为保持采样帧对齐仍同步组装 | GarglK/Git 的对应 SONG/音频实现属于宿主和解释器构建，不与 glulx-rs 的 Rust 资源表共享 |
-| 缓存 | 图形画布和文本图片分别有 LRU/预算；解码结果不进入 VM 会话 | GarglK 以 `picstore` 和引用计数管理图片；Git 主要依赖宿主资源和内部代码/undo 缓冲 |
+| P0 | 同一输入脚本同时运行 Glulxe、Git 和 glulx-rs，固定等价的 headless Glk 合同，比较事件序列、输出、退出码和 IFZS | 区分 VM 差异与宿主差异 |
+| P0 | 官方/社区故事的长路线、保存后恢复、重启、undo、计时器、音频通知和多窗口流程 | 合成故事不能覆盖长期状态交互 |
+| P1 | 固定字体文件、DPI、窗口尺寸和音频设备的 GUI 对照 | 文本换行、字距、图片缩放和设备延迟属于宿主行为 |
+| P1 | Windows/macOS 的 CLI、TTY、GUI、文件、字体和声音验收 | 当前主要运行证据集中在 Linux |
+| P2 | 真实故事 profile，并与 Git 的 block compiler 成本模型对照 | 决定是否引入 block cache，而不是凭感觉优化 |
 
-glulx-rs 的 [Story](https://github.com/KagurazakaNyaa/glulx-rs/blob/4eccf8b527349d3ae226be44194f1925477f94ee/src/story.rs)保留故事映像、可选原始容器和外部资源内容，以便会话脱离原文件恢复；这会产生多份字节副本。图形请求还会暂存编码图片字节，直到 UI worker 完成解码。Git README 明确建议在系统支持时 mmap，以减少启动复制并更快开始执行；GarglK 当前 CMake 的 Git 集成不使用这个独立 Windows 端口。
+## 工程判断
 
-当前 worker 都是单线程队列。图片和非 SONG 音频准备使用容量为 2 的非阻塞任务队列，队列满时 owner 保留请求并在后续宿主周期重试，不把发送端阻塞在 UI 上；图形请求仍一次只等待一个未完成图片，以保持 Fill/Clear/Close 顺序。故事加载使用条件变量队列，只保留一个最新待处理任务；已经开始的旧任务仍只能在阶段边界丢弃结果。迟到的图片/音频结果通过请求 ID 丢弃，避免写入当前故事状态。
+当前 `glulx-rs` 不需要为了“看起来像成熟实现”立即移植 Git 的动态编译器，
+也不应把 Glulxe 的 C 代码嵌入长期 VM 核心。更合理的边界是：
 
-## 文本、字体和图形
+1. 继续把 Glulxe 作为行为和存档 oracle，把 Git 作为执行器/缓存设计参照。
+2. 把 `check-reference.py` 从单一 Glulxe 路径扩展为可插入多个解释器和 Glk provider
+   的矩阵，但保持故事、输入和输出记录可复现。
+3. 先完成真实游戏的性能归因；只有 dispatch 确实占主导时，才设计带失效协议的
+   decoded block cache。RAM 自修改、Glk 边界、输入等待和 debug trap 必须保留。
+4. 把 mmap/惰性内存作为大故事启动和峰值驻留问题单独评估，不与 undo 页表优化混为
+   一个项目。
+5. 当 Web、远程或第二种原生宿主成为真实需求时，再把当前 VM 内的 Glk 状态和
+   provider 交互抽成稳定的 host 接口；现在的单一 owner 模型仍适合现有桌面/TTY。
 
-glulx-rs 的 [text buffer](https://github.com/KagurazakaNyaa/glulx-rs/blob/4eccf8b527349d3ae226be44194f1925477f94ee/src/app/text_buffer.rs)把 `TextRun` 分成段落、单词、空格、CJK 字符、换行和图片，使用 LayoutJob/Galley 计算可见布局，并按窗口内容修订、宽度、字号、链接色和像素比例缓存。网格按字符、样式、链接和字体参数缓存 galley；变化窗口才复制新的 `WindowView`。图形窗口保留 Fill/Image 操作，硬件路径交给 OpenGL，软件路径或会话保存时才栅格化像素。
+## 来源索引
 
-GarglK 的 [text reflow](https://github.com/garglk/garglk/blob/9597add4091e5aaf6ebc31399b049158e12ca565/garglk/wintext.cpp)按滚屏行保存字符、属性、边缘图片和 flow break；只有像素宽度/高度变化才重排，重绘时跳过未 dirty 行。其 [FreeType renderer](https://github.com/garglk/garglk/blob/9597add4091e5aaf6ebc31399b049158e12ca565/garglk/draw.cpp)为八种 FontFace 组合缓存轮廓、字形、kerning 和缺字替换，可使用真实 italic/bold 文件，也可对轮廓应用 oblique/embolden 变换。
+本仓库：
 
-因此两边的字号相同也不意味着换行相同。当前 glulx-rs 与 GarglK 的可见差异包括：
+- [VM、opcode、Glk dispatcher](../src/vm.rs)
+- [内存与 dirty-page undo](../src/memory.rs)
+- [故事、Blorb 和资源索引](../src/story.rs)
+- [IFZS 存档](../src/vm/save.rs)
+- [桌面会话](../src/vm/session.rs)
+- [事件与输入](../src/vm/events.rs)
+- [播放器时间片与 worker](../src/app.rs) / [媒体 worker](../src/app/media.rs)
+- [兼容性说明](compatibility.ZH.md) / [验收记录](glulx-validation.ZH.md)
+- [参考实现检查工具](../tools/check-reference.py)
 
-- egui 的 fallback/shaping 与 FreeType substitution 的字体选择顺序不同；
-- glulx-rs 的斜体主要依赖 egui oblique 标志，GarglK 还会选择真实 italic/bold-italic face；
-- glulx-rs 在变化窗口内复制完整 runs/grid，GarglK 按 dirty 行重绘；
-- glulx-rs 的 retained GPU 画布与 GarglK 的 CPU RGB 像素缓冲在缩放、透明和重绘时机上不同。
+外部项目：
 
-这些是排版/宿主实现差异，不应通过强行共享字体名称来推断兼容性。验收应固定字体文件、字号、DPI、窗口宽度和颜色，分别比较普通、粗体、斜体、粗斜体、CJK fallback、kerning、段落缩进、对齐和边缘图片。
-
-## 存档与会话
-
-glulx-rs 的 [portable save](https://github.com/KagurazakaNyaa/glulx-rs/blob/4eccf8b527349d3ae226be44194f1925477f94ee/src/vm/save.rs)使用 IFZS 的 `CMem`、`Stks` 和 `MAll`，校验完成后才替换 VM 状态；桌面会话还保存 VM、transcript、输入和 CPU 画布像素。桌面快照估算超过 16 MiB 时跳过自动保存，以避免把大型序列化工作放进 UI 回调；这条会话编码路径仍是同步的。
-
-Git 的 `savefile.c`/`saveundo.c`处理可移植存档、栈和页表，不保存 GarglK 的完整桌面窗口。GarglK 可以提供宿主自动存档和文件对话框，但它们不改变 Git 的 Glulx 内存合同。
-
-## 当前优化状态
-
-证据栏区分实现源码检查、自动化测试、Linux GUI 验收和未完成的跨项目/跨平台实测；源码检查不等同于性能或像素级兼容性证明。
-
-| 顺序 | 当前状态 | 证据 | 仍与参考项目不同的边界 |
-| --- | --- | --- | --- |
-| 可观测性 | 已有 `vm-slice`、UI、publish、布局、图形上传、音频准备、undo 和会话阶段计时 | 源码检查、单元测试、诊断日志 | 输入事件到每个阶段的跨线程 trace 仍可进一步细化 |
-| 异步宿主工作 | 故事、图片、采样/MOD/普通 SONG 音频准备已使用有序且有界的 worker | worker 源码、单元测试、Linux GUI 工具 | 纹理上传、布局、软件栅格化、`play_multi` SONG 批处理和会话编码仍在 owner/UI |
-| 指令缓存 | ROM decoded cache 已实现，RAM 代码不缓存 | `decoded_cache_reuses_rom_instruction_metadata` 测试、release 微基准 | 没有 Git 风格 block compiler、peephole 或 JIT；只有在固定基准证明 VM dispatch 是主要瓶颈后才考虑，且必须保留 RAM 自修改和 Glk 边界语义 |
-| undo | 256 字节页差分、dirty-page 跟踪、共享页、旧会话迁移和按快照 payload 计费已实现 | Memory/session/conformance 测试、`undo_budget_counts_snapshot_pages_not_the_story_image`、`limited_page_snapshots_reject_dense_dirty_memory`、源码检查 | 页表是 Rust `BTreeMap`，不是 Git 的原始指针数组；很大的 dirty set 仍需 profile |
-| 工程质量 | 当前全目标 Clippy、格式检查和 release 构建通过 | 当前实现状态 `f9c855d` 的本地验证 | Windows/macOS CI 与实机 GUI 仍需分别记录 |
-| Glk/呈现热路径 | 参数使用固定小缓冲，翻译关闭时不捕获，transcript 最多保留 4 MiB/100,000 行且显示采用虚拟行，变化窗口发布有界 | Glk conformance、Linux GUI/终端工具、单元测试 | 逐字符 Glk 输出和变化窗口内的完整向量仍不同于 GarglK 的 dirty 行 |
-| 字体/排版 | 已有字体 fallback、样式 hint、布局缓存和 CJK 分段测试；`4eccf8b` 修复了文本/网格窄斜体字形四边形自相交 | 字体/布局单元测试、Linux GUI 验收 | 真实八种字体组合、FreeType 字距、Windows/macOS 和跨项目像素差分仍待实机验收 |
-
-## 来源
-
-glulx-rs：
-
-- [VM 与 Glk](https://github.com/KagurazakaNyaa/glulx-rs/blob/4eccf8b527349d3ae226be44194f1925477f94ee/src/vm.rs)
-- [事件](https://github.com/KagurazakaNyaa/glulx-rs/blob/4eccf8b527349d3ae226be44194f1925477f94ee/src/vm/events.rs)
-- [内存与预算](https://github.com/KagurazakaNyaa/glulx-rs/blob/4eccf8b527349d3ae226be44194f1925477f94ee/src/memory.rs)
-- [会话校验](https://github.com/KagurazakaNyaa/glulx-rs/blob/4eccf8b527349d3ae226be44194f1925477f94ee/src/vm/session.rs)
-- [播放器与 worker](https://github.com/KagurazakaNyaa/glulx-rs/blob/4eccf8b527349d3ae226be44194f1925477f94ee/src/app.rs)
-- [媒体 worker](https://github.com/KagurazakaNyaa/glulx-rs/blob/4eccf8b527349d3ae226be44194f1925477f94ee/src/app/media.rs)
-- [文本布局](https://github.com/KagurazakaNyaa/glulx-rs/blob/4eccf8b527349d3ae226be44194f1925477f94ee/src/app/text_buffer.rs)
-- [文本网格](https://github.com/KagurazakaNyaa/glulx-rs/blob/4eccf8b527349d3ae226be44194f1925477f94ee/src/app/text_grid.rs)
-- [字体](https://github.com/KagurazakaNyaa/glulx-rs/blob/4eccf8b527349d3ae226be44194f1925477f94ee/src/app/fonts.rs)
-- [故事和资源](https://github.com/KagurazakaNyaa/glulx-rs/blob/4eccf8b527349d3ae226be44194f1925477f94ee/src/story.rs)
-- [声音](https://github.com/KagurazakaNyaa/glulx-rs/blob/4eccf8b527349d3ae226be44194f1925477f94ee/src/vm/sound.rs)
-
-David Kinder Git 1.3.9：
-
-- [README](https://github.com/DavidKinder/Git/blob/8f5604e10c6194f7d0a6222491eaeb236a70a874/README.txt)
-- [解释器](https://github.com/DavidKinder/Git/blob/8f5604e10c6194f7d0a6222491eaeb236a70a874/terp.c)
-- [代码块编译器](https://github.com/DavidKinder/Git/blob/8f5604e10c6194f7d0a6222491eaeb236a70a874/compiler.c)
-- [代码块查找接口](https://github.com/DavidKinder/Git/blob/8f5604e10c6194f7d0a6222491eaeb236a70a874/compiler.h)
-- [内存](https://github.com/DavidKinder/Git/blob/8f5604e10c6194f7d0a6222491eaeb236a70a874/memory.c)
-- [undo](https://github.com/DavidKinder/Git/blob/8f5604e10c6194f7d0a6222491eaeb236a70a874/saveundo.c)
-- [Glk ABI](https://github.com/DavidKinder/Git/blob/8f5604e10c6194f7d0a6222491eaeb236a70a874/glkop.c)
-- [Windows 端口](https://github.com/DavidKinder/Git/blob/8f5604e10c6194f7d0a6222491eaeb236a70a874/git_windows.c)
-- [能力查询](https://github.com/DavidKinder/Git/blob/8f5604e10c6194f7d0a6222491eaeb236a70a874/gestalt.c)
-
-GarglK：
-
-- [GarglK CMake](https://github.com/garglk/garglk/blob/9597add4091e5aaf6ebc31399b049158e12ca565/garglk/CMakeLists.txt)
-- [Git 集成 CMake](https://github.com/garglk/garglk/blob/9597add4091e5aaf6ebc31399b049158e12ca565/terps/CMakeLists.txt)
-- [Glk dispatcher](https://github.com/garglk/garglk/blob/9597add4091e5aaf6ebc31399b049158e12ca565/garglk/cheapglk/gi_dispa.c)
-- [能力查询](https://github.com/garglk/garglk/blob/9597add4091e5aaf6ebc31399b049158e12ca565/garglk/cheapglk/cggestal.cpp)
-- [事件队列](https://github.com/garglk/garglk/blob/9597add4091e5aaf6ebc31399b049158e12ca565/garglk/event.cpp)
-- [Qt select](https://github.com/garglk/garglk/blob/9597add4091e5aaf6ebc31399b049158e12ca565/garglk/sysqt.cpp)
-- [窗口与文本](https://github.com/garglk/garglk/blob/9597add4091e5aaf6ebc31399b049158e12ca565/garglk/wintext.cpp)
-- [字体与绘制](https://github.com/garglk/garglk/blob/9597add4091e5aaf6ebc31399b049158e12ca565/garglk/draw.cpp)
-- [图片加载](https://github.com/garglk/garglk/blob/9597add4091e5aaf6ebc31399b049158e12ca565/garglk/imgload.cpp)
-- [launcher](https://github.com/garglk/garglk/blob/9597add4091e5aaf6ebc31399b049158e12ca565/garglk/launchqt.cpp)
-
-这些源码链接固定到本次复核提交；文档不依赖本机 checkout 路径，也不把本地构建目录当成参考项目来源。
+- [Glulxe repository](https://github.com/erkyrath/glulxe/tree/56ab8743bab565de307bd892c555d8d8897ed517)
+- [Glulxe README](https://github.com/erkyrath/glulxe/blob/56ab8743bab565de307bd892c555d8d8897ed517/README.md)
+- [Glulx specification](https://eblong.com/zarf/glulx/Glulx-Spec.html)
+- [Glk 0.7.6 specification](https://eblong.com/zarf/glk/Glk-Spec-076.html)
+- [Git repository](https://github.com/DavidKinder/Git/tree/8f5604e10c6194f7d0a6222491eaeb236a70a874)
+- [Git README](https://github.com/DavidKinder/Git/blob/8f5604e10c6194f7d0a6222491eaeb236a70a874/README.txt)
+- [Gargoyle interpreter build](https://github.com/garglk/garglk/blob/9597add4091e5aaf6ebc31399b049158e12ca565/terps/CMakeLists.txt)
