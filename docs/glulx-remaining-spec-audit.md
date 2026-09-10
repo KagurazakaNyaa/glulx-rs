@@ -2,7 +2,7 @@
 
 [English](glulx-remaining-spec-audit.md) | [中文](glulx-remaining-spec-audit.ZH.md)
 
-Updated: 2026-09-10. This audit describes the current implementation state at commit `1a27dd4`. It is a current scope and risk record, not a historical implementation log. Detailed test commands are in the [validation record](glulx-validation.md), and the implementation checklist is in [glulx-spec-checklist.md].
+Updated: 2026-09-10. This audit describes the current implementation state at commit `ebab7cb`. It is a current scope and risk record, not a historical implementation log. Detailed test commands are in the [validation record](glulx-validation.md), and the implementation checklist is in [glulx-spec-checklist.md].
 
 ## Sources and Classification
 
@@ -18,7 +18,7 @@ The review uses the [Glulx 3.1.3 specification](https://eblong.com/zarf/glulx/Gl
 | SONG | Optional SONG support resolves `SND<number>` AIFF samples, SSND offsets, MARK/INST sustain loops, sample conversion, repeats, offsets, pause/stop, notifications, and session restoration. | All historical encoder variants and physical audio output are not claimed. |
 | Terminal host | Interactive TTY mode supports grids/status, prefilled editing, timed cancellation, immediate character input, echo/terminators, file prompts, multi-window selection, and terminal restoration. Pipe mode remains a stable automation protocol. | Windows console and macOS on-device terminal validation remain open. |
 | Light weight | Real light font faces are used when available; missing faces fall back to regular and report the actual capability. | Font/DPI behavior on Windows and macOS remains unverified. |
-| Undo budget | Retained page snapshots, stack bytes, and heap-record payloads are charged; the shared story image and current VM address space are not charged. Zero disables retention; oversized candidates fail. | Candidate pages are materialized before the budget check, so a hostile dense write can cause a temporary allocation spike. |
+| Undo budget | Retained page snapshots, stack bytes, and heap-record payloads are charged; the shared story image and current VM address space are not charged. Zero disables retention; oversized candidates are rejected before the complete page table is materialized. | Page-count estimation and page construction still deserve profiling on very large dirty sets. |
 | Container strictness | FORM/IFRS boundaries, RIdx structure, resource offsets, duplicate IDs, and identity checks are validated. | Odd padding bytes and an unindexed GLUL compatibility fallback are tolerated. The player does not claim rejection of every malformed container. |
 
 ## Optional and Host-Specific Scope
@@ -33,6 +33,6 @@ The review uses the [Glulx 3.1.3 specification](https://eblong.com/zarf/glulx/Gl
 1. Run the current Linux reference, GUI, and TTY scripts from the [validation record](glulx-validation.md) when changing VM, resource, or host behavior.
 2. Add Windows and macOS on-device records for GUI, fonts/DPI, terminal input, file prompts, audio, and session restoration.
 3. Expand the media matrix with codec, bit-depth, sample-rate, channel-count, and historical tracker variants; record failure behavior as well as successful playback.
-4. Reduce the temporary allocation spike when an oversized undo candidate is rejected, without changing dirty-page or restore semantics.
+4. Profile remaining memory and CPU costs on long-running real-story workloads before choosing mmap, block compilation, or further UI changes.
 
 These priorities are engineering and validation work, not claims that the current implementation violates a mandatory Glulx or Glk rule.

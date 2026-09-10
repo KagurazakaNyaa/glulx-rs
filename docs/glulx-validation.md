@@ -2,7 +2,7 @@
 
 [English](glulx-validation.md) | [中文](glulx-validation.ZH.md)
 
-Updated: 2026-09-10. The current implementation state is commit `1a27dd4`; local validation was run on Linux x86_64. This record describes the current tree. It does not certify exhaustive Glulx, Glk, media, or platform conformance.
+Updated: 2026-09-10. The current implementation state is commit `ebab7cb`; local validation was run on Linux x86_64. This record describes the current tree. It does not certify exhaustive Glulx, Glk, media, or platform conformance.
 
 ## Current Verification
 
@@ -15,10 +15,11 @@ RUSTC_WRAPPER= cargo build --release
 
 The current checks pass:
 
-- 270 library tests pass; 6 manual performance tests remain ignored.
+- 271 library tests pass; 6 manual performance tests remain ignored.
 - 6 CLI tests pass.
 - Formatting, all-target Clippy, and the release build pass.
 - The undo regression proves that a 2 MiB story can retain a one-page undo snapshot under a 1 MiB undo budget; the shared story image is not charged to that snapshot budget.
+- The bounded-page regression rejects dense dirty memory at the page limit before materializing the complete candidate page table.
 - Dispatch tables contain all 150 official Glulx opcodes and all 124 official Glk selectors. Table completeness is not a substitute for semantic coverage.
 
 The repository's repeatable microbenchmark suite covers instruction dispatch, linear search, text output, dirty-page snapshots, text layout, and CPU canvas rasterization:

@@ -2,7 +2,7 @@
 
 [English](glulx-remaining-spec-audit.md) | [中文](glulx-remaining-spec-audit.ZH.md)
 
-更新：2026-09-10。本文件描述当前实现状态 commit `1a27dd4` 的规范边界和风险，不记录历史实现过程。详细测试命令见[验收记录](glulx-validation.ZH.md)，实现清单见[规范清单](glulx-spec-checklist.ZH.md)。
+更新：2026-09-10。本文件描述当前实现状态 commit `ebab7cb` 的规范边界和风险，不记录历史实现过程。详细测试命令见[验收记录](glulx-validation.ZH.md)，实现清单见[规范清单](glulx-spec-checklist.ZH.md)。
 
 ## 来源与判定口径
 
@@ -18,7 +18,7 @@
 | SONG | 可选 SONG 支持 `SND<number>` AIFF 引用、SSND offset、MARK/INST sustain loop、样本转换、重复、偏移、暂停/停止、通知和会话恢复。 | 不声明覆盖全部历史编码变体或实体音频输出。 |
 | 终端宿主 | 交互 TTY 支持网格/状态、预填编辑、定时取消、即时字符输入、回显/终止键、文件提示、多窗口选择和终端恢复。管道模式仍是稳定的自动化协议。 | Windows 控制台和 macOS 实机终端验收仍待完成。 |
 | light 字重 | 有真实 light 字体时使用细字重；缺失时回退常规并如实报告能力。 | Windows/macOS 的字体和 DPI 行为仍未实机验证。 |
-| Undo 预算 | 按保留页、栈字节和堆记录数据计费；共享故事映像和当前 VM 地址空间不计入。零值禁用保留，超预算候选失败。 | 预算判断前会先构造候选页，恶意的大量写入可能造成临时分配峰值。 |
+| Undo 预算 | 按保留页、栈字节和堆记录数据计费；共享故事映像和当前 VM 地址空间不计入。零值禁用保留；超预算候选会在构造完整页表前拒绝。 | 很大的 dirty set 仍值得继续做页数估算和构造耗时 profile。 |
 | 容器严格性 | 校验 FORM/IFRS 边界、RIdx 结构、资源偏移、重复编号和身份。 | 允许非零 padding，也允许未索引 GLUL 的兼容回退；不宣称拒绝所有损坏容器。 |
 
 ## 可选项与宿主范围
@@ -33,6 +33,6 @@
 1. 修改 VM、资源或宿主行为时，按[验收记录](glulx-validation.ZH.md)重新运行当前 Linux 参考、GUI 和 TTY 工具。
 2. 补充 Windows/macOS 实机的 GUI、字体/DPI、终端输入、文件提示、音频和会话恢复记录。
 3. 扩展媒体矩阵，覆盖 codec、位深、采样率、声道数和历史 tracker 变体；成功和失败都要记录。
-4. 在不改变 dirty-page 和恢复语义的前提下，降低超预算 undo 候选被拒绝前的临时分配峰值。
+4. 在长时间真实故事 workload 上 profile 剩余内存和 CPU 成本，再决定 mmap、block compilation 或进一步 UI 优化。
 
 这些是工程和验收工作，不表示当前实现违反了某条强制 Glulx/Glk 规则。

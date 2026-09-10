@@ -2,7 +2,7 @@
 
 [English](glulx-validation.md) | [中文](glulx-validation.ZH.md)
 
-更新：2026-09-10。当前实现状态 commit 为 `1a27dd4`；本地验收环境为 Linux x86_64。本文件描述当前代码，不宣称穷尽 Glulx、Glk、媒体或跨平台符合性。
+更新：2026-09-10。当前实现状态 commit 为 `ebab7cb`；本地验收环境为 Linux x86_64。本文件描述当前代码，不宣称穷尽 Glulx、Glk、媒体或跨平台符合性。
 
 ## 当前验证
 
@@ -15,10 +15,11 @@ RUSTC_WRAPPER= cargo build --release
 
 当前检查通过：
 
-- 270 个库测试通过；6 个手动性能测试保持 ignored。
+- 271 个库测试通过；6 个手动性能测试保持 ignored。
 - 6 个 CLI 测试通过。
 - 格式检查、全目标 Clippy 和 release 构建通过。
 - undo 回归证明：2 MiB 故事在 1 MiB undo 预算下可以保留单页快照；共享故事映像不计入该快照预算。
+- 受限页回归证明：dirty pages 达到页预算上限时，会在构造完整候选页表前拒绝。
 - 分发表包含全部 150 条官方 Glulx opcode 和 124 个官方 Glk selector。表完整不等于语义覆盖完整。
 
 仓库提供可复现的微基准套件，覆盖指令分发、线性查找、文本输出、dirty-page 快照、文本布局和 CPU 画布栅格化：
