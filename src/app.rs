@@ -1354,6 +1354,48 @@ impl PlayerApp {
         }
     }
 
+    fn replay_pending_paste(&mut self) -> bool {
+        let Some(maximum) = self
+            .vm
+            .as_ref()
+            .and_then(Vm::input_request)
+            .and_then(|request| match request {
+                InputRequest::Line { maximum_length } => Some(maximum_length as usize),
+                _ => None,
+            })
+        else {
+            return false;
+        };
+        let mut changed = false;
+        let mut submit = false;
+        while let Some(&key) = self.pending_keys.front() {
+            if matches!(key, 10 | 13 | 0xffff_fffa) {
+                self.pending_keys.pop_front();
+                submit = true;
+                break;
+            }
+            let Some(character) = char::from_u32(key) else {
+                self.pending_keys.pop_front();
+                continue;
+            };
+            if character.is_control() {
+                break;
+            }
+            self.pending_keys.pop_front();
+            if self.input.chars().count() < maximum {
+                self.input.push(character);
+                changed = true;
+            }
+        }
+        if changed {
+            let input = self.input.clone();
+            if let Some(vm) = &mut self.vm {
+                let _ = vm.update_line_input(&input);
+            }
+        }
+        submit
+    }
+
     fn input_bar(&mut self, root: &mut egui::Ui) {
         let language = self.settings.language.resolve();
         let accept_input = !self.dialog_open(root.ctx());
@@ -1776,10 +1818,14 @@ impl eframe::App for PlayerApp {
             }
         }
         self.character_input(&context);
+        let paste_submit = self.replay_pending_paste();
         self.menu_bar(root);
 
         self.status_bar(root);
         self.story_view(root);
+        if paste_submit {
+            self.submit_input();
+        }
         self.dialogs(&context);
         self.auxiliary_windows(&context);
         if let Some(path) = self
@@ -2224,6 +2270,30 @@ mod tests {
         output.textures_delta.clear();
         assert_eq!(app.vm.as_ref().unwrap().state(), RunState::Halted);
         assert_eq!(app.transcript, "Z");
+    }
+
+    #[test]
+    fn pasted_text_replays_into_a_following_line_request() {
+        let program = [
+            0x40, 0x80, 0x40, 0x81, 0x10, 0x40, 0x82, 0x01, 0x40, 0x40, 0x81, 0x01, 0x81, 0x30,
+            0x12, 0x00, 0x00, 0xd0, 0x04, 0x40, 0x82, 0x01, 0x10, 0x81, 0x30, 0x12, 0x00, 0x00,
+            0xc0, 0x01, 0x81, 0x20,
+        ];
+        let story =
+            Story::from_bytes(&crate::vm::tests::image_with_program(&program), None).unwrap();
+        let mut vm = Vm::new(story).unwrap();
+        assert_eq!(vm.open_window(&[0, 0, 0, 3, 0]), 1);
+        assert_eq!(vm.run_steps(32).unwrap(), RunState::WaitingForLine);
+
+        let context = egui::Context::default();
+        let mut app = PlayerApp::new(&eframe::CreationContext::_new_kittest(context), None);
+        app.vm = Some(vm);
+        app.pending_keys
+            .extend("next\n".chars().map(|character| character as u32));
+        assert!(app.replay_pending_paste());
+        assert_eq!(app.input, "next");
+        app.submit_input();
+        assert!(app.pending_keys.is_empty());
     }
 
     #[test]

@@ -21,7 +21,7 @@ impl Vm {
         true
     }
 
-    pub(super) fn open_window(&mut self, args: &[u32]) -> u32 {
+    pub(crate) fn open_window(&mut self, args: &[u32]) -> u32 {
         let arg = |n: usize| args.get(n).copied().unwrap_or(0);
         let (split, method, size, kind, rock) = (arg(0), arg(1), arg(2), arg(3), arg(4));
         if !matches!(kind, 2..=5)
