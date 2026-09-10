@@ -316,6 +316,7 @@ impl Vm {
                 image: Some(image),
                 flow_break: false,
             });
+            window.content_revision = window.content_revision.wrapping_add(1);
             window.trim_text_history();
         } else {
             let size = image.dimensions(window.width);
@@ -352,6 +353,7 @@ impl Vm {
                 image: None,
                 flow_break: true,
             });
+            window.content_revision = window.content_revision.wrapping_add(1);
             window.trim_text_history();
         }
     }
@@ -821,6 +823,26 @@ mod tests {
         };
         assert!(revision(&after, first) > revision(&before, first));
         assert_eq!(revision(&after, second), revision(&before, second));
+    }
+
+    #[test]
+    fn text_buffer_images_and_flow_breaks_update_content_revision() {
+        let mut vm = pictured_vm();
+        vm.set_graphical_host(true);
+        let window = vm.open_window(&[0, 0, 0, WINTYPE_TEXT_BUFFER, 0]);
+        let before = vm.window_descriptors();
+        assert_eq!(vm.draw_image(0xe1, &[window, 7, 1, 0]), 1);
+        let after_image = vm.window_descriptors();
+        let revision = |descriptors: &[WindowDescriptor]| {
+            descriptors
+                .iter()
+                .find(|descriptor| descriptor.id == window)
+                .unwrap()
+                .content_revision
+        };
+        assert!(revision(&after_image) > revision(&before));
+        vm.flow_break(window);
+        assert!(revision(&vm.window_descriptors()) > revision(&after_image));
     }
 
     #[test]
