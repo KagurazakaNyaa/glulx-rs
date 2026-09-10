@@ -90,6 +90,19 @@ Evidence: [window tree](../src/vm/windows.rs), [streams](../src/vm/streams.rs), 
 
 Separate resources, terminal input and the listed optional player additions are implemented and have local validation. Cross-platform validation remains pending. Validation tasks above do not imply known missing functionality; existing passing records remain valid.
 
+## Platform Validation Matrix
+
+| Scenario | Linux x86_64 | Windows | macOS |
+| --- | --- | --- | --- |
+| VM/CLI/unit tests | Complete; `cargo test --all-targets` | On-device pending | On-device pending |
+| GUI windows, input, graphics, resources and sessions | Local GUI tools recorded | On-device pending | On-device pending |
+| Fonts, DPI and native file dialogs | Linux results recorded | On-device pending | On-device pending; include Retina |
+| TTY and pipe hosts | Complete | On-device pending | On-device pending |
+| Physical audio device | Pending; software sample-frame evidence exists | On-device pending | On-device pending |
+| Complete long-game walkthroughs | Pending | Pending | Pending |
+
+On-device records should retain the OS version, architecture, build commit, Rust toolchain, display scale, font source and audio device. Failures should be recorded as reproducible results rather than omitted.
+
 ## Current Limits and Specification Scope
 
 Grids retain uniform cell sizes as specified, ignoring hints 0–3/6 that change cell layout; available light faces render at light weight; missing faces fall back to regular and report that accurately. Missing glyphs return CannotPrint, and fallback fonts can be loaded. MOD/XM/S3M/IT are supported without claiming every historical dialect or bit-exact playback against specific hardware. Blorb Rect/Reso/APal/Loop are in Z-machine scope. VM memory defaults to 1 GiB; undo retains at most 16 states sharing a 256 MiB estimated budget. Decoded RGBA output has a configurable limit (256 MiB by default), and the decoder allocation budget is twice that limit; draw destination dimensions are not subject to this source-image limit. These resource limits are current implementation policy; undo estimates include memory/stack/story image but exclude heap indexes and allocator overhead, and are not marked as missing features. Container reading still tolerates nonzero padding and unindexed GLUL fallback; see the audit. Rejection of every invalid container is not claimed.
