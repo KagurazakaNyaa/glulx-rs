@@ -257,6 +257,7 @@ impl Vm {
         }
         let bytes = self.story.sound_resource(resource).ok_or(())?;
         let format = self.story.resource_type(*b"Snd ", resource).ok_or(())?;
+        let _stage = crate::diagnostics::stage("audio-prepare");
         let source = decode_sound_with_limits(
             bytes,
             format,

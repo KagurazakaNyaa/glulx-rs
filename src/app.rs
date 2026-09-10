@@ -884,6 +884,7 @@ impl PlayerApp {
         if !text_changed && self.dirty_graphics.is_empty() {
             return;
         }
+        let _stage = crate::diagnostics::stage("publish-story");
         if text_changed {
             let structural = removed
                 || changed_ids
@@ -942,6 +943,7 @@ impl PlayerApp {
             }
         }
         self.dirty_graphics.clear();
+        let _graphics = crate::diagnostics::stage("graphics-upload");
         for canvas in self.graphics.values_mut() {
             canvas.use_cpu(!self.gpu_canvas);
             canvas.prepare(context);

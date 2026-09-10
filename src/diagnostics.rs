@@ -1,5 +1,6 @@
 //! Opt-in, flushed diagnostics that remain useful when the UI thread stalls.
 use std::{
+    collections::BTreeMap,
     fs::File,
     io::{self, Write},
     path::Path,
@@ -15,6 +16,7 @@ struct State {
     slices: u64,
     vm_time: Duration,
     ui_time: Duration,
+    named_time: BTreeMap<&'static str, Duration>,
 }
 
 struct Logger {
@@ -41,6 +43,7 @@ pub fn start(path: &Path) -> io::Result<()> {
                 slices: 0,
                 vm_time: Duration::ZERO,
                 ui_time: Duration::ZERO,
+                named_time: BTreeMap::new(),
             }),
             started: now,
         })
@@ -62,21 +65,34 @@ pub fn start(path: &Path) -> io::Result<()> {
         .name("diagnostic-heartbeat".into())
         .spawn(|| {
             let mut previous = (Instant::now(), Duration::ZERO, Duration::ZERO, 0, 0);
+            let mut previous_named = BTreeMap::new();
             loop {
                 std::thread::sleep(Duration::from_secs(2));
                 let logger = LOGGER.get().unwrap();
                 let message = {
                     let state = logger.state.lock().unwrap_or_else(|e| e.into_inner());
                     let now = Instant::now();
+                    let timings = state
+                        .named_time
+                        .iter()
+                        .map(|(name, elapsed)| {
+                            let before = previous_named.get(name).copied().unwrap_or_default();
+                            format!("{name}_ms={}", elapsed.saturating_sub(before).as_millis())
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
                     let message = format!(
-                        "heartbeat stage={} stage_ms={} frames={} slices={} interval_ms={} vm_ms={} ui_ms={} frame_delta={} slice_delta={} {}",
+                        "heartbeat stage={} stage_ms={} frames={} slices={} interval_ms={} vm_ms={} ui_ms={} frame_delta={} slice_delta={} timings={} {}",
                         state.stage, state.since.elapsed().as_millis(), state.frames, state.slices,
                         now.duration_since(previous.0).as_millis(),
                         state.vm_time.saturating_sub(previous.1).as_millis(),
                         state.ui_time.saturating_sub(previous.2).as_millis(),
-                        state.frames - previous.3, state.slices - previous.4, state.vm
+                        state.frames - previous.3, state.slices - previous.4,
+                        if timings.is_empty() { "-" } else { &timings },
+                        state.vm
                     );
                     previous = (now, state.vm_time, state.ui_time, state.frames, state.slices);
+                    previous_named = state.named_time.clone();
                     message
                 };
                 record(format_args!("{message}"));
@@ -138,6 +154,7 @@ impl Drop for Stage {
                     "ui" => state.ui_time += elapsed,
                     _ => {}
                 }
+                *state.named_time.entry(name).or_default() += elapsed;
                 state.stage = previous;
                 state.since = since;
             }

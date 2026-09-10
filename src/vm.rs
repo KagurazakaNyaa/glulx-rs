@@ -1126,6 +1126,7 @@ impl Vm {
                 }
             }
             0x125 => {
+                let _stage = crate::diagnostics::stage("undo-save");
                 let destination = self.destination(&operands[0])?;
                 let cost = self.memory.snapshot_byte_len()
                     + self.stack.bytes.len()

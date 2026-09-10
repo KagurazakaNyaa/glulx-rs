@@ -26,6 +26,7 @@ impl ImageCache {
             *used = self.tick;
             return Some(texture.clone());
         }
+        let _stage = crate::diagnostics::stage("text-image");
         let limits = vm.resource_limits();
         let bytes = vm.image_resource(resource)?;
         let pixels = crate::picture::decode_with_limit(
@@ -573,6 +574,7 @@ pub(super) fn show(
         .get(&view.id)
         .is_none_or(|cached| cached.key != key)
     {
+        let _stage = crate::diagnostics::stage("text-layout");
         let (tokens, paints, ascent, descent) = prepare(ui, view, settings, width);
         let (placed, height) = Layout::new(width, ascent, descent).format(&tokens);
         layouts.0.insert(
