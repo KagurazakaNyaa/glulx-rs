@@ -256,6 +256,8 @@ struct GlkWindow {
     #[serde(default)]
     content_revision: u64,
     runs: Vec<TextRun>,
+    #[serde(default)]
+    text_chars: usize,
     style: u32,
     hyperlink: u32,
     hints: BTreeMap<(u32, u32), u32>,
@@ -316,6 +318,7 @@ impl GlkWindow {
             rect: [0; 4],
             content_revision: 0,
             runs: Vec::new(),
+            text_chars: 0,
             style: 0,
             hyperlink: 0,
             hints: BTreeMap::new(),
@@ -325,15 +328,11 @@ impl GlkWindow {
     }
 
     fn trim_text_history(&mut self) {
-        if self.kind != WINTYPE_TEXT_BUFFER {
+        if self.kind != WINTYPE_TEXT_BUFFER || self.text_chars <= MAX_TEXT_BUFFER_CHARS {
             return;
         }
-        let mut total = self
-            .runs
-            .iter()
-            .map(|run| run.text.chars().count())
-            .sum::<usize>();
-        while total > MAX_TEXT_BUFFER_CHARS {
+        let mut excess = self.text_chars - MAX_TEXT_BUFFER_CHARS;
+        while excess != 0 {
             let Some(first) = self.runs.first_mut() else {
                 break;
             };
@@ -342,15 +341,20 @@ impl GlkWindow {
                 self.runs.remove(0);
                 continue;
             }
-            let excess = total - MAX_TEXT_BUFFER_CHARS;
             if excess >= length {
-                total -= length;
+                self.text_chars -= length;
+                excess -= length;
                 self.runs.remove(0);
             } else {
                 first.text = first.text.chars().skip(excess).collect();
-                total -= excess;
+                self.text_chars -= excess;
+                excess = 0;
             }
         }
+    }
+
+    fn recount_text_chars(&mut self) {
+        self.text_chars = self.runs.iter().map(|run| run.text.chars().count()).sum();
     }
 
     fn grid_text(&self) -> String {
@@ -2023,6 +2027,7 @@ impl Vm {
                             hyperlink: window.hyperlink,
                         });
                     }
+                    window.text_chars += 1;
                     window.trim_text_history();
                     window.content_revision = window.content_revision.wrapping_add(1);
                     self.output.push(character);
@@ -2206,6 +2211,7 @@ impl Vm {
                 if let Some(window) = self.glk_windows.get_mut(&window_id) {
                     window.content_revision = window.content_revision.wrapping_add(1);
                     window.runs.clear();
+                    window.text_chars = 0;
                     window.grid.fill(' ');
                     window.grid_styles.fill(0);
                     window.grid_hyperlinks.fill(0);
@@ -3170,6 +3176,7 @@ pub(crate) mod tests {
                 .sum::<usize>(),
             MAX_TEXT_BUFFER_CHARS
         );
+        assert_eq!(vm.glk_windows[&window].text_chars, MAX_TEXT_BUFFER_CHARS);
     }
 
     #[test]

@@ -53,6 +53,13 @@ impl Vm {
             }
         }
         save::validate_stack(&self.stack, self.memory.len())?;
+        for window in self
+            .glk_windows
+            .values_mut()
+            .filter(|window| window.kind == 3)
+        {
+            window.recount_text_chars();
+        }
         for (&id, window) in &self.glk_windows {
             if window.kind == 4
                 && window.grid.len() != window.width as usize * window.height as usize
