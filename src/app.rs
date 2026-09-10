@@ -1,6 +1,6 @@
 use crate::memory_budget::{Budget, MemoryPolicy, Overrides, ResourceBudgets, startup_snapshot};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
 };
 
@@ -229,6 +229,7 @@ pub struct PlayerApp {
     translation_capture_enabled: bool,
     turns: Vec<Turn>,
     input: String,
+    pending_keys: VecDeque<u32>,
     game_status: String,
     graphics: BTreeMap<u32, DisplayedGraphics>,
     dirty_graphics: HashSet<u32>,
@@ -264,6 +265,8 @@ pub struct PlayerApp {
 impl PlayerApp {
     fn clear_presentation(&mut self) {
         self.text_layouts.clear();
+        self.grid_galleys.clear();
+        self.pending_keys.clear();
         self.dirty_graphics.clear();
         self.presented_graphics.clear();
         self.presented_views = Default::default();
@@ -351,6 +354,7 @@ impl PlayerApp {
             new_translation_view: false,
             turns: Vec::new(),
             input: String::new(),
+            pending_keys: VecDeque::new(),
             game_status: String::new(),
             graphics: BTreeMap::new(),
             dirty_graphics: HashSet::new(),
@@ -1252,30 +1256,33 @@ impl PlayerApp {
         ) {
             return;
         }
-        let key = context.input(|input| {
-            input.events.iter().find_map(|event| match event {
-                egui::Event::Key {
-                    key, pressed: true, ..
-                } => glk_character_key(*key),
-                egui::Event::Text(text) | egui::Event::Paste(text) => {
-                    text.chars().next().map(|c| c as u32)
-                }
-                _ => None,
+        if let Some(key) = self.pending_keys.pop_front() {
+            let _ = self.submit_key(key);
+            return;
+        }
+        let event = context.input(|input| {
+            input.events.iter().enumerate().find_map(|(index, event)| {
+                let (key, remainder) = match event {
+                    egui::Event::Key {
+                        key, pressed: true, ..
+                    } => (glk_character_key(*key)?, Vec::new()),
+                    egui::Event::Text(text) | egui::Event::Paste(text) => {
+                        let mut chars = text.chars();
+                        let key = chars.next()? as u32;
+                        (key, chars.map(|character| character as u32).collect())
+                    }
+                    _ => return None,
+                };
+                Some((index, key, remainder))
             })
         });
-        if let Some(key) = key {
-            // A game keystroke must not simultaneously navigate or activate
-            // the player's menus (Tab/Return in particular).
+        if let Some((index, key, remainder)) = event {
             context.input_mut(|input| {
-                input.events.retain(|event| {
-                    !matches!(
-                        event,
-                        egui::Event::Key { pressed: true, .. }
-                            | egui::Event::Text(_)
-                            | egui::Event::Paste(_)
-                    )
-                })
+                if index < input.events.len() {
+                    input.events.remove(index);
+                }
             });
+            self.pending_keys.extend(remainder);
             let _ = self.submit_key(key);
         }
     }
