@@ -124,6 +124,46 @@ impl Canvas {
         canvas.draw(context, source, [0, 0], canvas.size);
         canvas
     }
+    pub fn from_pixels_with_links(
+        context: &egui::Context,
+        pixels: image::RgbaImage,
+        links: &[([u32; 4], u32)],
+    ) -> Self {
+        let mut canvas = Self::from_pixels(context, pixels);
+        if !links.is_empty() {
+            canvas.links = links
+                .iter()
+                .map(|(clip, hyperlink)| LinkRegion {
+                    clip: [
+                        clip[0] as i64,
+                        clip[1] as i64,
+                        clip[2] as i64,
+                        clip[3] as i64,
+                    ],
+                    hyperlink: *hyperlink,
+                })
+                .filter(|region| nonempty(region.clip))
+                .collect();
+        }
+        canvas
+    }
+    pub fn link_regions(&self) -> Vec<([u32; 4], u32)> {
+        self.links
+            .iter()
+            .filter(|region| nonempty(region.clip))
+            .map(|region| {
+                (
+                    [
+                        region.clip[0].max(0) as u32,
+                        region.clip[1].max(0) as u32,
+                        region.clip[2].max(0) as u32,
+                        region.clip[3].max(0) as u32,
+                    ],
+                    region.hyperlink,
+                )
+            })
+            .collect()
+    }
     pub fn resize(&mut self, size: [u32; 2], background: u32) {
         let size = size.map(|side| side.max(1));
         if size == self.size {
@@ -436,5 +476,9 @@ mod tests {
         assert_eq!(canvas.hyperlink_at([2, 2]), Some(0));
         assert_eq!(canvas.hyperlink_at([1, 1]), Some(42));
         assert_eq!(canvas.hyperlink_at([99, 99]), None);
+        let links = canvas.link_regions();
+        let restored = Canvas::from_pixels_with_links(&context, canvas.rasterize(), &links);
+        assert_eq!(restored.hyperlink_at([1, 1]), Some(42));
+        assert_eq!(restored.hyperlink_at([2, 2]), Some(0));
     }
 }

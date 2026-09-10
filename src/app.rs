@@ -94,6 +94,13 @@ struct SavedCanvas {
     width: u32,
     height: u32,
     pixels: Vec<u8>,
+    #[serde(default)]
+    links: Vec<SavedLinkRegion>,
+}
+#[derive(Serialize, Deserialize)]
+struct SavedLinkRegion {
+    clip: [u32; 4],
+    hyperlink: u32,
 }
 #[derive(Serialize)]
 struct SessionRef<'a> {
@@ -417,9 +424,18 @@ impl PlayerApp {
                         if let Some(pixels) =
                             image::RgbaImage::from_raw(canvas.width, canvas.height, canvas.pixels)
                         {
+                            let links = canvas
+                                .links
+                                .iter()
+                                .map(|link| (link.clip, link.hyperlink))
+                                .collect::<Vec<_>>();
                             app.graphics.insert(
                                 canvas.window,
-                                DisplayedGraphics::from_pixels(&creation.egui_ctx, pixels),
+                                DisplayedGraphics::from_pixels_with_links(
+                                    &creation.egui_ctx,
+                                    pixels,
+                                    &links,
+                                ),
                             );
                         }
                     }
@@ -1662,6 +1678,11 @@ impl eframe::App for PlayerApp {
                     width: canvas.size[0],
                     height: canvas.size[1],
                     pixels: canvas.rasterize().into_raw(),
+                    links: canvas
+                        .link_regions()
+                        .into_iter()
+                        .map(|(clip, hyperlink)| SavedLinkRegion { clip, hyperlink })
+                        .collect(),
                 })
                 .collect();
             eframe::set_value(
