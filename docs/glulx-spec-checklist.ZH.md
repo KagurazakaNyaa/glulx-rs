@@ -2,7 +2,7 @@
 
 [English](glulx-spec-checklist.md) | [中文](glulx-spec-checklist.ZH.md)
 
-更新：2026-09-10。当前实现状态为 `65173ec`。`[x]` 表示实现及列出的验证已完成，不表示穷尽规范认证；开放工作使用 `[ ]`。规范依据、类别和验收条件见 [剩余能力复核](glulx-remaining-spec-audit.ZH.md)。详细测试、样本版本、复现命令见 [验收记录](glulx-validation.ZH.md)，实现限制见 [兼容性](compatibility.ZH.md)。
+更新：2026-09-10。当前实现状态为 `f9c855d`。`[x]` 表示实现及列出的验证已完成，不表示穷尽规范认证；开放工作使用 `[ ]`。规范依据、类别和验收条件见 [剩余能力复核](glulx-remaining-spec-audit.ZH.md)。详细测试、样本版本、复现命令见 [验收记录](glulx-validation.ZH.md)，实现限制见 [兼容性](compatibility.ZH.md)。
 
 ## 规范边界
 

@@ -2,7 +2,7 @@
 
 [English](glulx-validation.md) | [中文](glulx-validation.ZH.md)
 
-Updated: 2026-09-10. The current implementation state is commit `65173ec`; local validation was run on Linux x86_64. This record describes the current tree. It does not certify exhaustive Glulx, Glk, media, or platform conformance.
+Updated: 2026-09-10. The current implementation state is commit `f9c855d`; local validation was run on Linux x86_64. This record describes the current tree. It does not certify exhaustive Glulx, Glk, media, or platform conformance.
 
 ## Current Verification
 
@@ -42,6 +42,8 @@ The real-story measurement is a startup/resident-memory workload, not a complete
 The current release measurement recorded peak HWM of `661620 KiB` and `715360 KiB` for representative 650 MB and 705 MB Blorb files. These numbers are machine- and story-dependent and are retained as comparison evidence, not as a universal limit.
 
 The headless profile now retains diagnostic heartbeats in the JSON artifact. In the startup workload, a representative story executed about 2.78 million instructions in the first two-second interval, used about 92 ms of VM-slice time, reached `WaitingForChar`, and reported roughly 2.65 million decoded-cache hits versus 106 thousand misses. This workload does not show VM dispatch as the dominant CPU cost; use a longer scripted playthrough before considering block compilation.
+
+The current release microbenchmarks report about 8.3 ns per instruction dispatch and 22.2 microseconds per 16,384-record linear-search iteration. The latter is close to the pre-RAM-relative baseline and guards the optimized contiguous-slice path.
 
 ## Coverage Matrix
 

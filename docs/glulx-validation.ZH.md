@@ -2,7 +2,7 @@
 
 [English](glulx-validation.md) | [中文](glulx-validation.ZH.md)
 
-更新：2026-09-10。当前实现状态 commit 为 `65173ec`；本地验收环境为 Linux x86_64。本文件描述当前代码，不宣称穷尽 Glulx、Glk、媒体或跨平台符合性。
+更新：2026-09-10。当前实现状态 commit 为 `f9c855d`；本地验收环境为 Linux x86_64。本文件描述当前代码，不宣称穷尽 Glulx、Glk、媒体或跨平台符合性。
 
 ## 当前验证
 
@@ -42,6 +42,8 @@ python3 tools/benchmark-stories.py \
 当前 release 测量对代表性的 650 MB 和 705 MB Blorb 文件记录峰值 HWM `661620 KiB` 和 `715360 KiB`。这些数字受机器和故事内容影响，仅作为对比证据，不是统一上限。
 
 headless profile 现在会把诊断 heartbeat 保留到 JSON 产物。在启动 workload 的首个两秒区间，代表性故事执行约 278 万条指令，VM-slice 用时约 92 ms，最终进入 `WaitingForChar`，decoded-cache 命中约 265 万次、未命中约 10.6 万次。这个 workload 没有显示 VM dispatch 是主要 CPU 成本；考虑 block compilation 前应先使用更长的脚本路线。
+
+当前 release 微基准约为每条指令分发 `8.3 ns`，16,384 条记录的线性查找每次约 `22.2 µs`。后者接近 RAM-relative 改动前的基线，用于保护优化后的连续切片热路径。
 
 ## 覆盖矩阵
 

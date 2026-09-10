@@ -2,7 +2,7 @@
 
 [English](glulx-spec-checklist.md) | [中文](glulx-spec-checklist.ZH.md)
 
-Updated: 2026-09-10. The current implementation state is `65173ec`. `[x]` means implementation and the listed validation are complete, not exhaustive conformance certification; open work uses `[ ]`. Specification evidence, classifications, and acceptance criteria are in the [remaining capability audit](glulx-remaining-spec-audit.md). Test details, fixture versions, and reproduction commands are in the [validation record](glulx-validation.md); implementation limits are in [compatibility](compatibility.md).
+Updated: 2026-09-10. The current implementation state is `f9c855d`. `[x]` means implementation and the listed validation are complete, not exhaustive conformance certification; open work uses `[ ]`. Specification evidence, classifications, and acceptance criteria are in the [remaining capability audit](glulx-remaining-spec-audit.md). Test details, fixture versions, and reproduction commands are in the [validation record](glulx-validation.md); implementation limits are in [compatibility](compatibility.md).
 
 ## Specification Boundaries
 

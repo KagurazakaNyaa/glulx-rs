@@ -2,7 +2,7 @@
 
 [English](glulx-remaining-spec-audit.md) | [中文](glulx-remaining-spec-audit.ZH.md)
 
-Updated: 2026-09-10. This audit describes the current implementation state at commit `65173ec`. It is a current scope and risk record, not a historical implementation log. Detailed test commands are in the [validation record](glulx-validation.md), and the implementation checklist is in [glulx-spec-checklist.md].
+Updated: 2026-09-10. This audit describes the current implementation state at commit `f9c855d`. It is a current scope and risk record, not a historical implementation log. Detailed test commands are in the [validation record](glulx-validation.md), and the implementation checklist is in [glulx-spec-checklist.md].
 
 ## Sources and Classification
 
