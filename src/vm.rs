@@ -58,6 +58,8 @@ pub struct ImageRequest {
     pub data: Vec<u8>,
     pub position: [i32; 2],
     pub requested_size: Option<[u32; 2]>,
+    #[serde(default)]
+    pub hyperlink: u32,
     pub canvas_size: [u32; 2],
 }
 

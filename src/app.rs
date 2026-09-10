@@ -774,7 +774,13 @@ impl PlayerApp {
                         0xffffff,
                     );
                     canvas.use_cpu(!self.gpu_canvas);
-                    canvas.draw(context, source, request.position, size);
+                    canvas.draw_hyperlinked(
+                        context,
+                        source,
+                        request.position,
+                        size,
+                        request.hyperlink,
+                    );
                     dirty.insert(request.window);
                 }
                 GraphicsRequest::Fill {
@@ -1101,6 +1107,7 @@ impl PlayerApp {
                 }
                 let mut click = None;
                 let mut hyperlink = None;
+                let mut graphics_hyperlink = None;
                 let mut grid_submitted = false;
                 for view in views.iter() {
                     let rect = egui::Rect::from_min_size(
@@ -1181,11 +1188,19 @@ impl PlayerApp {
                                     if response.clicked()
                                         && let Some(pos) = response.interact_pointer_pos()
                                     {
-                                        click = Some((
-                                            view.id,
+                                        let local = [
                                             (pos.x - rect.min.x).max(0.0) as u32,
                                             (pos.y - rect.min.y).max(0.0) as u32,
-                                        ));
+                                        ];
+                                        click = Some((view.id, local[0], local[1]));
+                                        if let Some(value) = self
+                                            .presented_graphics
+                                            .get(&view.id)
+                                            .and_then(|graphics| graphics.hyperlink_at(local))
+                                            .filter(|value| *value != 0)
+                                        {
+                                            graphics_hyperlink = Some((view.id, value));
+                                        }
                                     }
                                 }
                                 _ => {}
@@ -1198,6 +1213,9 @@ impl PlayerApp {
                         let _ = vm.mouse_input(window, x, y);
                     }
                     if let Some((window, value)) = hyperlink {
+                        let _ = vm.hyperlink_input(window, value);
+                    }
+                    if let Some((window, value)) = graphics_hyperlink {
                         let _ = vm.hyperlink_input(window, value);
                     }
                 }

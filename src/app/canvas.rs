@@ -44,6 +44,12 @@ enum Operation {
         size: [u32; 2],
     },
 }
+
+#[derive(Clone, Copy)]
+struct LinkRegion {
+    clip: Clip,
+    hyperlink: u32,
+}
 impl Operation {
     fn clip(&self) -> Clip {
         match self {
@@ -65,6 +71,7 @@ pub(super) struct Canvas {
     cpu_pixels: Option<Arc<image::RgbaImage>>,
     cpu_texture: Option<egui::TextureHandle>,
     cpu_dirty: bool,
+    links: Vec<LinkRegion>,
 }
 impl Canvas {
     pub fn new(size: [u32; 2], background: u32) -> Self {
@@ -79,6 +86,10 @@ impl Canvas {
             cpu_pixels: None,
             cpu_texture: None,
             cpu_dirty: false,
+            links: vec![LinkRegion {
+                clip: [0, 0, size[0] as i64, size[1] as i64],
+                hyperlink: 0,
+            }],
         }
     }
     pub fn use_cpu(&mut self, enabled: bool) {
@@ -132,6 +143,10 @@ impl Canvas {
         }
         self.operations
             .retain(|operation| nonempty(operation.clip()));
+        for region in &mut self.links {
+            region.clip = intersect(region.clip, bounds);
+        }
+        self.links.retain(|region| nonempty(region.clip));
     }
     pub fn clear(&mut self, color: u32) {
         if let Some(pixels) = &mut self.cpu_pixels {
@@ -145,6 +160,11 @@ impl Canvas {
         self.operations.push(Operation::Fill {
             clip: self.bounds(),
             color,
+        });
+        self.links.clear();
+        self.links.push(LinkRegion {
+            clip: self.bounds(),
+            hyperlink: 0,
         });
     }
     pub fn fill(&mut self, context: &egui::Context, rect: [i32; 4], color: u32) {
@@ -162,6 +182,7 @@ impl Canvas {
             self.bounds(),
         );
         if nonempty(clip) {
+            self.links.push(LinkRegion { clip, hyperlink: 0 });
             self.push(context, Operation::Fill { clip, color }, true);
         }
     }
@@ -171,6 +192,16 @@ impl Canvas {
         source: Arc<ImageAsset>,
         position: [i32; 2],
         size: [u32; 2],
+    ) {
+        self.draw_hyperlinked(context, source, position, size, 0);
+    }
+    pub fn draw_hyperlinked(
+        &mut self,
+        context: &egui::Context,
+        source: Arc<ImageAsset>,
+        position: [i32; 2],
+        size: [u32; 2],
+        hyperlink: u32,
     ) {
         if let Some(pixels) = &mut self.cpu_pixels {
             crate::picture::draw_scaled(Arc::make_mut(pixels), &source.pixels, position, size);
@@ -186,6 +217,7 @@ impl Canvas {
             self.bounds(),
         );
         if nonempty(clip) {
+            self.links.push(LinkRegion { clip, hyperlink });
             let opaque = source.opaque;
             self.push(
                 context,
@@ -198,6 +230,22 @@ impl Canvas {
                 opaque,
             );
         }
+    }
+    pub fn hyperlink_at(&self, position: [u32; 2]) -> Option<u32> {
+        let point = [position[0] as i64, position[1] as i64];
+        if point[0] >= self.size[0] as i64 || point[1] >= self.size[1] as i64 {
+            return None;
+        }
+        self.links
+            .iter()
+            .rev()
+            .find(|region| {
+                point[0] >= region.clip[0]
+                    && point[0] < region.clip[2]
+                    && point[1] >= region.clip[1]
+                    && point[1] < region.clip[3]
+            })
+            .map(|region| region.hyperlink)
     }
     fn push(&mut self, context: &egui::Context, operation: Operation, opaque: bool) {
         if opaque {
@@ -367,5 +415,26 @@ mod tests {
         }
         assert!(canvas.operations.len() < MAX_OPERATIONS);
         assert_eq!(canvas.rasterize().get_pixel(3, 1).0, [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn hyperlink_hit_testing_tracks_images_and_opaque_fills() {
+        let context = egui::Context::default();
+        let source = ImageAsset::new(
+            &context,
+            Arc::new(image::RgbaImage::from_pixel(
+                2,
+                2,
+                image::Rgba([255, 0, 0, 255]),
+            )),
+        );
+        let mut canvas = Canvas::new([8, 8], 0);
+        canvas.draw_hyperlinked(&context, source.clone(), [1, 1], [4, 4], 42);
+        assert_eq!(canvas.hyperlink_at([2, 2]), Some(42));
+        assert_eq!(canvas.hyperlink_at([0, 0]), Some(0));
+        canvas.fill(&context, [2, 2, 2, 2], 0xffffff);
+        assert_eq!(canvas.hyperlink_at([2, 2]), Some(0));
+        assert_eq!(canvas.hyperlink_at([1, 1]), Some(42));
+        assert_eq!(canvas.hyperlink_at([99, 99]), None);
     }
 }

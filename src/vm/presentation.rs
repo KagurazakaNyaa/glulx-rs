@@ -318,6 +318,7 @@ impl Vm {
                     data: data.to_vec(),
                     position: [arg(2) as i32, arg(3) as i32],
                     requested_size: Some(size),
+                    hyperlink: window.hyperlink,
                     canvas_size: [window.width, window.height],
                 }));
             }
@@ -746,6 +747,19 @@ mod tests {
                 .resource,
             7
         );
+    }
+
+    #[test]
+    fn graphics_image_keeps_current_hyperlink() {
+        let mut vm = pictured_vm();
+        let window = vm.open_window(&[0, 0, 0, WINTYPE_GRAPHICS, 0]);
+        let stream = vm.glk_windows[&window].stream;
+        vm.style_call(0x101, &[stream, 77]).unwrap();
+        assert_eq!(vm.draw_image(0xe1, &[window, 7, 0, 0]), 1);
+        let GraphicsRequest::Draw(request) = vm.take_graphics().pop().unwrap() else {
+            panic!("expected graphics draw");
+        };
+        assert_eq!(request.hyperlink, 77);
     }
 
     #[test]
