@@ -14,11 +14,11 @@
 
 ## 结论
 
-1. **指令执行路径是最大结构差异。** Rust 每条指令都经过 `fetch_opcode`、`fetch_operands`、`load_operand` 和一个大型 `match`；Git 把一段 Glulx 指令编译为内部代码块，地址到代码块通过哈希表复用，并可用 peephole 优化。Rust 目前没有等价的 decoded-block cache 或 JIT。
-2. **undo 是第二个明确的性能热点。** Rust 在每次 `saveundo` 时克隆完整 `Memory`（包括当前字节和初始映像）以及完整栈；Git 以 256 字节页保存差异，不变页在相邻 undo 记录间共享指针。输入前后若游戏频繁创建 undo，这个差异会直接表现为延迟和内存带宽消耗。
+1. **指令执行路径是最大结构差异。** Rust 每条指令都经过 `fetch_opcode`、`fetch_operands`、`load_operand` 和一个大型 `match`；现在对 ROM 区域使用固定直接索引的 decoded cache，命中时跳过操作码、模式和立即数读取。Git 仍把一段 Glulx 指令编译为内部代码块，地址到代码块通过哈希表复用，并可用 peephole 优化；Rust 仍没有等价的 native block compiler 或 JIT。
+2. **undo 是第二个明确的性能热点。** Rust 现在按 256 字节页保存差异，不变页在相邻 undo 记录间共享 `Arc`；栈和 heap 元数据仍按记录保存。Git 使用相同页大小和共享指针策略，因此两者的 undo 复制成本不再由完整游戏内存决定。
 3. **两个桌面架构都没有把 VM 放进独立执行线程。** GarglK 启动器通过 `QProcess` 启动独立的 Git 进程，但该进程内的 Git VM 和 Qt Glk 仍在同一线程；阻塞 `glk_select` 时由该线程泵 Qt 事件。Rust 的 eframe 逻辑和 UI 也在同一线程，只在每一帧最多运行约 8ms 的 VM 时间片。把 VM 改成线程所有权模型会改变输入和 Glk 调用边界，不能只在现有对象上随意加锁。
-4. **Rust 的同步宿主工作仍然足以遮住 VM 优化。** 资源加载、图片解码/纹理上传、音频解码、文本布局、窗口视图复制和会话序列化都可能发生在 eframe 线程。点击事件在 UI 回调里提交给 VM，VM 通常要等下一次 `logic` 才继续执行。
-5. **翻译捕获在关闭时仍有额外热路径。** `run_vm` 每次都调用 `enable_text_buffer_events`，`glk_write_char` 因而为正文字符构造 `TextBufferEvent`；`capture_translation_events` 和 `finish_turn` 即使翻译开关关闭也会累积回合，翻译辅助窗口还会遍历这些回合（`src/app.rs:537-592`、`src/app.rs:678-702`、`src/app/windows.rs:441-495`）。GarglK 的 `gli_translation_append` 在翻译关闭时立即返回（`garglk/translation.cpp:107-111`）。这会把长篇正文的 UI 成本从单份文本扩大到事件、回合和辅助窗口布局。
+4. **Rust 的剩余同步宿主工作仍可能遮住 VM 优化。** 故事读取和 VM 建立、图片解码、采样音频准备已经由有序 worker 承担；纹理上传、软件画布栅格化、文本布局、窗口视图复制和会话序列化仍在 eframe 线程。点击事件在 UI 回调里提交给 VM，VM 通常要等下一次 `logic` 才继续执行。
+5. **翻译关闭时不再捕获正文事件。** `run_vm` 只在开关启用时建立 `TextBufferEvent`，关闭时直接丢弃待捕获事件；翻译窗口仍对已记录的回合做有界显示。GarglK 的 `gli_translation_append` 在翻译关闭时也立即返回（`garglk/translation.cpp:107-111`）。
 6. **渲染实现的差异会影响当前换行和斜体问题。** GarglK 使用 FreeType 的八种实际字体组合、字形/字距缓存和 CPU 像素缓冲；Rust 使用 egui `LayoutJob`/`Galley`，通过 `RichText::italics()` 和二次偏移绘制加粗。两者不是同一排版算法，不能只用字号相同来推断布局应相同。
 
 ## 一、执行引擎
@@ -39,12 +39,12 @@ Git 在 `startProgram` 中把 PC、栈帧、局部变量和值栈保存在本地
 
 ### 性能含义
 
-当前优先级应是：
+当前实现和后续边界如下：
 
 - 先按 `vm-slice`、`ui`、`graphics`、文本布局、音频和 undo 分阶段测量；单看总 CPU 使用率不能区分阻塞等待、短促的单线程工作和锁/分配延迟。
-- 在保持逐条解释器正确性的前提下加入按 PC 索引的 decoded-block cache；先缓存操作码、模式、立即数和静态控制流，不要直接复制 Git 的 C 标签指针或把可写 RAM 代码永久缓存。
+- ROM 的按 PC 直接索引 decoded cache 已落地；RAM 代码仍逐次解码，因此自修改代码不需要额外失效协议。后续若实现更大的代码块缓存，仍不能直接复制 Git 的 C 标签指针。
 - 翻译关闭时停止捕获。只有 `translation.enabled` 为真时才启用 `TextBufferEvent` 和回合累积；辅助窗口应对历史设置有界预算或虚拟化，避免正文长度直接决定每帧 widget 数量。开启翻译时保留现有回合边界和请求顺序。
-- 代码块必须在 `setmemsize`、写入可能包含代码的 RAM、Git 风格的 cache-prune 扩展和 restart 时失效；这也是 Rust 版本比 Git 复杂的安全边界。
+- 如果未来缓存 RAM 代码，必须在 `setmemsize`、写入可能包含代码的 RAM、Git 风格的 cache-prune 扩展和 restart 时失效；这是 Rust 版本的安全边界。
 
 ## 二、内存、栈与 undo
 
@@ -56,7 +56,7 @@ Git 在 `startProgram` 中把 PC、栈帧、局部变量和值栈保存在本地
 | 默认游戏地址空间 | `MAX_MEMORY_SIZE = 1 GiB`（`src/memory.rs:3-4`），播放器可通过 `Budget` 设置固定 MiB 或启动内存比例 | Glulx 32 位地址值，端口没有同等的应用层上限 | 进程/解释器是否受限制由操作系统和启动器决定 |
 | 栈局部变量 | 支持 1、2、4 字节局部变量，并检查帧格式和栈上限（`src/vm.rs:1598-1663`） | 只接受 4 字节局部变量；遇到 1/2 字节直接 fatal error（`terps/git/terp.c:363-380`） | 不参与 VM 栈实现 |
 
-Rust 的 `saveundo` 在 `src/vm.rs:1128-1147` 计算完整内存/初始映像/栈/heap 索引成本，并把 `self.memory.clone()`、`self.stack.clone()` 放入 `UndoState`。恢复时替换内存和栈（`src/vm.rs:1149-1162`）。预算通过 `trim_undo` 淘汰最旧记录，但淘汰前会重新汇总所有快照成本（`src/vm.rs:533-545`）。这提供了清晰的有界策略和可恢复错误，但复制成本与预算成正比。
+Rust 的 `saveundo` 按页记录当前内存与前一条快照的差异，并把 `self.stack.clone()`、`heap` 索引和页表放入 `UndoState`。恢复时以故事初始 RAM/扩展区为基线，再覆盖保存页并保留 protection 范围。预算通过 `trim_undo` 淘汰最旧记录，成本按实际拥有页和栈/heap 元数据估算。
 
 Git 的 `saveUndo` 先复制完整栈和每个 RAM 页的指针表；第一条 undo 记录把未改变的页指向 `gInitMem`，改变的页才分配 256 字节副本，扩展内存页则单独保存（`terps/git/saveundo.c:47-110`）。后续记录只与上一条记录逐页比较，未改变页共享指针（`terps/git/saveundo.c:112-145`）。`deleteRecord` 在相邻记录或初始映像仍持有页时不重复释放（`terps/git/saveundo.c:308-381`）。这就是 Git 在小 undo 缓冲下仍能保存多步历史的主要原因。
 
@@ -115,7 +115,7 @@ Rust 通过 `pending_select`、请求 map 和事件队列表达等待状态。`s
 
 图形播放器在 `story_view` 中从 egui 事件得到点击位置，调用 `mouse_input`/`hyperlink_input`（`src/app.rs:1262-1300`）；字符输入从 egui 事件中取一个键，把粘贴的其余字符放入 `pending_keys`（`src/app.rs:1316-1354`）。行输入提交会先把 UI 输入写回 VM，再调用 `provide_input`（`src/app.rs:1468-1513`、`964-987`）。这些调用发生在 UI 线程；下一次 `logic` 才进入 `run_vm`（`src/app.rs:1757-1765`）。
 
-当前应用显式创建的后台线程只承担翻译请求/结果和诊断等宿主辅助工作；音频库可能另有自己的设备线程。VM、Glk 状态、窗口视图和 eframe Context 没有共享所有权通道。把图片解码、音频准备和网络放到 worker 是低风险的；把 `Vm` 拆给多个线程则需要明确事件顺序、Glk 调用串行化和快照边界。
+当前应用显式创建的后台线程承担翻译、图片解码、采样音频准备、故事加载和诊断等宿主辅助工作；音频库可能另有自己的设备线程。VM、Glk 状态、窗口视图和 eframe Context 没有共享所有权通道。worker 只返回带请求 ID 的结果，Glk 状态仍由 VM owner 串行更新。
 
 ### GarglK + Git
 
@@ -128,7 +128,7 @@ GarglK 的 launcher 与解释器进程边界在 `launchqt.cpp:127-172`：启动�
 ### 三者差异如何解释“点击后卡住”
 
 - Rust 的点击先完成 egui UI 构建，再在同一 UI 回调末尾向 VM 投递；如果上一个 `run_vm_slice`、`publish_story` 或同步媒体操作尚未结束，点击只能等线程返回。
-- Rust 的 `poll_graphics` 会在 UI 线程同步执行图片解码、创建纹理和绘制命令（`src/app.rs:715-845`）；文本图片也在 `ImageCache::get` 中同步解码和上传（`src/app/text_buffer.rs:23-52`）。声音播放准备会同步解析资源、建立解码器（`src/vm/sound.rs:236-297`）。
+- Rust 的图片和采样音频解码已经在 worker 线程执行；UI 线程只消费结果、创建纹理和提交绘制命令。SONG 需要跨资源组装，仍走 VM 内的同步路径。故事文件读取和 VM 建立也由 loader worker 承担。
 - GarglK 遇到新图像或声音时也在解释器线程同步加载，但其等待输入时由 Qt 事件循环接管；Rust 是固定周期 eframe 帧循环。二者的等待策略不同，不能把“CPU 没吃满”当成某个线程没有运行的证据。
 
 ## 五、文本、字体和图形渲染
@@ -155,7 +155,7 @@ GarglK 的全局 `gli_image_rgb` 是 CPU RGB 画布；`win_graphics_redraw` 在 
 
 ## 六、故事与资源加载
 
-Rust 的 `Story::open_with_resources` 对文件执行 `std::fs::read`，`from_bytes` 对 Blorb 复制 container、提取 GLUL 并再截断到 `EXTSTART`（`src/story.rs:172-227`）。`Story` 同时保留 `image`、可选 `container`、外部资源内容和资源偏移表（`src/story.rs:146-170`）；这使会话可以脱离原文件恢复，但启动时存在多份字节副本。图片首用时解码并放进 GUI LRU，声音播放时才建立 rodio/Symphonia 或 tracker 源（`src/app.rs:740-809`、`src/vm/sound.rs:68-98`）。
+Rust 的 `Story::open_with_resources` 对文件执行 `std::fs::read`，`from_bytes` 对 Blorb 复制 container、提取 GLUL 并再截断到 `EXTSTART`（`src/story.rs:172-227`）。`Story` 同时保留 `image`、可选 `container`、外部资源内容和资源偏移表（`src/story.rs:146-170`）；这使会话可以脱离原文件恢复，但启动时存在多份字节副本。故事加载现在由 loader worker 承担；图片首用时由 decode worker 准备，声音播放时再由 audio worker 建立采样或 tracker 源。
 
 Git 的 `git()` API 接受调用方提供的内存指针，`initMemory` 不复制 ROM；`gitWithStream()` 才为流读取分配完整游戏缓冲（`terps/git/git.c:106-174`）。Git README 明确建议 OS 支持时使用 mmap；Windows Git 用 `CreateFileMapping`/`MapViewOfFile` 后直接调用 `git`（`terps/git/git_windows.c:75-105`）。Blorb 由 `giblorb_set_resource_map` 建立映射，并通过 `FilePos` 找 Exec chunk（`terps/git/git.c:68-103`）。
 
