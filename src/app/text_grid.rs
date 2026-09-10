@@ -107,6 +107,10 @@ fn cell_rect(rect: egui::Rect, x: u32, y: u32) -> egui::Rect {
     )
 }
 
+fn needs_paint(cell: &GridCell) -> bool {
+    cell.character != ' ' || cell.style != 0 || cell.hyperlink != 0
+}
+
 /// Wide fallback glyphs still occupy one Glk grid cell. Compress their mesh
 /// horizontally instead of clipping away the right half of the character.
 fn fit_galley(mut galley: Arc<egui::Galley>, width: f32) -> Arc<egui::Galley> {
@@ -175,6 +179,9 @@ pub(super) fn show(
     for (index, cell) in view.grid_cells.iter().enumerate() {
         if view.grid_size[0] == 0 {
             break;
+        }
+        if !needs_paint(cell) {
+            continue;
         }
         let x = index as u32 % view.grid_size[0];
         let y = index as u32 / view.grid_size[0];
@@ -339,6 +346,25 @@ mod tests {
         let (_, response) = frame(&context, &view, vec![pointer(false)], None);
         assert_eq!(response.cell, Some([4, 1]));
         assert_eq!(response.hyperlink, Some(99));
+    }
+
+    #[test]
+    fn blank_normal_cells_do_not_need_painting() {
+        assert!(!needs_paint(&GridCell {
+            character: ' ',
+            style: 0,
+            hyperlink: 0,
+        }));
+        assert!(needs_paint(&GridCell {
+            character: ' ',
+            style: 1,
+            hyperlink: 0,
+        }));
+        assert!(needs_paint(&GridCell {
+            character: 'X',
+            style: 0,
+            hyperlink: 0,
+        }));
     }
 
     #[test]
