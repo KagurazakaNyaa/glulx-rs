@@ -2,7 +2,7 @@ use super::*;
 use rodio::{DeviceSinkBuilder, MixerDeviceSink, Player as Sink, Source};
 use std::{
     collections::BTreeMap,
-    sync::mpsc,
+    sync::{Arc, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -14,6 +14,7 @@ mod tracker;
 type SoundOutput = rodio::queue::SourcesQueueOutput;
 type PreparedSource = Box<dyn Source<Item = f32> + Send>;
 const AUDIO_QUEUE_CAPACITY: usize = 2;
+type SongResources = Arc<BTreeMap<u32, Arc<[u8]>>>;
 
 struct AudioDecodeWorker {
     sender: mpsc::SyncSender<AudioDecodeTask>,
@@ -28,6 +29,7 @@ struct AudioDecodeTask {
     repeats: u32,
     offset_ms: u64,
     limits: crate::memory::ResourceLimits,
+    song_resources: Option<SongResources>,
 }
 
 struct AudioDecodeResult {
@@ -50,7 +52,12 @@ impl Default for AudioDecodeWorker {
                         task.format,
                         task.repeats,
                         task.offset_ms,
-                        |_: u32| None,
+                        |number| {
+                            task.song_resources
+                                .as_ref()
+                                .and_then(|resources| resources.get(&number))
+                                .map(Arc::as_ref)
+                        },
                         task.limits,
                     )
                     .ok_or_else(|| "unsupported or invalid sound resource".to_owned());
@@ -82,6 +89,7 @@ impl AudioDecodeWorker {
         repeats: u32,
         offset_ms: u64,
         limits: crate::memory::ResourceLimits,
+        song_resources: Option<SongResources>,
     ) -> Option<u64> {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
@@ -93,6 +101,7 @@ impl AudioDecodeWorker {
                 repeats,
                 offset_ms,
                 limits,
+                song_resources,
             })
             .ok()
             .map(|_| id)
@@ -381,9 +390,7 @@ impl Vm {
         notify: u32,
         offset_ms: u64,
     ) -> bool {
-        if let Some(format) = self.story.resource_type(*b"Snd ", resource)
-            && format != *b"SONG"
-        {
+        if let Some(format) = self.story.resource_type(*b"Snd ", resource) {
             return self.queue_sound_at(id, resource, format, repeats, notify, offset_ms);
         }
         let Ok(output) = self.prepare_sound_at(id, resource, repeats, notify, offset_ms) else {
@@ -426,9 +433,34 @@ impl Vm {
             return false;
         };
         let limits = self.resource_limits;
+        let song_resources = if format == *b"SONG" {
+            let Some(numbers) = song::referenced_resources(bytes) else {
+                return false;
+            };
+            let mut resources = BTreeMap::new();
+            for number in numbers {
+                if self.story.resource_type(*b"Snd ", number) != Some(*b"FORM") {
+                    continue;
+                }
+                if let Some(data) = self.story.sound_resource(number).filter(|data| {
+                    data.len() <= crate::memory::ResourceLimits::bytes(limits.audio_resource_mib)
+                }) {
+                    resources.insert(number, Arc::<[u8]>::from(data));
+                }
+            }
+            Some(Arc::new(resources))
+        } else {
+            None
+        };
         let worker = self.audio.worker.get_or_insert_with(Default::default);
-        let Some(request) = worker.submit(bytes.to_vec(), format, repeats, offset_ms, limits)
-        else {
+        let Some(request) = worker.submit(
+            bytes.to_vec(),
+            format,
+            repeats,
+            offset_ms,
+            limits,
+            song_resources,
+        ) else {
             return false;
         };
         let Some(channel) = self.channels.get_mut(&id) else {

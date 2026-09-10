@@ -84,6 +84,31 @@ fn reference(name: &[u8]) -> Option<Option<u32>> {
     Some(Some(number))
 }
 
+/// Return the resource numbers named by a SONG header without assembling it.
+/// The worker performs the full module validation and AIFF conversion later.
+pub(super) fn referenced_resources(bytes: &[u8]) -> Option<Vec<u32>> {
+    for count in [31, 15] {
+        let header_size = 20 + count * 30 + 130 + if count == 31 { 4 } else { 0 };
+        if bytes.len() < header_size {
+            continue;
+        }
+        let references: Option<Vec<_>> = (0..count)
+            .map(|index| reference(&bytes[20 + index * 30..42 + index * 30]))
+            .collect();
+        let Some(references) = references else {
+            continue;
+        };
+        let mut result = Vec::new();
+        for number in references.into_iter().flatten() {
+            if !result.contains(&number) {
+                result.push(number);
+            }
+        }
+        return Some(result);
+    }
+    None
+}
+
 fn template(bytes: &[u8]) -> Option<(Module, Vec<Option<u32>>)> {
     // Try tagged 31-sample and original 15-sample MOD layouts. The importer
     // validates the actual signature, order table and pattern lengths; its

@@ -20,8 +20,8 @@ GarglK 的 CMake 在这个提交中把 vendored Git 标为 1.3.8，并为它启�
 
 1. **执行器仍是最大差异。** glulx-rs 逐条执行大型 Rust `match`，并以 2048 项固定直接索引缓存保存 ROM 指令的操作码、模式和立即数；它跳过了重复解码，但没有 Git 那种把一段指令编译为内部代码的 block compiler、peephole 重写或 native/JIT 后端。Git 用 Glulx 地址哈希表查找编译块，未命中时编译并按运行次数压缩代码缓存。
 2. **undo 的实际页复制已经接近 Git，但预算入口仍不同。** glulx-rs 以 256 字节页记录相对故事初始状态的差异，并在相邻记录间共享 `Arc` 页；栈、heap 元数据和页表仍按记录保存。Git 为每个 RAM 页保留指针表，未改变页指向初始映像或上一条记录，改变页才分配副本。glulx-rs 当前 `saveundo` 的预算检查仍按完整内存/初始映像长度估算，随后生成页快照时还会遍历 RAM 页面，因此大内存游戏的准入检查和快照生成开销还没有完全变成按页成本。
-3. **活动 VM/Glk 的所有权仍是单一 owner。** glulx-rs 中正在执行的 VM、Glk 状态、窗口视图和 eframe UI 在同一逻辑线程；故事加载 worker 可以在安装前构造新的 `Vm` 并初始化音频，但不会与已安装的 VM 并发共享。其他后台线程负责图片解码、非 SONG 音频准备、翻译和诊断心跳。GarglK 的 launcher 通过 `QProcess` 隔离解释器进程，但 Git VM 与该进程内的 Qt Glk 仍由同一解释器线程驱动。
-4. **宿主大块工作已部分异步。** GUI 故事读取、VM 建立、图片解码和非 SONG 音频准备已通过带请求 ID 的 worker 返回；纹理上传、软件画布栅格化、文本布局、变化窗口复制和桌面会话序列化仍在 UI 线程。SONG 需要从同一资源表组装样本，仍在 VM 内同步处理。
+3. **活动 VM/Glk 的所有权仍是单一 owner。** glulx-rs 中正在执行的 VM、Glk 状态、窗口视图和 eframe UI 在同一逻辑线程；故事加载 worker 可以在安装前构造新的 `Vm` 并初始化音频，但不会与已安装的 VM 并发共享。其他后台线程负责图片解码、音频资源准备、翻译和诊断心跳。GarglK 的 launcher 通过 `QProcess` 隔离解释器进程，但 Git VM 与该进程内的 Qt Glk 仍由同一解释器线程驱动。
+4. **宿主大块工作已部分异步。** GUI 故事读取、VM 建立、图片解码、采样/MOD 和普通 SONG 音频准备已通过带请求 ID 的 worker 返回；纹理上传、软件画布栅格化、文本布局、变化窗口复制和桌面会话序列化仍在 UI 线程。`play_multi` 为保持多声道同一采样帧起播，仍在 VM owner 内同步准备其批量音源。
 5. **内存策略是 glulx-rs 的独有能力。** 游戏地址空间、进程硬上限、undo、图形缓存、文本图片、解码图片、音频资源和 SONG PCM 分开设额度。固定 MiB 或百分比都可以写入配置，命令行覆盖只对本次运行生效；Linux 使用 cgroup 上限或 `MemAvailable`，Windows 使用 `GlobalMemoryStatusEx` 的可用物理内存，并可用 `RLIMIT_AS`/Windows Job Object 设置进程上限。
 6. **排版仍不是同一算法，但窄斜体回归已修复。** glulx-rs 使用 egui `LayoutJob`/`Galley` 和两个常规字体族，斜体由 egui 的 oblique 标志绘制，加粗用轻微偏移重复绘制；当前版本还会修正窄斜体字形四边形自相交的问题，并同时覆盖文本缓冲区和网格。GarglK 为比例/等宽、普通/斜体、粗体/粗斜体建立八种 FreeType `FontFace`，并缓存字形、字距和缺字替换。Git 不负责排版。
 
@@ -87,7 +87,7 @@ GarglK 的 [event list](https://github.com/garglk/garglk/blob/9597add4091e5aaf6e
 | 故事打开 | GUI 使用 `StoryLoadWorker` 完成文件读取、Blorb 解析、资源挂载和 VM 建立；只安装最新请求 | Git API 接收调用方提供的内存指针或 Glk stream；独立 Windows 端口使用文件映射，GarglK CMake 使用 `gitWithStream` 路径 |
 | 图片 | VM 校验并读取图片尺寸，同时把编码资源字节复制到图形请求；完整 RGBA 解码在 `ImageDecodeWorker`，UI 线程创建纹理并按顺序绘制 | [GarglK image loader](https://github.com/garglk/garglk/blob/9597add4091e5aaf6ebc31399b049158e12ca565/garglk/imgload.cpp)在宿主线程读取/解码，并按引用计数保留原图和缩放图 |
 | 采样/MOD 音频 | `AudioDecodeWorker` 准备采样和 MOD source；VM owner 负责声道状态、取消和通知 | Git 把声音交给所链接的 Glk；GarglK 的 Qt/SDL 后端在宿主解释器线程准备资源，设备回调另有线程 |
-| SONG | 需要从同一 Blorb 资源表组装 AIFF 样本，仍同步执行 | GarglK/Git 的对应 SONG/音频实现属于宿主和解释器构建，不与 glulx-rs 的 Rust 资源表共享 |
+| SONG | 普通播放把同一 Blorb 资源表的 AIFF 样本快照交给 `AudioDecodeWorker`；`play_multi` 为保持采样帧对齐仍同步组装 | GarglK/Git 的对应 SONG/音频实现属于宿主和解释器构建，不与 glulx-rs 的 Rust 资源表共享 |
 | 缓存 | 图形画布和文本图片分别有 LRU/预算；解码结果不进入 VM 会话 | GarglK 以 `picstore` 和引用计数管理图片；Git 主要依赖宿主资源和内部代码/undo 缓冲 |
 
 glulx-rs 的 [Story](https://github.com/KagurazakaNyaa/glulx-rs/blob/4eccf8b527349d3ae226be44194f1925477f94ee/src/story.rs)保留故事映像、可选原始容器和外部资源内容，以便会话脱离原文件恢复；这会产生多份字节副本。图形请求还会暂存编码图片字节，直到 UI worker 完成解码。Git README 明确建议在系统支持时 mmap，以减少启动复制并更快开始执行；GarglK 当前 CMake 的 Git 集成不使用这个独立 Windows 端口。
@@ -120,7 +120,7 @@ Git 的 `savefile.c`/`saveundo.c`处理可移植存档、栈和页表，不保�
 | 顺序 | 当前状态 | 仍与参考项目不同的边界 |
 | --- | --- | --- |
 | 可观测性 | 已有 `vm-slice`、UI、publish、布局、图形上传、音频准备、undo 和会话阶段计时 | 输入事件到每个阶段的跨线程 trace 仍可进一步细化 |
-| 异步宿主工作 | 故事、图片、采样/MOD 音频准备已使用有序且有界的 worker | 纹理上传、布局、软件栅格化、SONG 和会话编码仍在 owner/UI |
+| 异步宿主工作 | 故事、图片、采样/MOD/普通 SONG 音频准备已使用有序且有界的 worker | 纹理上传、布局、软件栅格化、`play_multi` SONG 批处理和会话编码仍在 owner/UI |
 | 指令缓存 | ROM decoded cache 已实现，RAM 代码不缓存 | 没有 Git 风格 block compiler、peephole 或 JIT |
 | undo | 256 字节页差分、共享页、旧会话迁移已实现 | 页表是 Rust `BTreeMap`，不是 Git 的原始指针数组 |
 | Glk/呈现热路径 | 参数使用固定小缓冲，翻译关闭时不捕获，transcript 显示采用虚拟行，变化窗口发布有界 | 逐字符 Glk 输出和变化窗口内的完整向量仍不同于 GarglK 的 dirty 行 |
