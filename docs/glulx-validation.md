@@ -2,7 +2,7 @@
 
 [English](glulx-validation.md) | [中文](glulx-validation.ZH.md)
 
-Updated: 2026-09-10. The current implementation state is commit `bad16fb`; local validation was run on Linux x86_64. This record describes the current tree. It does not certify exhaustive Glulx, Glk, media, or platform conformance.
+Updated: 2026-09-10. The current implementation state is commit `65173ec`; local validation was run on Linux x86_64. This record describes the current tree. It does not certify exhaustive Glulx, Glk, media, or platform conformance.
 
 ## Current Verification
 
@@ -15,7 +15,7 @@ RUSTC_WRAPPER= cargo build --release
 
 The current checks pass:
 
-- 272 library tests pass; 6 manual performance tests remain ignored.
+- 273 library tests pass; 6 manual performance tests remain ignored.
 - 6 CLI tests pass.
 - Formatting, all-target Clippy, and the release build pass.
 - The undo regression proves that a 2 MiB story can retain a one-page undo snapshot under a 1 MiB undo budget; the shared story image is not charged to that snapshot budget.
@@ -39,7 +39,7 @@ python3 tools/benchmark-stories.py \
 
 The real-story measurement is a startup/resident-memory workload, not a complete playthrough. The largest remaining memory costs are the story container, executable image, VM memory, and media/resource payloads. The repository does not currently use mmap or a block compiler.
 
-The current release measurement recorded peak HWM of `755844 KiB` and `819592 KiB` for representative 650 MB and 705 MB Blorb files. These numbers are machine- and story-dependent and are retained as comparison evidence, not as a universal limit.
+The current release measurement recorded peak HWM of `661620 KiB` and `715360 KiB` for representative 650 MB and 705 MB Blorb files. These numbers are machine- and story-dependent and are retained as comparison evidence, not as a universal limit.
 
 The headless profile now retains diagnostic heartbeats in the JSON artifact. In the startup workload, a representative story executed about 2.78 million instructions in the first two-second interval, used about 92 ms of VM-slice time, reached `WaitingForChar`, and reported roughly 2.65 million decoded-cache hits versus 106 thousand misses. This workload does not show VM dispatch as the dominant CPU cost; use a longer scripted playthrough before considering block compilation.
 

@@ -91,7 +91,7 @@ sparse/dense dirty-page snapshots on 64 MiB memory, 16 KiB cold/warm text layout
 commit, platform, Rust version, total time and time per operation; these metrics do not predict whole-game speedups.
 
 On the current Linux release build, the real-story startup workload measured peak HWM of about
-`755844 KiB` and `819592 KiB` for representative 650 MB and 705 MB Blorb files. This is a
+`661620 KiB` and `715360 KiB` for representative 650 MB and 705 MB Blorb files. This is a
 startup/resident-memory measurement, not a complete gameplay benchmark; hardware, allocator and
 story contents affect the result.
 

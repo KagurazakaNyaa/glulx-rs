@@ -1,6 +1,6 @@
 # glulx-rs、GarglK 与 David Kinder Git：固定提交源码差异
 
-复核日期：2026-09-10。跨项目结论使用下表固定的源码提交；当前实现状态以 `71e6889` 说明。外部项目结论来自固定提交的源码检查，不代表当天 upstream 的最新状态，也不等同于同一构建配置下的运行时基准。
+复核日期：2026-09-10。跨项目结论使用下表固定的源码提交；当前实现状态以 `65173ec` 说明。外部项目结论来自固定提交的源码检查，不代表当天 upstream 的最新状态，也不等同于同一构建配置下的运行时基准。
 
 本文按三个项目的实际职责比较固定基线的实现：`glulx-rs` 同时提供 Glulx VM、Glk 状态和 eframe 播放器；Git 只提供 Glulx VM，必须链接 Glk；GarglK 提供 Glk 桌面宿主、资源处理和启动器，并在本次基线中集成 Git 1.3.8。
 
@@ -18,7 +18,7 @@ GarglK 的 CMake 在这个提交中把 vendored Git 标为 1.3.8，并为它启�
 
 ## 当前仓库状态
 
-当前实现状态 `bad16fb` 在固定比较基线之上还包含以下实现变化：
+当前实现状态 `65173ec` 在固定比较基线之上还包含以下实现变化：
 
 | 提交 | 当前变化 |
 | --- | --- |
@@ -28,8 +28,9 @@ GarglK 的 CMake 在这个提交中把 vendored Git 标为 1.3.8，并为它启�
 | `ebab7cb` | 超预算 undo 候选在构造完整页表前按页数上限拒绝，限制临时分配峰值。 |
 | `71e6889` | VM 只为 RAMSTART 之后的可写区分配当前内存，ROM 直接从共享故事映像读取。 |
 | `bad16fb` | headless workload 将诊断 heartbeat、VM 指令数、阶段耗时和 decode 命中率写入基准 JSON。 |
+| `65173ec` | Bundled Blorb 的 container 和执行映像共享 backing buffer，减少重复驻留；真实故事 RSS 进一步下降。 |
 
-当前本地验证为：`272` 个库测试通过、`6` 个 CLI 测试通过、`6` 个性能测试忽略；fmt、全目标 Clippy 和 release 构建通过。真实大故事基准仍显示加载后的主要成本是故事容器、可执行映像、VM 内存和媒体资源的驻留副本，尚未引入 mmap 或 block compiler。
+当前本地验证为：`273` 个库测试通过、`6` 个 CLI 测试通过、`6` 个性能测试忽略；fmt、全目标 Clippy 和 release 构建通过。真实大故事基准仍显示加载后的主要成本是故事容器、VM 内存和媒体资源的驻留副本，尚未引入 mmap 或 block compiler。
 
 ## 结论
 
@@ -140,7 +141,7 @@ Git 的 `savefile.c`/`saveundo.c`处理可移植存档、栈和页表，不保�
 | 异步宿主工作 | 故事、图片、采样/MOD/普通 SONG 音频准备已使用有序且有界的 worker | worker 源码、单元测试、Linux GUI 工具 | 纹理上传、布局、软件栅格化、`play_multi` SONG 批处理和会话编码仍在 owner/UI |
 | 指令缓存 | ROM decoded cache 已实现，RAM 代码不缓存 | `decoded_cache_reuses_rom_instruction_metadata` 测试、release 微基准 | 没有 Git 风格 block compiler、peephole 或 JIT；只有在固定基准证明 VM dispatch 是主要瓶颈后才考虑，且必须保留 RAM 自修改和 Glk 边界语义 |
 | undo | 256 字节页差分、dirty-page 跟踪、共享页、旧会话迁移和按快照 payload 计费已实现 | Memory/session/conformance 测试、`undo_budget_counts_snapshot_pages_not_the_story_image`、`limited_page_snapshots_reject_dense_dirty_memory`、源码检查 | 页表是 Rust `BTreeMap`，不是 Git 的原始指针数组；很大的 dirty set 仍需 profile |
-| 工程质量 | 当前全目标 Clippy、格式检查和 release 构建通过 | 当前实现状态 `bad16fb` 的本地验证 | Windows/macOS CI 与实机 GUI 仍需分别记录 |
+| 工程质量 | 当前全目标 Clippy、格式检查和 release 构建通过 | 当前实现状态 `65173ec` 的本地验证 | Windows/macOS CI 与实机 GUI 仍需分别记录 |
 | Glk/呈现热路径 | 参数使用固定小缓冲，翻译关闭时不捕获，transcript 最多保留 4 MiB/100,000 行且显示采用虚拟行，变化窗口发布有界 | Glk conformance、Linux GUI/终端工具、单元测试 | 逐字符 Glk 输出和变化窗口内的完整向量仍不同于 GarglK 的 dirty 行 |
 | 字体/排版 | 已有字体 fallback、样式 hint、布局缓存和 CJK 分段测试；`4eccf8b` 修复了文本/网格窄斜体字形四边形自相交 | 字体/布局单元测试、Linux GUI 验收 | 真实八种字体组合、FreeType 字距、Windows/macOS 和跨项目像素差分仍待实机验收 |
 
