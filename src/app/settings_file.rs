@@ -107,6 +107,8 @@ mod tests {
         let path = directory.0.join("glulx-settings.json");
         let legacy = PlayerSettings {
             font_size: 23.0,
+            proportional_font: "Noto Sans".into(),
+            monospace_font: "Consolas".into(),
             show_log_window: false,
             ..Default::default()
         };
@@ -117,6 +119,8 @@ mod tests {
             SettingsFile::load(Some(path.clone()), PlayerSettings::default());
         assert!(!loaded.show_log_window);
         loaded.font_size = 26.0;
+        loaded.proportional_font = "Microsoft YaHei UI".into();
+        loaded.monospace_font = "Consolas".into();
         loaded.max_memory_mib = crate::memory_budget::Budget::Fixed(512);
         loaded.max_process_memory_mib = crate::memory_budget::Budget::Percent { percent: 75 };
         loaded.resource_limits.undo_mib = crate::memory_budget::Budget::Fixed(16);
@@ -124,6 +128,8 @@ mod tests {
         assert!(file.save(&loaded));
         let (_, loaded) = SettingsFile::load(Some(path), PlayerSettings::default());
         assert_eq!(loaded.font_size, 26.0);
+        assert_eq!(loaded.proportional_font, "Microsoft YaHei UI");
+        assert_eq!(loaded.monospace_font, "Consolas");
         assert_eq!(
             loaded.max_memory_mib,
             crate::memory_budget::Budget::Fixed(512)

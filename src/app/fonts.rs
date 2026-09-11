@@ -23,45 +23,75 @@ pub(super) struct Fonts {
 }
 
 impl Fonts {
-    pub fn new(context: &egui::Context, extra_path: &str, system_font: &str) -> Self {
+    pub fn new(
+        context: &egui::Context,
+        extra_path: &str,
+        proportional_font: &str,
+        monospace_font: &str,
+        legacy_system_font: &str,
+    ) -> Self {
         let mut definitions = egui::FontDefinitions::default();
         let mut errors = None;
         let mut fallback_count = 0;
         let mut total_bytes = 0;
         let extra = Path::new(extra_path.trim());
+        let explicit_selection =
+            !proportional_font.trim().is_empty() || !monospace_font.trim().is_empty();
         let candidates = system_fallbacks();
         if !extra_path.trim().is_empty() {
             match add_font(&mut definitions, extra, "player-extra-font") {
                 Ok(length) => {
-                    prefer_font(&mut definitions, "player-extra-font");
                     fallback_count += 1;
                     total_bytes += length;
                 }
                 Err(error) => errors = Some(format!("Could not load {}: {error}", extra.display())),
             }
         }
-        if extra_path.trim().is_empty() && !system_font.is_empty() {
-            match super::font_dialog::font_bytes(system_font).and_then(|bytes| {
-                let index = (0..ttf_parser::fonts_in_collection(&bytes).unwrap_or(1))
-                    .find(|&index| {
-                        ttf_parser::Face::parse(&bytes, index).is_ok_and(|face| {
-                            face.names().into_iter().any(|name| {
-                                matches!(name.name_id, 1 | 16)
-                                    && name.to_string().is_some_and(|name| {
-                                        name.to_lowercase() == system_font.to_lowercase()
-                                    })
-                            })
-                        })
-                    })
-                    .unwrap_or(0);
-                install_font(&mut definitions, bytes, index, "player-system-font")
-            }) {
+        if !proportional_font.trim().is_empty() {
+            load_system_font(
+                &mut definitions,
+                proportional_font,
+                true,
+                "player-proportional-font",
+                &mut fallback_count,
+                &mut total_bytes,
+                &mut errors,
+            );
+        }
+        if !monospace_font.trim().is_empty() {
+            load_system_font(
+                &mut definitions,
+                monospace_font,
+                false,
+                "player-monospace-font",
+                &mut fallback_count,
+                &mut total_bytes,
+                &mut errors,
+            );
+        }
+        // Settings written before proportional/monospace roles were split used
+        // one selection and classified it from the actual face metadata.
+        if !explicit_selection && !legacy_system_font.trim().is_empty() {
+            match load_font_bytes(
+                &mut definitions,
+                legacy_system_font,
+                "player-legacy-system-font",
+            ) {
                 Ok(length) => {
-                    prefer_font(&mut definitions, "player-system-font");
+                    prefer_font(&mut definitions, "player-legacy-system-font");
                     fallback_count += 1;
                     total_bytes += length;
                 }
-                Err(error) => errors = Some(format!("Could not load {system_font}: {error}")),
+                Err(error) => append_error(
+                    &mut errors,
+                    format!("Could not load {legacy_system_font}: {error}"),
+                ),
+            }
+        } else if !explicit_selection && legacy_system_font.trim().is_empty() {
+            // Preserve the old meaning of the manually supplied font file when
+            // no role-specific family has been selected yet.
+            if definitions.font_data.contains_key("player-extra-font") {
+                prefer_font(&mut definitions, "player-extra-font");
             }
         }
         for (index, path) in candidates.iter().enumerate() {
@@ -174,6 +204,71 @@ fn light_family(proportional: bool) -> egui::FontFamily {
         .into(),
     )
 }
+
+fn append_error(errors: &mut Option<String>, error: String) {
+    if let Some(existing) = errors {
+        existing.push_str("; ");
+        existing.push_str(&error);
+    } else {
+        *errors = Some(error);
+    }
+}
+
+fn font_face_index(bytes: &[u8], family: &str) -> u32 {
+    (0..ttf_parser::fonts_in_collection(bytes).unwrap_or(1))
+        .find(|&index| {
+            ttf_parser::Face::parse(bytes, index).is_ok_and(|face| {
+                face.names().into_iter().any(|name| {
+                    matches!(name.name_id, 1 | 16)
+                        && name
+                            .to_string()
+                            .is_some_and(|name| name.eq_ignore_ascii_case(family))
+                })
+            })
+        })
+        .unwrap_or(0)
+}
+
+fn load_font_bytes(
+    definitions: &mut egui::FontDefinitions,
+    family: &str,
+    name: &str,
+) -> Result<u64, String> {
+    super::font_dialog::font_bytes(family).and_then(|bytes| {
+        let index = font_face_index(&bytes, family);
+        install_font(definitions, bytes, index, name)
+    })
+}
+
+fn load_system_font(
+    definitions: &mut egui::FontDefinitions,
+    family: &str,
+    proportional: bool,
+    name: &str,
+    fallback_count: &mut usize,
+    total_bytes: &mut u64,
+    errors: &mut Option<String>,
+) {
+    let result = super::font_dialog::font_bytes(family).and_then(|bytes| {
+        let length = bytes.len() as u64;
+        if length > MAX_FONT_BYTES {
+            return Err("Font file exceeds 64 MiB".to_owned());
+        }
+        if total_bytes.saturating_add(length) > MAX_FALLBACK_BYTES {
+            return Err("Font fallback budget exceeded".to_owned());
+        }
+        let index = font_face_index(&bytes, family);
+        install_font_in_family(definitions, bytes, index, name, proportional)
+    });
+    match result {
+        Ok(length) => {
+            *fallback_count += 1;
+            *total_bytes += length;
+        }
+        Err(error) => append_error(errors, format!("Could not load {family}: {error}")),
+    }
+}
+
 pub(super) fn family(style: crate::vm::ResolvedStyle) -> egui::FontFamily {
     if style.weight < 0 {
         light_family(style.proportional)
@@ -323,6 +418,9 @@ fn install_font(
     name: &str,
 ) -> Result<u64, String> {
     let length = bytes.len() as u64;
+    if length > MAX_FONT_BYTES {
+        return Err("Font file exceeds 64 MiB".to_owned());
+    }
     // Validate outline data at the collection index supplied to egui. Keep
     // malformed or unsupported fonts out of the host's fallback definitions.
     ttf_parser::Face::parse(&bytes, index)
@@ -340,6 +438,25 @@ fn install_font(
             .or_default()
             .push(name.to_owned());
     }
+    Ok(length)
+}
+
+fn install_font_in_family(
+    definitions: &mut egui::FontDefinitions,
+    bytes: Vec<u8>,
+    index: u32,
+    name: &str,
+    proportional: bool,
+) -> Result<u64, String> {
+    let length = install_font(definitions, bytes, index, name)?;
+    let selected = regular_family(proportional);
+    let other = regular_family(!proportional);
+    if let Some(names) = definitions.families.get_mut(&other) {
+        names.retain(|candidate| candidate != name);
+    }
+    let names = definitions.families.entry(selected).or_default();
+    names.retain(|candidate| candidate != name);
+    names.insert(0, name.to_owned());
     Ok(length)
 }
 
@@ -686,5 +803,46 @@ fn selected_fixed_pitch_font_keeps_proportional_body_text_proportional() {
         definitions.families[&egui::FontFamily::Proportional]
             .iter()
             .any(|name| name == "selected-fixed")
+    );
+}
+
+#[test]
+fn selected_font_roles_are_kept_in_their_designated_families() {
+    let mut definitions = egui::FontDefinitions::default();
+    let proportional = definitions.font_data["Ubuntu-Light"].clone();
+    let monospace = definitions.font_data["Hack"].clone();
+    install_font_in_family(
+        &mut definitions,
+        proportional.font.to_vec(),
+        proportional.index,
+        "selected-proportional",
+        true,
+    )
+    .unwrap();
+    install_font_in_family(
+        &mut definitions,
+        monospace.font.to_vec(),
+        monospace.index,
+        "selected-monospace",
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        definitions.families[&egui::FontFamily::Proportional][0],
+        "selected-proportional"
+    );
+    assert_eq!(
+        definitions.families[&egui::FontFamily::Monospace][0],
+        "selected-monospace"
+    );
+    assert!(
+        !definitions.families[&egui::FontFamily::Proportional]
+            .iter()
+            .any(|name| name == "selected-monospace")
+    );
+    assert!(
+        !definitions.families[&egui::FontFamily::Monospace]
+            .iter()
+            .any(|name| name == "selected-proportional")
     );
 }

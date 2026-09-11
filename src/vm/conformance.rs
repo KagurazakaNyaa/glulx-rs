@@ -558,6 +558,38 @@ fn all_load_address_modes_and_opcode_encodings() {
 }
 
 #[test]
+fn indirect_search_accepts_keys_longer_than_a_glulx_value() {
+    let program = instruction(0x150, &[0x160, 9, 0x180, 12, 1, 3, 1], &[8]);
+    let mut image = image_with_program(&program);
+    let key = b"indirect!";
+    image[0x160..0x169].copy_from_slice(key);
+    image[0x183..0x18c].copy_from_slice(key);
+    image[32..36].fill(0);
+    let checksum = image
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|word| u32::from_be_bytes(*word))
+        .fold(0u32, u32::wrapping_add);
+    image[32..36].copy_from_slice(&checksum.to_be_bytes());
+
+    let mut vm = Vm::new(Story::from_bytes(&image, None).unwrap()).unwrap();
+    assert_eq!(vm.run_steps(1).unwrap(), RunState::Running);
+    assert_eq!(vm.stack.pop_u32().unwrap(), 0x180);
+}
+
+#[test]
+fn direct_search_still_rejects_non_native_key_sizes() {
+    let program = instruction(0x150, &[0x160, 9, 0x180, 12, 1, 3, 0], &[7]);
+    let image = image_with_program(&program);
+    let mut vm = Vm::new(Story::from_bytes(&image, None).unwrap()).unwrap();
+    assert!(matches!(
+        vm.run_steps(1),
+        Err(VmError::InvalidSearchKeySize(9))
+    ));
+}
+
+#[test]
 fn huffman_leaf_and_indirection_matrix() {
     for kind in [2u8, 3, 4, 5, 8, 9, 10, 11] {
         let mut vm = vm();

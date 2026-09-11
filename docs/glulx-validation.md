@@ -15,7 +15,7 @@ RUSTC_WRAPPER= cargo build --release
 
 The current checks pass:
 
-- 277 library tests pass; 6 manual performance tests remain ignored.
+- 281 library tests pass; 6 manual performance tests remain ignored.
 - 8 CLI tests pass.
 - Formatting, all-target Clippy, and the release build pass.
 - The undo regression proves that a 2 MiB story can retain a one-page undo snapshot under a 1 MiB undo budget; the shared story image is not charged to that snapshot budget.

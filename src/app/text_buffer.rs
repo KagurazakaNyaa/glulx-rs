@@ -299,6 +299,7 @@ impl Layout {
             .map_or(self.paragraph.justification, |(_, item, _)| {
                 item.justification.unwrap_or(self.paragraph.justification)
             });
+        // Glk stylehint_Justification values: 0=left, 1=full, 2=center, 3=right.
         let shift = match justification {
             2 => remaining / 2.0,
             3 => remaining,
@@ -778,7 +779,7 @@ mod tests {
 
     #[test]
     fn paragraph_alignment_and_hanging_indent_use_available_line_width() {
-        for (align, expected) in [(0, 10.0), (2, 35.0), (3, 60.0)] {
+        for (align, expected) in [(0, 10.0), (1, 10.0), (2, 35.0), (3, 60.0)] {
             let (items, _) = layout(&[paragraph(10.0, 0.0, align), text(0, 30.0)], 100.0);
             assert_eq!(rect(&items, 0).left(), expected);
         }

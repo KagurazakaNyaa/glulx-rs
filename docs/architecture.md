@@ -36,9 +36,10 @@ coverage and metrics are injected callbacks, omitted from portable and desktop
 serialization and reinstalled by the GUI. This keeps egui out of the VM.
 
 The VM has one owner on the UI event-loop thread; this egui host uses 8 ms quanta (checked every 1024 instructions) to remain responsive. It blocks only at input/event waits; UI input is delivered directly to the same VM state. Empty select_poll calls without intervening host operations no longer force a frame. Translation requests and audio playback use background work; GPU uploads remain on the UI thread.
-`PlayerApp` supplies keyboard,
-mouse, hyperlink and file-selection results. Native companion viewports contain log/input, translation and settings; only the root
-canvas determines Glk dimensions. Graphics retain clipped image/rectangle primitives, published with shared window
+`PlayerApp` supplies keyboard, mouse, hyperlink and file-selection results. The root
+canvas and log/input viewport share VM input state, with only the focused viewport
+submitting keyboard input. Native companion viewports contain log/input, translation
+and settings; only the root canvas determines Glk dimensions. Graphics retain clipped image/rectangle primitives, published with shared window
 views at event boundaries. Hardware OpenGL scales and blends them on the GPU.
 Software drivers use an incremental CPU bitmap. Opaque draws remove covered
 commands; long histories compact, and the recent-image cache has a configurable pixel-payload budget (default 512 MiB).

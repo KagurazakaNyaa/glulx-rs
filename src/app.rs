@@ -42,7 +42,11 @@ pub struct PlayerSettings {
     pub max_process_memory_mib: Budget,
     pub resource_limits: ResourceBudgets,
     pub font_size: f32,
+    pub proportional_font: String,
+    pub monospace_font: String,
     pub fallback_font: String,
+    /// Compatibility with settings written before font roles were split.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub system_font: String,
     pub text_color: [u8; 3],
     pub background_color: [u8; 3],
@@ -62,6 +66,8 @@ impl Default for PlayerSettings {
             max_process_memory_mib: Budget::Fixed(0),
             resource_limits: ResourceBudgets::default(),
             font_size: 18.0,
+            proportional_font: String::new(),
+            monospace_font: String::new(),
             fallback_font: String::new(),
             system_font: String::new(),
             text_color: [32, 34, 37],
@@ -457,6 +463,8 @@ impl PlayerApp {
         let fonts = fonts::Fonts::new(
             &creation.egui_ctx,
             &settings.fallback_font,
+            &settings.proportional_font,
+            &settings.monospace_font,
             &settings.system_font,
         );
         let mut app = Self {
@@ -1633,18 +1641,18 @@ impl PlayerApp {
         submit
     }
 
-    fn input_bar(&mut self, root: &mut egui::Ui) {
+    fn input_bar(&mut self, root: &mut egui::Ui, id: &'static str) {
         let language = self.settings.language.resolve();
         let accept_input = !self.dialog_open(root.ctx());
         let can_submit = self.vm.as_ref().and_then(Vm::input_request).is_some();
         let request = self.pending_input();
-        egui::Panel::bottom("input")
+        let input_font = egui::FontId::new(self.settings.font_size, egui::FontFamily::Monospace);
+        let text_color = rgb(self.settings.text_color);
+        let background = rgb(self.settings.background_color);
+        let viewport_focused = root.input(|input| input.focused);
+        egui::Panel::bottom(egui::Id::new(("input", id)))
             .min_size(51.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(Color32::from_rgb(235, 237, 238))
-                    .inner_margin(10.0),
-            )
+            .frame(egui::Frame::new().fill(background).inner_margin(10.0))
             .show(root, |ui| {
                 ui.set_min_height(30.0);
                 if request.is_none() {
@@ -1664,7 +1672,7 @@ impl PlayerApp {
                         let windows = vm.pending_input_windows();
                         if windows.len() > 1 {
                             let mut selected = vm.input_window();
-                            egui::ComboBox::from_id_salt("input-window")
+                            egui::ComboBox::from_id_salt(("input-window", id))
                                 .selected_text(language.format("ui.window", &[&selected]))
                                 .show_ui(ui, |ui| {
                                     for window in windows {
@@ -1694,39 +1702,52 @@ impl PlayerApp {
                         }
                         return;
                     }
-                    ui.label(match request {
-                        Some(InputRequest::Line { .. }) => ">",
-                        Some(InputRequest::File { writing: true }) => language.text("ui.save_file"),
-                        Some(InputRequest::File { writing: false }) => {
-                            language.text("ui.open_file")
-                        }
-                        _ => "",
-                    });
+                    ui.label(
+                        RichText::new(match request {
+                            Some(InputRequest::Line { .. }) => ">",
+                            Some(InputRequest::File { writing: true }) => {
+                                language.text("ui.save_file")
+                            }
+                            Some(InputRequest::File { writing: false }) => {
+                                language.text("ui.open_file")
+                            }
+                            _ => "",
+                        })
+                        .font(input_font.clone())
+                        .color(text_color),
+                    );
                     let limit = match request {
                         Some(InputRequest::Line { maximum_length }) => maximum_length as usize,
                         _ => usize::MAX,
                     };
                     let response = ui.add_sized(
-                        [ui.available_width() - 72.0, 30.0],
+                        [(ui.available_width() - 72.0).max(1.0), 30.0],
                         egui::TextEdit::singleline(&mut self.input)
                             .char_limit(limit)
-                            .font(egui::TextStyle::Monospace),
+                            .font(input_font)
+                            .text_color(text_color)
+                            .background_color(background),
                     );
                     if response.changed()
                         && let Some(vm) = &mut self.vm
                     {
                         let _ = vm.update_line_input(&self.input);
                     }
-                    let enter = accept_input
+                    let enter = viewport_focused
+                        && accept_input
                         && can_submit
                         && (response.has_focus() || response.lost_focus())
                         && ui.input(|input| input.key_pressed(egui::Key::Enter));
                     // Re-requesting an existing focus interrupts IME in
                     // egui 0.36 and can create a native IME/repaint loop.
-                    if accept_input && !ui.memory(|memory| memory.has_focus(response.id)) {
+                    if viewport_focused
+                        && accept_input
+                        && !ui.memory(|memory| memory.has_focus(response.id))
+                    {
                         response.request_focus();
                     }
-                    let terminator = if accept_input
+                    let terminator = if viewport_focused
+                        && accept_input
                         && can_submit
                         && matches!(request, Some(InputRequest::Line { .. }))
                     {
@@ -2060,6 +2081,10 @@ impl eframe::App for PlayerApp {
         self.menu_bar(root);
 
         self.status_bar(root);
+        let grid_line_input = self.vm.as_ref().is_some_and(Vm::is_grid_line_input);
+        if self.vm.is_some() && (!grid_line_input || self.settings.show_log_window) {
+            self.input_bar(root, "main");
+        }
         self.story_view(root);
         if paste_submit {
             self.submit_input();
@@ -2558,6 +2583,55 @@ mod tests {
         assert_eq!(app.input, "next");
         app.submit_input();
         assert!(app.pending_keys.is_empty());
+    }
+
+    #[test]
+    fn main_input_bar_accepts_and_submits_a_line_request() {
+        let program = [
+            0x40, 0x80, 0x40, 0x81, 0x10, 0x40, 0x82, 0x01, 0x40, 0x40, 0x81, 0x01, 0x81, 0x30,
+            0x12, 0x00, 0x00, 0xd0, 0x04, 0x40, 0x82, 0x01, 0x10, 0x81, 0x30, 0x12, 0x00, 0x00,
+            0xc0, 0x01, 0x81, 0x20,
+        ];
+        let story =
+            Story::from_bytes(&crate::vm::tests::image_with_program(&program), None).unwrap();
+        let mut vm = Vm::new(story).unwrap();
+        assert_eq!(vm.open_window(&[0, 0, 0, 3, 0]), 1);
+        assert_eq!(vm.run_steps(32).unwrap(), RunState::WaitingForLine);
+
+        let context = egui::Context::default();
+        let mut app = PlayerApp::new(
+            &eframe::CreationContext::_new_kittest(context.clone()),
+            None,
+        );
+        app.vm = Some(vm);
+        app.input = "look".to_owned();
+        let frame = |app: &mut PlayerApp, events| {
+            let mut output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(640.0, 120.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |root| app.input_bar(root, "main"),
+            );
+            output.textures_delta.clear();
+        };
+        frame(&mut app, Vec::new());
+        frame(
+            &mut app,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert_eq!(app.input, "");
+        assert!(app.vm.as_ref().and_then(Vm::input_request).is_none());
     }
 
     #[test]

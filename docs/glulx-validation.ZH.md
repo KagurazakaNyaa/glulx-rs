@@ -15,7 +15,7 @@ RUSTC_WRAPPER= cargo build --release
 
 当前检查通过：
 
-- 277 个库测试通过；6 个手动性能测试保持 ignored。
+- 281 个库测试通过；6 个手动性能测试保持 ignored。
 - 8 个 CLI 测试通过。
 - 格式检查、全目标 Clippy 和 release 构建通过。
 - undo 回归证明：2 MiB 故事在 1 MiB undo 预算下可以保留单页快照；共享故事映像不计入该快照预算。

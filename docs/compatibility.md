@@ -10,7 +10,7 @@ This is not a claim of exhaustive conformance.
 ## Implemented
 
 - Validated raw Glulx and indexed Blorb executables, images, sound/data resources, iFiction metadata, cover art and RDes image/sound descriptions.
-- Standard integer, addressing, call, search, string, single/double precision and heap instructions.
+- Standard integer, addressing, call, search, string, single/double precision and heap instructions. Direct search keys accept 1, 2, or 4 bytes; indirect keys use validated variable-length memory arrays.
 - IFZS persistent saves interoperating with Glulxe, restart/protect and multiple undo states.
 - Inform acceleration functions 1–13, including class/property access and legacy/current object layouts; unsupported registrations are removed as specified.
 - Pair window trees, text buffers/grids, graphics windows, file/memory/resource streams and Unicode operations.
@@ -72,13 +72,15 @@ very large unsigned target sizes. PNG/JPEG resources are fully decoded before a
 successful Glk image result. Decoded sources default to a configurable 256 MiB RGBA output limit, with a
 decoder allocation budget twice the output limit; unavailable images report failure. RDes text
 alternatives are available in Story information. Text-buffer style hints 0–9 are supported; paragraph
-indentation/hanging indents and all four justification modes are implemented. Grid
+indentation/hanging indents and all four justification modes use Glk's
+0=left/1=full/2=center/3=right values. Grid
 cells retain style and hyperlinks; grid layout hints 0–3/6 are ignored to keep equal
 cell dimensions, while weight/oblique/color hints apply. Measurements reflect actual
 rendering; light requests select actual light faces for proportional/monospace fonts
 when available, and otherwise report regular fallback. Font metadata is checked rather
 than trusting filenames; host face availability is reinstalled after session restoration. System outline
-fonts are loaded automatically, and Options accepts an extra TTF/OTF/TTC fallback.
+fonts are loaded automatically, and Options provides independent proportional and
+fixed-width system font choices plus an extra TTF/OTF/TTC fallback.
 CharOutput reports missing glyphs accurately. Text-buffer window sizing uses the
 normal style’s actual font metrics; grids keep uniform 8×16 cells.
 

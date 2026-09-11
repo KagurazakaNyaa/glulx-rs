@@ -112,6 +112,20 @@ enum Operand {
     Local(u32),
 }
 
+enum SearchKey {
+    Inline { bytes: [u8; 4], length: usize },
+    Owned(Vec<u8>),
+}
+
+impl SearchKey {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Inline { bytes, length } => &bytes[..*length],
+            Self::Owned(bytes) => bytes,
+        }
+    }
+}
+
 const DECODE_CACHE_SIZE: usize = 2048;
 
 #[derive(Clone, Copy)]
@@ -2812,7 +2826,7 @@ impl Vm {
         while structure_count == u32::MAX || index < structure_count {
             let structure = start.wrapping_add(index.wrapping_mul(structure_size));
             let candidate = structure.wrapping_add(key_offset);
-            if self.memory.key_equals(candidate, key_size, &key)? {
+            if self.memory.key_equals(candidate, key.as_slice())? {
                 return Ok(search_result(structure, index, options));
             }
             if options & 0x02 != 0 && self.memory.key_is_zero(candidate, key_size)? {
@@ -2842,7 +2856,7 @@ impl Vm {
             let index = low + (high - low) / 2;
             let structure = start.wrapping_add(index.wrapping_mul(structure_size));
             let candidate = structure.wrapping_add(key_offset);
-            match self.memory.key_cmp(candidate, key_size, &key)? {
+            match self.memory.key_cmp(candidate, key.as_slice())? {
                 Ordering::Less => low = index + 1,
                 Ordering::Greater => high = index,
                 Ordering::Equal => return Ok(search_result(structure, index, options)),
@@ -2865,7 +2879,7 @@ impl Vm {
         let mut remaining = self.memory.len() / 4 + 1;
         while structure != 0 && remaining > 0 {
             let candidate = structure.wrapping_add(key_offset);
-            if self.memory.key_equals(candidate, key_size, &key)? {
+            if self.memory.key_equals(candidate, key.as_slice())? {
                 return Ok(structure);
             }
             if options & 0x02 != 0 && self.memory.key_is_zero(candidate, key_size)? {
@@ -2880,7 +2894,7 @@ impl Vm {
         Ok(0)
     }
 
-    fn search_key(&self, key: &[u8; 4], key_size: u32, options: u32) -> Result<[u8; 4], VmError> {
+    fn search_key(&self, key: &[u8; 4], key_size: u32, options: u32) -> Result<SearchKey, VmError> {
         if options & 0x01 != 0 {
             return self.memory_key(u32::from_be_bytes(*key), key_size);
         }
@@ -2889,17 +2903,27 @@ impl Vm {
         }
         let mut result = [0; 4];
         result[..key_size as usize].copy_from_slice(&key[4 - key_size as usize..]);
-        Ok(result)
+        Ok(SearchKey::Inline {
+            bytes: result,
+            length: key_size as usize,
+        })
     }
 
-    fn memory_key(&self, address: u32, key_size: u32) -> Result<[u8; 4], VmError> {
+    fn memory_key(&self, address: u32, key_size: u32) -> Result<SearchKey, VmError> {
         if key_size == 0 {
-            return Ok([0; 4]);
+            return Ok(SearchKey::Inline {
+                bytes: [0; 4],
+                length: 0,
+            });
         }
-        if !matches!(key_size, 1 | 2 | 4) {
-            return Err(VmError::InvalidSearchKeySize(key_size));
+        if key_size <= 4 {
+            let bytes = self.memory.key(address, key_size)?;
+            return Ok(SearchKey::Inline {
+                bytes,
+                length: key_size as usize,
+            });
         }
-        self.memory.key(address, key_size)
+        Ok(SearchKey::Owned(self.memory.read_bytes(address, key_size)?))
     }
 }
 

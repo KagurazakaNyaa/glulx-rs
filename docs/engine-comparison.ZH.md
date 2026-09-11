@@ -30,8 +30,8 @@
 1. **功能覆盖已经接近可用播放器，主要差距不再是 VM 骨架。** 当前代码围绕
    Glulx 3.1.3 目标覆盖核心指令、字符串、heap、搜索、浮点/双精度、
    Inform 加速、IFZS、undo，以及相当完整的 Glk 窗口、流、事件、图像和声音
-   路径。库测试当前为 `277` 个通过、`6` 个手工性能测试忽略，CLI 测试为
-   `7` 个通过；这仍不是所有合法故事和所有宿主组合的证明。
+   路径。库测试当前为 `281` 个通过、`6` 个手工性能测试忽略，CLI 测试为
+   `8` 个通过；这仍不是所有合法故事和所有宿主组合的证明。
 2. **与 Glulxe 的差异主要在边界合同和宿主组合，而不是已有 opcode 的数量。**
    Glulxe 的 `exec.c`、`serial.c` 和 `glkop.c` 是当前最合适的行为 oracle；仓库
    已有 `tools/check-reference.py`，可以比较输出、IFZS 恢复、加速、长压缩字符串
@@ -47,7 +47,8 @@
 5. **当前最实际的风险是“能启动”到“长期兼容”的距离。** 未覆盖的重点包括
    完整游戏路线、Windows/macOS 实机、所有 Glk 可选模块、历史 tracker 变体、
    字体和 DPI 差异，以及异常输入下与两个 C 实现的逐项行为差异。已发现的
-   `div/mod` 极值溢出已修复；未知 selector 仍保留默认宽容模式，并提供严格模式。
+   `div/mod` 极值溢出和 indirect key 的可变长度已修复；未知 selector 仍保留默认
+   宽容模式，并提供严格模式。
 
 ## 总体对照
 
@@ -191,7 +192,8 @@ interpreter build](https://github.com/garglk/garglk/blob/9597add4091e5aaf6ebc313
 ### 整数 `div/mod` 溢出
 
 当前 `0x13`/`0x14` 拒绝除数为零和 `0x80000000 / -1` 的整数溢出，行为已与
-Glulxe/Git 的固定基线对齐；回归覆盖位于 conformance 测试。[当前实现](../src/vm.rs)
+Glulxe/Git 的固定基线对齐；indirect search key 现在支持超过四字节的合法长度，
+direct key 仍只接受 1/2/4 字节；回归覆盖位于 conformance 测试。[当前实现](../src/vm.rs)
 [Glulxe 执行器](https://github.com/erkyrath/glulxe/blob/56ab8743bab565de307bd892c555d8d8897ed517/exec.c)
 [Git 执行器](https://github.com/DavidKinder/Git/blob/8f5604e10c6194f7d0a6222491eaeb236a70a874/terp.c)
 
@@ -207,7 +209,8 @@ prototype 时进入 fatal error。两种策略都可以是产品选择，但差�
 ### Git 自身的已知限制
 
 Git 的 README 明列短局部变量和直接 search key 的限制；当前 `glulx-rs` 的
-局部变量和搜索路径接受 1、2、4 字节。这里不能把 Git 的限制倒推成 Glulx
+局部变量和 direct search key 接受 1、2、4 字节，indirect key 支持合法的可变长度。
+这里不能把 Git 的限制倒推成 Glulx
 规范要求，也不能因为一个故事能在 Git 中运行就认为所有边界都已被覆盖。Git
 适合作为第二套 oracle，但每个失败都要标记为“Git 限制”还是“规范差异”。
 [Git README](https://github.com/DavidKinder/Git/blob/8f5604e10c6194f7d0a6222491eaeb236a70a874/README.txt)

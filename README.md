@@ -55,10 +55,11 @@ cargo run --release -- --headless --trace-events "<output-dir>/events.json" path
 
 Tracing is disabled by default and is not part of saves or desktop sessions.
 
-The desktop uses three native windows: the game canvas, **Log and input**, and
-**Translation**. Resize or close companion windows without resizing the game.
-Use the toolbar Log and Translation toggles to show or hide them. Settings opens
-its own native window. View and Ctrl+Shift+L / Ctrl+Shift+T can also reopen companions.
+The game canvas and the **Log and input** companion both accept commands. Only the
+focused viewport owns keyboard submission, so showing the companion cannot submit a
+line twice. Resize or close companion windows without resizing the game. Use the
+toolbar Log and Translation toggles to show or hide them. Settings opens its own
+native window. View and Ctrl+Shift+L / Ctrl+Shift+T can also reopen companions.
 Game frames are published at Glk event boundaries, preserving the previous complete
 frame while the next is composed.
 
@@ -78,9 +79,12 @@ separate formats.
 The desktop supports paragraph alignment and indentation, styled grids with inline
 editing, inline and margin images with resizing, picture hyperlinks,
 and MOD/XM/S3M/IT music alongside sampled audio. Inform acceleration functions 1–13 are
-available. Settings supports native font selection on Windows/macOS and GTK 3 desktops,
-or a TTF/OTF/TTC file. The selected face takes priority in its matching proportional or monospace family.
-Fixed-pitch/HW faces remain fallback fonts for missing proportional glyphs rather than replacing proportional Latin body text. See the compatibility document for tested media formats and limits.
+available. Settings supports independent proportional and fixed-width system font
+selection on Windows/macOS and GTK 3 desktops, or a shared TTF/OTF/TTC fallback file.
+The selected faces are installed only in their designated families, while fixed-pitch
+faces remain fallback fonts for missing proportional glyphs rather than replacing
+proportional Latin body text. See the compatibility document for tested media formats
+and limits.
 
 External resources can be selected before startup:
 

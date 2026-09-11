@@ -80,6 +80,10 @@ def main():
                     time.sleep(.3)
                 toolbar(185)  # Log toggle
                 assert not find('Log and input$')
+                keys('windowfocus', '--sync', str(canvas))
+                keys('type', '--clearmodifiers', 'main')
+                keys('key', 'Return')
+                time.sleep(.4)
                 toolbar(317)  # Settings is a fourth native viewport, not an embedded dialog
                 settings_window = find('Settings$')[0]
                 harness.close_window(display, settings_window)
@@ -96,11 +100,13 @@ def main():
                 toolbar(317)
                 settings_window = find('Settings$')[0]
                 assert len({canvas, inputs, translation, settings_window}) == 4
+                keys('windowsize', str(settings_window), '500', '500')
+                keys('windowfocus', '--sync', str(settings_window))
                 keys('windowraise', str(settings_window))
                 subprocess.run(['import', '-window', str(settings_window), str(root / 'settings.png')], env=env, check=True, timeout=10)
                 if args.font_dialogs:
                     keys('windowfocus', '--sync', str(settings_window))
-                    keys('mousemove', '--window', str(settings_window), '75', '110', 'click', '1')
+                    keys('mousemove', '--window', str(settings_window), '180', '145', 'click', '1')
                     deadline = time.monotonic() + 5
                     while not find('^Choose font$') and time.monotonic() < deadline:
                         time.sleep(.1)
@@ -115,20 +121,34 @@ def main():
                     deadline = time.monotonic() + 5
                     while time.monotonic() < deadline:
                         config = json.loads((root / 'session/glulx-settings.json').read_text())
-                        if config['system_font']: break
+                        if config['proportional_font']: break
                         time.sleep(.1)
-                    assert config['system_font'], config
+                    assert config['proportional_font'], config
                     keys('windowfocus', '--sync', str(settings_window))
-                    keys('mousemove', '--window', str(settings_window), '205', '110', 'click', '1')
-                    deadline = time.monotonic() + 5
-                    while not find('^Choose font file') and time.monotonic() < deadline:
-                        time.sleep(.1)
-                    chooser = find('^Choose font file')[0]
+                    chooser = None
+                    for x in ['75', '180']:
+                        for y in ['190', '200', '210', '220', '230', '240', '250']:
+                            keys('windowfocus', '--sync', str(settings_window))
+                            keys('mousemove', '--window', str(settings_window), x, y, 'click', '1')
+                            deadline = time.monotonic() + 1
+                            while time.monotonic() < deadline:
+                                matches = find('^Choose font file')
+                                if matches:
+                                    chooser = matches[0]
+                                    break
+                                if find('^Choose font$'):
+                                    keys('key', 'Escape')
+                                    break
+                                time.sleep(.1)
+                            if chooser is not None:
+                                break
+                        if chooser is not None:
+                            break
+                    assert chooser is not None, 'Font file chooser did not open'
                     keys('windowfocus', '--sync', str(chooser))
                     keys('key', 'Escape')
                     time.sleep(.3)
                     assert not find('^Choose font file'), 'File picker did not cancel'
-                keys('windowsize', str(settings_window), '500', '500')
                 keys('windowfocus', '--sync', str(inputs))
                 keys('type', '--clearmodifiers', 'look')
                 keys('key', 'Return')
@@ -156,6 +176,7 @@ def main():
 
             session = harness.run_story(args.candidate.resolve(), story, root / 'session', display,
                                         exercise, focus_input=True, diagnostics=True)
+            assert 'Received: main' in session['transcript'], session['transcript']
             assert 'Received: look' in session['transcript'], session['transcript']
             config = json.loads((root / 'session/glulx-settings.json').read_text())
             assert config['show_log_window'] and config['show_translation_window']

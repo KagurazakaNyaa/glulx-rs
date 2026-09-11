@@ -20,7 +20,7 @@ impl PlayerApp {
                     }
                     let context = root.ctx().clone();
                     self.character_input(&context);
-                    self.input_bar(root);
+                    self.input_bar(root, "log");
                     egui::CentralPanel::default().show(root, |ui| {
                         ui.push_id("player-log-controls", |ui| {
                             self.show_transcript(ui);
@@ -198,11 +198,8 @@ impl PlayerApp {
         let context = ui.ctx().clone();
         self.settings_save_controls(ui);
         ui.separator();
-        let appearance = (
-            self.settings.font_size,
-            self.settings.text_color,
-            self.settings.background_color,
-        );
+        self.display_settings_contents(ui, language, &context);
+        ui.separator();
         match startup_snapshot() {
             Ok(snapshot) => {
                 ui.label(language.format(
@@ -279,30 +276,72 @@ impl PlayerApp {
             self.memory_overrides.process,
         );
         ui.weak(language.text("ui.process_memory_hint"));
-        ui.separator();
+    }
+
+    fn display_settings_contents(
+        &mut self,
+        ui: &mut egui::Ui,
+        language: Language,
+        context: &egui::Context,
+    ) {
+        let appearance = (
+            self.settings.font_size,
+            self.settings.text_color,
+            self.settings.background_color,
+        );
         ui.heading(language.text("ui.display"));
         ui.add(
             egui::Slider::new(&mut self.settings.font_size, 12.0..=32.0)
                 .text(language.text("ui.text_size")),
         );
         ui.horizontal(|ui| {
-            if ui.button(language.text("ui.choose_system_font")).clicked() {
-                match super::font_dialog::choose_family(&self.settings.system_font, language) {
+            ui.label(language.text("ui.proportional_font"));
+            if ui
+                .button(language.text("ui.choose_proportional_font"))
+                .clicked()
+            {
+                match super::font_dialog::choose_family(&self.settings.proportional_font, language)
+                {
                     Ok(Some(family)) => {
-                        self.settings.system_font = family;
-                        self.settings.fallback_font.clear();
-                        self.apply_selected_font(&context);
+                        self.settings.proportional_font = family;
+                        self.settings.system_font.clear();
+                        self.apply_selected_font(context);
                     }
                     Ok(None) => {}
                     Err(error) => self.fonts.error = Some(error),
                 }
             }
+        });
+        if !self.settings.proportional_font.is_empty() {
+            ui.label(language.format("ui.selected_font", &[&self.settings.proportional_font]));
+        }
+        ui.horizontal(|ui| {
+            ui.label(language.text("ui.monospace_font"));
+            if ui
+                .button(language.text("ui.choose_monospace_font"))
+                .clicked()
+            {
+                match super::font_dialog::choose_family(&self.settings.monospace_font, language) {
+                    Ok(Some(family)) => {
+                        self.settings.monospace_font = family;
+                        self.settings.system_font.clear();
+                        self.apply_selected_font(context);
+                    }
+                    Ok(None) => {}
+                    Err(error) => self.fonts.error = Some(error),
+                }
+            }
+        });
+        if !self.settings.monospace_font.is_empty() {
+            ui.label(language.format("ui.selected_font", &[&self.settings.monospace_font]));
+        }
+        ui.horizontal(|ui| {
             if ui.button(language.text("ui.choose_font_file")).clicked() {
                 match super::font_dialog::choose_file(language) {
                     Ok(Some(path)) => {
                         self.settings.fallback_font = path.display().to_string();
                         self.settings.system_font.clear();
-                        self.apply_selected_font(&context);
+                        self.apply_selected_font(context);
                     }
                     Ok(None) => {}
                     Err(error) => self.fonts.error = Some(error),
@@ -312,7 +351,7 @@ impl PlayerApp {
         if !self.settings.system_font.is_empty() {
             ui.label(language.format("ui.system_font", &[&self.settings.system_font]));
         }
-        ui.label(language.text("ui.font_file_ttf_otf_or_ttc"));
+        ui.label(language.text("ui.extra_fallback_font"));
         ui.text_edit_singleline(&mut self.settings.fallback_font);
         if ui
             .add_enabled(
@@ -322,12 +361,14 @@ impl PlayerApp {
             .clicked()
         {
             self.settings.system_font.clear();
-            self.apply_selected_font(&context);
+            self.apply_selected_font(context);
         }
         if ui.button(language.text("ui.use_default_fonts")).clicked() {
             self.settings.system_font.clear();
+            self.settings.proportional_font.clear();
+            self.settings.monospace_font.clear();
             self.settings.fallback_font.clear();
-            self.apply_selected_font(&context);
+            self.apply_selected_font(context);
         }
         ui.weak(language.format("ui.fallback_fonts_loaded", &[&self.fonts.fallback_count]));
         if let Some(error) = &self.fonts.error {
@@ -445,9 +486,12 @@ impl PlayerApp {
 
     fn apply_selected_font(&mut self, context: &egui::Context) {
         self.text_layouts.clear();
+        self.grid_galleys.clear();
         self.fonts = fonts::Fonts::new(
             context,
             &self.settings.fallback_font,
+            &self.settings.proportional_font,
+            &self.settings.monospace_font,
             &self.settings.system_font,
         );
         self.pending_font_metrics = true;
