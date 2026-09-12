@@ -36,6 +36,7 @@ coverage and metrics are injected callbacks, omitted from portable and desktop
 serialization and reinstalled by the GUI. This keeps egui out of the VM.
 
 The VM has one owner on the UI event-loop thread; this egui host uses 8 ms quanta (checked every 1024 instructions) to remain responsive. It blocks only at input/event waits; UI input is delivered directly to the same VM state. Empty select_poll calls without intervening host operations no longer force a frame. Translation requests and audio playback use background work; GPU uploads remain on the UI thread.
+Debug builds start a loopback HTTP profiling endpoint by default; release builds enable it with `--profile-http ADDRESS`. The endpoint exposes VM snapshots, opcode counters, stage timings and decode-cache statistics. Linux and macOS also expose pprof-rs protobuf and flamegraph reports. Windows registers an ETW provider for WPR/WPA CPU sampling markers and can request a bounded WPR ETL through `/debug/etw/profile?seconds=N`; a missing system-profile privilege triggers a UAC-elevated, short-lived helper. JSON observability remains available because pprof-rs's POSIX sampler is unavailable there.
 `PlayerApp` supplies keyboard, mouse, hyperlink and file-selection results. The root
 canvas and log/input viewport share VM input state, with only the focused viewport
 submitting keyboard input. Native companion viewports contain log/input, translation

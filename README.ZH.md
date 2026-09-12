@@ -43,6 +43,27 @@ cargo run --release -- --headless --trace-events "<output-dir>/events.json" path
 
 该 trace 默认关闭，不进入存档或桌面会话。
 
+Debug 构建默认在 `127.0.0.1:6060` 启动本地 profiling 和可观测性 HTTP 接口。
+Release 构建只有传入地址才启用：
+
+```sh
+cargo run --release -- --profile-http 127.0.0.1:6060 path/to/story.gblorb
+```
+
+在浏览器打开 `/debug/pprof/`，或请求 `/debug/metrics` 获取 VM 状态、时间片耗时、
+解码缓存命中率和 opcode 计数的 JSON 快照。Linux 和 macOS 上，
+`/debug/pprof/profile` 返回可交给 `pprof` 工具的 protobuf profile，
+`/debug/pprof/flamegraph` 返回 SVG 火焰图；添加 `?seconds=N`（最多 300 秒）可采集新的
+有限时间窗口，不带参数时返回当前运行的累计快照。pprof-rs 依赖 POSIX 采样信号，
+因此 Windows 不提供这两个原生采样接口；Windows 会注册 ETW provider（见 `/debug/etw`），
+可配合 WPR/WPA 的 CPU 采样与 VM 时间片标记关联。请求 `/debug/etw/profile?seconds=N` 会调用
+`wpr.exe` 返回有界 ETL（需要安装 WPR，可能需要追踪权限），可在 WPA 中按 `glulx-rs.exe` 过滤。
+接口先尝试用当前权限启动 WPR；只有 Windows 报告缺少系统性能权限时，才通过 UAC 启动短时 helper。
+只有 helper 提权，拒绝 UAC 会返回 HTTP 403。单次采集最多 60 秒、ETL 最大 256 MiB。
+远程 HTTP 请求可以触发 UAC 提示，因此只应监听可信网络；本机采集请绑定回环地址。
+Windows 仍提供 JSON 指标接口，可用于比较真实故事路线。
+服务只监听命令行指定的地址，采集本机数据时请使用回环地址。
+
 游戏画布和**日志＋输入**辅助窗口都可以输入命令。只有当前获得焦点的窗口负责提交键盘输入，因此同时打开辅助窗口不会重复提交同一行。调整或关闭辅助窗口不会改变画布尺寸；工具栏的 Log 和 Translation 按钮用于显示或隐藏窗口，Settings 打开独立设置窗口；也可从 View 菜单或快捷键 Ctrl+Shift+L / Ctrl+Shift+T 重新打开辅助窗口。画面在 Glk 事件边界发布，下一幅画面完成前保留上一幅完整画面。
 
 游戏发起的保存/读取提示允许在输入栏填写路径；修改已有文件前需要确认，读取时要求文件已存在。桌面应用还会每 30 秒以及正常退出时保存会话；启动时不指定故事即可恢复上次会话。故事、内存和画布等快照原始数据超过 16 MiB 时，会跳过自动会话快照，避免界面卡死；这类游戏请使用游戏内的保存命令，播放器设置仍会保存。设置存储在可执行文件同目录的 `glulx-settings.json` 中，优先于旧 eframe 设置；首次没有 JSON 文件时迁移旧配置。点击 Save settings 或关闭设置窗口会立即保存，也会每 30 秒及正常退出时保存。手动编辑后重启生效；会话仍留在 eframe 存储中。`View -> Story information` 显示可用的 iFiction 元数据、封面以及图像/声音文字描述。可移植游戏存档与桌面会话使用不同的格式。

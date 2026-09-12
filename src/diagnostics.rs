@@ -1,4 +1,4 @@
-//! Opt-in, flushed diagnostics that remain useful when the UI thread stalls.
+//! Flushed diagnostics that remain useful when the UI thread stalls.
 use std::{
     collections::BTreeMap,
     fs::File,
@@ -8,10 +8,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::vm::VmDiagnosticSnapshot;
+
 struct State {
     stage: &'static str,
     since: Instant,
     vm: String,
+    vm_snapshot: Option<VmDiagnosticSnapshot>,
     frames: u64,
     slices: u64,
     vm_time: Duration,
@@ -20,36 +23,50 @@ struct State {
 }
 
 struct Logger {
-    file: Mutex<File>,
+    file: Option<Mutex<File>>,
     state: Mutex<State>,
     started: Instant,
 }
 
 static LOGGER: OnceLock<Logger> = OnceLock::new();
 
+fn new_logger(file: Option<File>) -> Logger {
+    let now = Instant::now();
+    Logger {
+        file: file.map(Mutex::new),
+        state: Mutex::new(State {
+            stage: "event-loop",
+            since: now,
+            vm: String::new(),
+            vm_snapshot: None,
+            frames: 0,
+            slices: 0,
+            vm_time: Duration::ZERO,
+            ui_time: Duration::ZERO,
+            named_time: BTreeMap::new(),
+        }),
+        started: now,
+    }
+}
+
+/// Initialize the in-process observation state without creating a log file.
+/// Profiling builds use this so the HTTP metrics endpoint works independently
+/// from the optional diagnostic heartbeat log.
+pub(crate) fn initialize() {
+    let _ = LOGGER.set(new_logger(None));
+}
+
 /// Create the requested log before starting the GUI. No game text or credentials
 /// are recorded. A worker reports the current stage even if the GUI stops moving.
 pub fn start(path: &Path) -> io::Result<()> {
     let file = File::create(path)?;
-    let now = Instant::now();
+    let logger = new_logger(Some(file));
     LOGGER
-        .set(Logger {
-            file: Mutex::new(file),
-            state: Mutex::new(State {
-                stage: "event-loop",
-                since: now,
-                vm: String::new(),
-                frames: 0,
-                slices: 0,
-                vm_time: Duration::ZERO,
-                ui_time: Duration::ZERO,
-                named_time: BTreeMap::new(),
-            }),
-            started: now,
-        })
+        .set(logger)
         .map_err(|_| io::Error::other("diagnostics already started"))?;
     record(format_args!(
-        "start version={} os={} arch={} debug_assertions={} opt_level={}",
+        "start pid={} version={} os={} arch={} debug_assertions={} opt_level={}",
+        std::process::id(),
         env!("CARGO_PKG_VERSION"),
         std::env::consts::OS,
         std::env::consts::ARCH,
@@ -101,9 +118,11 @@ pub fn start(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-pub(crate) fn record(message: std::fmt::Arguments<'_>) {
-    if let Some(logger) = LOGGER.get() {
-        let mut file = logger.file.lock().unwrap_or_else(|e| e.into_inner());
+pub fn record(message: std::fmt::Arguments<'_>) {
+    if let Some(logger) = LOGGER.get()
+        && let Some(file) = &logger.file
+    {
+        let mut file = file.lock().unwrap_or_else(|e| e.into_inner());
         let _ = writeln!(
             file,
             "[{}ms] {message}",
@@ -115,8 +134,80 @@ pub(crate) fn record(message: std::fmt::Arguments<'_>) {
 
 pub(crate) fn vm(vm: &crate::Vm) {
     if let Some(logger) = LOGGER.get() {
-        logger.state.lock().unwrap_or_else(|e| e.into_inner()).vm = vm.diagnostic_summary();
+        let snapshot = vm.diagnostic_snapshot();
+        {
+            let mut state = logger.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.vm = vm.diagnostic_summary();
+            state.vm_snapshot = Some(snapshot.clone());
+        }
+        crate::profiling::record_vm(&snapshot);
     }
+}
+
+#[derive(serde::Serialize)]
+struct Snapshot {
+    version: &'static str,
+    os: &'static str,
+    arch: &'static str,
+    debug_assertions: bool,
+    opt_level: &'static str,
+    etw_enabled: bool,
+    uptime_ms: u128,
+    stage: &'static str,
+    stage_ms: u128,
+    frames: u64,
+    slices: u64,
+    vm_ms: u128,
+    ui_ms: u128,
+    named_ms: BTreeMap<String, u128>,
+    vm: Option<VmDiagnosticSnapshot>,
+}
+
+/// Return a consistent JSON snapshot for the local profiling endpoint.
+pub(crate) fn snapshot_json() -> Vec<u8> {
+    let Some(logger) = LOGGER.get() else {
+        let snapshot = Snapshot {
+            version: env!("CARGO_PKG_VERSION"),
+            os: std::env::consts::OS,
+            arch: std::env::consts::ARCH,
+            debug_assertions: cfg!(debug_assertions),
+            opt_level: env!("GLULX_BUILD_OPT_LEVEL"),
+            etw_enabled: crate::profiling::etw_enabled(),
+            uptime_ms: 0,
+            stage: "uninitialized",
+            stage_ms: 0,
+            frames: 0,
+            slices: 0,
+            vm_ms: 0,
+            ui_ms: 0,
+            named_ms: BTreeMap::new(),
+            vm: None,
+        };
+        return serde_json::to_vec(&snapshot).unwrap_or_else(|_| b"{}".to_vec());
+    };
+    let state = logger.state.lock().unwrap_or_else(|e| e.into_inner());
+    let snapshot = Snapshot {
+        version: env!("CARGO_PKG_VERSION"),
+        os: std::env::consts::OS,
+        arch: std::env::consts::ARCH,
+        debug_assertions: cfg!(debug_assertions),
+        opt_level: env!("GLULX_BUILD_OPT_LEVEL"),
+        etw_enabled: crate::profiling::etw_enabled(),
+        uptime_ms: logger.started.elapsed().as_millis(),
+        stage: state.stage,
+        stage_ms: state.since.elapsed().as_millis(),
+        frames: state.frames,
+        slices: state.slices,
+        vm_ms: state.vm_time.as_millis(),
+        ui_ms: state.ui_time.as_millis(),
+        named_ms: state
+            .named_time
+            .iter()
+            .map(|(name, elapsed)| ((*name).to_owned(), elapsed.as_millis()))
+            .collect(),
+        vm: state.vm_snapshot.clone(),
+    };
+    serde_json::to_vec(&snapshot).unwrap_or_else(|_| b"{}".to_vec())
 }
 
 pub(crate) struct Stage(Option<(&'static str, Instant, &'static str, Instant)>);
@@ -158,6 +249,7 @@ impl Drop for Stage {
                 state.stage = previous;
                 state.since = since;
             }
+            crate::profiling::record_stage(name, elapsed);
             if elapsed >= Duration::from_millis(250) {
                 record(format_args!(
                     "slow stage={name} elapsed_ms={}",

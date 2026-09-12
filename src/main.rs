@@ -6,7 +6,7 @@ use glulx_rs::app::PlayerApp;
 use glulx_rs::memory_budget::{Budget, MemoryPolicy, Overrides, startup_snapshot};
 use glulx_rs::{ResourceSelection, Story, Vm};
 
-const USAGE: &str = "Usage: glulx-rs [--headless] [--strict-glk] [--trace-events PATH] [--max-memory MIB] [--max-process-memory MIB] [--diagnostics LOG] [--resources PATH] [--no-auto-resources] [STORY]\n\n--headless          Play in the terminal (plain text when input or output is piped)\n--strict-glk        Fail when a story calls an unknown Glk selector\n--trace-events PATH Write delivered Glk events as JSON after headless playback\n--max-memory MIB   Game VM limit: MiB or percentage (e.g. 1024 or 25%)\n--max-process-memory MIB  OS hard limit: MiB or percentage (0 disables)\n--max-undo-memory SIZE       Undo payload budget\n--max-graphics-cache SIZE    Graphics cache budget\n--max-text-image-cache SIZE  Text image cache budget\n--max-decoded-image SIZE     Per-picture RGBA budget\n--max-audio-resource SIZE    Per-audio encoded budget\n--max-song-pcm SIZE          SONG PCM budget\nAll SIZE values accept MiB or 1%–100%. CLI overrides JSON for this run only.\n--diagnostics LOG   Write diagnostic heartbeats and slow operations to LOG\n--resources PATH    Use this Blorb archive or loose resource directory\n--no-auto-resources Disable discovery of same-name external resource archives\n--help              Show this help\n\nDebug builds default to ./glulx-debug.log; --diagnostics overrides it.\n\nAn explicit --resources path takes priority over --no-auto-resources.";
+const USAGE: &str = "Usage: glulx-rs [--headless] [--strict-glk] [--trace-events PATH] [--profile-http ADDRESS] [--max-memory MIB] [--max-process-memory MIB] [--diagnostics LOG] [--resources PATH] [--no-auto-resources] [STORY]\n\n--headless          Play in the terminal (plain text when input or output is piped)\n--strict-glk        Fail when a story calls an unknown Glk selector\n--trace-events PATH Write delivered Glk events as JSON after headless playback\n--profile-http ADDRESS  Listen for local profiling and metrics HTTP requests\n--max-memory MIB   Game VM limit: MiB or percentage (e.g. 1024 or 25%)\n--max-process-memory MIB  OS hard limit: MiB or percentage (0 disables)\n--max-undo-memory SIZE       Undo payload budget\n--max-graphics-cache SIZE    Graphics cache budget\n--max-text-image-cache SIZE  Text image cache budget\n--max-decoded-image SIZE     Per-picture RGBA budget\n--max-audio-resource SIZE    Per-audio encoded budget\n--max-song-pcm SIZE          SONG PCM budget\nAll SIZE values accept MiB or 1%–100%. CLI overrides JSON for this run only.\n--diagnostics LOG   Write diagnostic heartbeats and slow operations to LOG\n--resources PATH    Use this Blorb archive or loose resource directory\n--no-auto-resources Disable discovery of same-name external resource archives\n--help              Show this help\n\nDebug builds default to ./glulx-debug.log and the profiling endpoint 127.0.0.1:6060.\nRelease builds enable profiling only with --profile-http.\n\nAn explicit --resources path takes priority over --no-auto-resources.";
 
 #[derive(Debug)]
 struct Arguments {
@@ -19,6 +19,7 @@ struct Arguments {
     story: Option<PathBuf>,
     resources: ResourceSelection,
     diagnostics: Option<PathBuf>,
+    profile_http: Option<String>,
 }
 
 fn parse_arguments(
@@ -26,6 +27,8 @@ fn parse_arguments(
 ) -> Result<Option<Arguments>, String> {
     let mut arguments = arguments.into_iter();
     let mut diagnostics = None;
+    let mut profile_http = None;
+    let mut profile_http_explicit = false;
     let mut resource_overrides = std::collections::BTreeMap::new();
     let mut max_memory_mib = None;
     let mut max_process_memory_mib = None;
@@ -87,6 +90,20 @@ fn parse_arguments(
             if diagnostics.replace(PathBuf::from(path)).is_some() {
                 return Err("Specify --diagnostics only once".to_owned());
             }
+        } else if !positional && argument == "--profile-http" {
+            let address = arguments
+                .next()
+                .ok_or("--profile-http requires an address such as 127.0.0.1:6060")?;
+            if profile_http_explicit {
+                return Err("Specify --profile-http only once".to_owned());
+            }
+            profile_http_explicit = true;
+            profile_http = Some(
+                address
+                    .to_str()
+                    .ok_or("--profile-http address must be valid UTF-8")?
+                    .to_owned(),
+            );
         } else if !positional && argument == "--no-auto-resources" {
             automatic = false;
         } else if !positional && argument == "--resources" {
@@ -118,6 +135,8 @@ fn parse_arguments(
         max_process_memory_mib,
         diagnostics: diagnostics
             .or_else(|| cfg!(debug_assertions).then(|| PathBuf::from("glulx-debug.log"))),
+        profile_http: profile_http
+            .or_else(|| cfg!(debug_assertions).then(|| "127.0.0.1:6060".to_owned())),
         story,
         resources: explicit.map_or_else(
             || {
@@ -134,6 +153,13 @@ fn parse_arguments(
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    #[cfg(windows)]
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "--internal-etw-capture")
+    {
+        std::process::exit(glulx_rs::profiling::run_etw_capture_helper(&arguments[1..]));
+    }
     #[cfg(windows)]
     attach_console(
         arguments
@@ -162,6 +188,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(path) = &arguments.diagnostics {
         glulx_rs::diagnostics::start(path)?;
     }
+    let _profile_server = arguments
+        .profile_http
+        .as_deref()
+        .map(glulx_rs::profiling::start)
+        .transpose()
+        .map_err(|error| format!("Could not start profiling HTTP server: {error}"))?;
     if arguments.headless {
         let story = Story::open_with_resources(arguments.story.unwrap(), arguments.resources)?;
         let mut vm = Vm::new_with_memory_limit(story, game_limit)?;
@@ -184,7 +216,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         ..Default::default()
     };
-    eframe::run_native(
+    let gui_result = eframe::run_native(
         "Glulx Player",
         options,
         Box::new(move |creation| {
@@ -196,8 +228,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 arguments.strict_glk,
             )))
         }),
-    )?;
-    Ok(())
+    );
+    match gui_result {
+        Ok(()) => {
+            glulx_rs::diagnostics::record(format_args!("gui_exit status=ok"));
+            Ok(())
+        }
+        Err(error) => {
+            glulx_rs::diagnostics::record(format_args!("gui_exit status=error error={error}"));
+            Err(error.into())
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -306,6 +347,8 @@ mod tests {
         let args = parse(&["game.gblorb"]).unwrap().unwrap();
         let expected = cfg!(debug_assertions).then(|| PathBuf::from("glulx-debug.log"));
         assert_eq!(args.diagnostics, expected);
+        let expected_profile = cfg!(debug_assertions).then(|| "127.0.0.1:6060".to_owned());
+        assert_eq!(args.profile_http, expected_profile);
     }
 
     #[test]
@@ -318,6 +361,24 @@ mod tests {
         assert!(!args.headless);
         assert!(parse(&["--diagnostics"]).is_err());
         assert!(parse(&["--diagnostics", "a", "--diagnostics", "b"]).is_err());
+    }
+
+    #[test]
+    fn profiling_endpoint_accepts_an_explicit_address_and_rejects_duplicates() {
+        let args = parse(&["--profile-http", "127.0.0.1:0", "game.gblorb"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(args.profile_http, Some("127.0.0.1:0".to_owned()));
+        assert!(parse(&["--profile-http"]).is_err());
+        assert!(
+            parse(&[
+                "--profile-http",
+                "127.0.0.1:1",
+                "--profile-http",
+                "127.0.0.1:2"
+            ])
+            .is_err()
+        );
     }
 
     #[test]
@@ -381,6 +442,7 @@ mod tests {
             vec!["--resources"],
             vec!["--resources", "media"],
             vec!["--no-auto-resources"],
+            vec!["--profile-http"],
             vec!["one.ulx", "two.ulx"],
             vec!["--typo"],
             vec!["story.ulx", "--resources", "one", "--resources", "two"],

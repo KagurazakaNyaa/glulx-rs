@@ -55,6 +55,32 @@ cargo run --release -- --headless --trace-events "<output-dir>/events.json" path
 
 Tracing is disabled by default and is not part of saves or desktop sessions.
 
+Debug builds start a local profiling and observability HTTP endpoint at
+`127.0.0.1:6060`. Release builds keep it disabled unless an address is supplied:
+
+```sh
+cargo run --release -- --profile-http 127.0.0.1:6060 path/to/story.gblorb
+```
+
+Open `/debug/pprof/` in a browser, or fetch `/debug/metrics` for a JSON snapshot
+of VM state, run timing, decode-cache use and opcode counts. On Linux and macOS,
+`/debug/pprof/profile` returns a protobuf profile accepted by the `pprof` tool and
+`/debug/pprof/flamegraph` returns an SVG flamegraph. Add `?seconds=N` (maximum
+300) to collect a fresh bounded sampling window; without it, the response is a
+snapshot of the current run. pprof-rs uses POSIX sampling
+signals and therefore is not the Windows sampler. Windows registers an ETW
+provider (see `/debug/etw`) so WPR/WPA CPU samples can be correlated with VM
+slice markers. `/debug/etw/profile?seconds=N` asks `wpr.exe` for a bounded ETL
+CPU capture (WPR must be installed and may require tracing privileges); open the
+result in WPA and filter to `glulx-rs.exe`. The JSON metrics endpoints include
+the VM counters needed for story-route comparisons.
+The endpoint first tries WPR with the current token. If Windows reports that
+system-profile privilege is missing, it starts a short-lived capture helper with
+UAC; only that helper is elevated, and denying the prompt returns HTTP 403.
+ETW capture is capped at 60 seconds and 256 MiB. Because a remote request can
+trigger the UAC prompt, bind the server only to a trusted network; use loopback
+when collecting local data.
+
 The game canvas and the **Log and input** companion both accept commands. Only the
 focused viewport owns keyboard submission, so showing the companion cannot submit a
 line twice. Resize or close companion windows without resizing the game. Use the

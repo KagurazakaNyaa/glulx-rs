@@ -161,6 +161,40 @@ impl Default for DecodeCache {
     }
 }
 
+#[derive(serde::Serialize, Debug, Clone)]
+pub(crate) struct OpcodeDiagnostic {
+    pub(crate) opcode: u32,
+    pub(crate) count: u64,
+}
+
+#[derive(serde::Serialize, Debug, Clone)]
+pub(crate) struct VmDiagnosticSnapshot {
+    pub(crate) state: RunState,
+    pub(crate) pc: u32,
+    pub(crate) instructions: u64,
+    pub(crate) decode_cache_hits: u64,
+    pub(crate) decode_cache_misses: u64,
+    pub(crate) decode_cache_hit_rate: f64,
+    pub(crate) poll_calls: u64,
+    pub(crate) poll_yields: u64,
+    pub(crate) memory_bytes: u32,
+    pub(crate) ram_start: u32,
+    pub(crate) stack_bytes: u32,
+    pub(crate) stack_limit: u32,
+    pub(crate) heap_next: u32,
+    pub(crate) undo_snapshots: usize,
+    pub(crate) windows: usize,
+    pub(crate) streams: usize,
+    pub(crate) requests: usize,
+    pub(crate) queued_events: usize,
+    pub(crate) graphics_requests: usize,
+    pub(crate) opcode_counts: Vec<OpcodeDiagnostic>,
+}
+
+fn default_opcode_counts() -> [u64; 0x240] {
+    [0; 0x240]
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 enum Destination {
     Discard,
@@ -553,6 +587,8 @@ pub struct Vm {
     decode_cache_hits: u64,
     #[serde(skip)]
     decode_cache_misses: u64,
+    #[serde(skip, default = "default_opcode_counts")]
+    opcode_counts: [u64; 0x240],
     #[serde(skip)]
     presentation_revision: u64,
     #[serde(skip)]
@@ -689,6 +725,7 @@ impl Vm {
             decoded_cache: DecodeCache::default(),
             decode_cache_hits: 0,
             decode_cache_misses: 0,
+            opcode_counts: [0; 0x240],
             presentation_revision: 0,
             presentation_pending: false,
             instructions_executed: 0,
@@ -881,6 +918,55 @@ impl Vm {
         )
     }
 
+    pub(crate) fn diagnostic_snapshot(&self) -> VmDiagnosticSnapshot {
+        let decode_total = self
+            .decode_cache_hits
+            .saturating_add(self.decode_cache_misses);
+        let mut opcode_counts = self
+            .opcode_counts
+            .iter()
+            .enumerate()
+            .filter_map(|(opcode, &count)| {
+                (count != 0).then_some(OpcodeDiagnostic {
+                    opcode: opcode as u32,
+                    count,
+                })
+            })
+            .collect::<Vec<_>>();
+        opcode_counts.sort_unstable_by(|left, right| {
+            right
+                .count
+                .cmp(&left.count)
+                .then_with(|| left.opcode.cmp(&right.opcode))
+        });
+        VmDiagnosticSnapshot {
+            state: self.state,
+            pc: self.pc,
+            instructions: self.instructions_executed,
+            decode_cache_hits: self.decode_cache_hits,
+            decode_cache_misses: self.decode_cache_misses,
+            decode_cache_hit_rate: if decode_total == 0 {
+                0.0
+            } else {
+                self.decode_cache_hits as f64 / decode_total as f64
+            },
+            poll_calls: self.poll_calls,
+            poll_yields: self.poll_yields,
+            memory_bytes: self.memory.len(),
+            ram_start: self.memory.ram_start(),
+            stack_bytes: self.stack.len(),
+            stack_limit: self.stack.maximum,
+            heap_next: self.heap_next,
+            undo_snapshots: self.undo.len(),
+            windows: self.glk_windows.len(),
+            streams: self.glk_streams.len(),
+            requests: self.requests.len(),
+            queued_events: self.events.len(),
+            graphics_requests: self.graphics.len(),
+            opcode_counts,
+        }
+    }
+
     pub fn provide_input(&mut self, text: &str) -> Result<(), VmError> {
         if self.state == RunState::WaitingForFile {
             return self.provide_file(text);
@@ -917,6 +1003,9 @@ impl Vm {
         }
         let instruction_address = self.pc;
         let (opcode, operands) = self.fetch_decoded(instruction_address)?;
+        if let Some(count) = self.opcode_counts.get_mut(opcode as usize) {
+            *count = count.wrapping_add(1);
+        }
         macro_rules! load {
             ($index:expr) => {
                 self.load_operand(&operands[$index], Width::Word)?

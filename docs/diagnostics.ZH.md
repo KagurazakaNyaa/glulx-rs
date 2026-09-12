@@ -2,6 +2,13 @@
 
 Debug 版默认在当前工作目录生成 `glulx-debug.log`，用于收集闪烁和无响应的线索。
 `--diagnostics LOG` 仅用于改用其他文件名或路径；release 版仍需此参数才能启用日志。
+Debug 版同时默认监听 `127.0.0.1:6060` 的 profiling HTTP 接口；release 版需要显式传入
+`--profile-http ADDRESS`。打开 `/debug/pprof/` 可查看入口，`/debug/metrics` 返回可供脚本
+读取的 JSON，包括 VM 状态、时间片、解码缓存和 opcode 计数。Linux/macOS 可用
+`/debug/pprof/profile` 下载 pprof protobuf 或用 `/debug/pprof/flamegraph` 下载 SVG；追加
+`?seconds=N`（最多 300 秒）可采集新的有限时间窗口；
+Windows 因 pprof-rs 的 POSIX 信号采样限制改用 ETW provider；`/debug/etw` 返回 provider
+GUID 和事件说明，可用 WPR/WPA 采集 CPU 栈并按进程查看 VM 时间片标记。JSON 指标仍然可用。
 分发的诊断版使用 `diagnostic` 构建配置：开启优化，保留调试信息、断言和默认日志。
 日志首行的 `opt_level=3` 表示已开启优化。Windows 测试包使用 GNU 工具链；正式版使用 MSVC，
 两者运行速度和平台细节可能不同。当前测试版采用游戏画布、日志＋输入、翻译三个原生窗口；游戏画布和日志＋输入窗口都能提交命令，但只有获得焦点的窗口提交；辅助窗口不改变画布尺寸。
@@ -25,6 +32,47 @@ Settings 支持分别选择比例/等宽字体的原生字体选择器（Windows
 ```powershell
 .\glulx-rs.exe --diagnostics "<log-path>" "<游戏文件路径>"
 ```
+
+启用 HTTP 指标（release 构建也适用）：
+
+```powershell
+.\glulx-rs.exe --profile-http 127.0.0.1:6060 "<游戏文件路径>"
+```
+
+运行期间可在另一个 PowerShell 窗口执行：
+
+```powershell
+Invoke-WebRequest http://127.0.0.1:6060/debug/metrics -OutFile "<output-dir>\metrics.json"
+```
+
+返回的 `opcode_counts` 按累计执行次数排序；`vm_ms`、`ui_ms` 和
+`decode_cache_hit_rate` 可用来区分 VM、界面和指令解码成本。服务只应绑定回环地址。
+
+Windows 原生 CPU 采样可在另一个 PowerShell 窗口执行：
+
+```powershell
+wpr -start CPU -filemode
+```
+
+复现路线后停止并保存 ETL：
+
+```powershell
+wpr -stop "<output-dir>\glulx-cpu.etl"
+```
+
+在 WPA 中按 `glulx-rs.exe` 进程过滤 CPU 栈；配置 ETW provider GUID 后，VM 时间片事件可用于对齐
+`vm-slice`、`ui` 等阶段。
+
+也可以通过 HTTP 让播放器代为执行同样的有界采集，并直接下载 ETL：
+
+```powershell
+Invoke-WebRequest "http://127.0.0.1:6060/debug/etw/profile?seconds=10" -OutFile "<output-dir>\glulx-cpu.etl"
+```
+
+该接口依赖系统中的 `wpr.exe`，缺少 WPR 或权限不足时会返回错误。
+接口会先用当前令牌启动 WPR；仅当 WPR 报告缺少系统性能权限（如 `0xc5585011`）时，才通过
+UAC 启动短时采集 helper。该 helper 只执行最多 60 秒的 CPU 采集，输出上限 256 MiB；拒绝 UAC
+会返回 HTTP 403。由于请求可能触发 UAC 提示，请勿把未认证的 profiling HTTP 服务暴露给不可信网络。
 
 仍然会打开图形界面。重现闪烁或无响应后再等约 10 秒，然后退出；
 如果无法退出，可在任务管理器结束该诊断进程。将 `glulx-debug.log` 发回即可。
