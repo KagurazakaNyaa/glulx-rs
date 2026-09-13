@@ -276,6 +276,23 @@ impl PlayerApp {
             self.memory_overrides.process,
         );
         ui.weak(language.text("ui.process_memory_hint"));
+        ui.separator();
+        ui.heading(language.text("ui.profiling"));
+        ui.checkbox(
+            &mut self.settings.profiling.enabled,
+            language.text("ui.enable_profiling_listener"),
+        );
+        ui.add_enabled_ui(self.settings.profiling.enabled, |ui| {
+            ui.checkbox(
+                &mut self.settings.profiling.sampling,
+                language.text("ui.enable_profiling_sampling"),
+            );
+            ui.label(language.text("ui.profiling_address"));
+            ui.text_edit_singleline(&mut self.settings.profiling.address);
+            ui.label(language.text("ui.profiling_token"));
+            ui.add(egui::TextEdit::singleline(&mut self.settings.profiling.token).password(true));
+            ui.weak(language.text("ui.profiling_restart_hint"));
+        });
     }
 
     fn display_settings_contents(

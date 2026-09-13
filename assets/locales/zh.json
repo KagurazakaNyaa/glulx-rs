@@ -184,5 +184,11 @@
   "ui.sampling_parameters_help": "未勾选的参数不发送，使用服务端默认值。top_k 和 repetition_penalty 需要服务端支持。",
   "ui.temperature": "温度",
   "ui.max_tokens": "最大输出 token 数（max_tokens）",
-  "ui.glulx_player_translation_settings": "Glulx 播放器 — 翻译设置"
+  "ui.glulx_player_translation_settings": "Glulx 播放器 — 翻译设置",
+  "ui.profiling": "性能分析",
+  "ui.enable_profiling_listener": "启用 profiling HTTP 监听",
+  "ui.enable_profiling_sampling": "启用本机 CPU 采样",
+  "ui.profiling_address": "监听地址",
+  "ui.profiling_token": "Bearer token",
+  "ui.profiling_restart_hint": "重启播放器后生效。非回环地址必须配置 token。"
 }

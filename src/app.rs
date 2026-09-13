@@ -1,4 +1,6 @@
-use crate::memory_budget::{Budget, MemoryPolicy, Overrides, ResourceBudgets, startup_snapshot};
+use crate::memory_budget::{
+    Budget, MemoryPolicy, Overrides, ProfilingSettings, ResourceBudgets, startup_snapshot,
+};
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
@@ -41,6 +43,7 @@ pub struct PlayerSettings {
     pub max_memory_mib: Budget,
     pub max_process_memory_mib: Budget,
     pub resource_limits: ResourceBudgets,
+    pub profiling: ProfilingSettings,
     pub font_size: f32,
     pub proportional_font: String,
     pub monospace_font: String,
@@ -65,6 +68,7 @@ impl Default for PlayerSettings {
             max_memory_mib: MemoryPolicy::default().max_memory_mib,
             max_process_memory_mib: Budget::Fixed(0),
             resource_limits: ResourceBudgets::default(),
+            profiling: ProfilingSettings::default(),
             font_size: 18.0,
             proportional_font: String::new(),
             monospace_font: String::new(),
@@ -586,6 +590,7 @@ impl PlayerApp {
             max_memory_mib: self.settings.max_memory_mib,
             max_process_memory_mib: self.settings.max_process_memory_mib,
             resource_limits: self.settings.resource_limits,
+            profiling: self.settings.profiling.clone(),
         })
     }
 

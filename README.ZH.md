@@ -43,25 +43,23 @@ cargo run --release -- --headless --trace-events "<output-dir>/events.json" path
 
 该 trace 默认关闭，不进入存档或桌面会话。
 
-Debug 构建默认在 `127.0.0.1:6060` 启动本地 profiling 和可观测性 HTTP 接口。
-Release 构建只有传入地址才启用：
+Profiling 配置保存在可执行文件旁的 `glulx-settings.json`。Debug 构建默认监听
+`127.0.0.1:6060`，Release 构建默认关闭。编辑 `profiling` 对象启用：
 
-```sh
-cargo run --release -- --profile-http 127.0.0.1:6060 path/to/story.gblorb
+```json
+{
+  "profiling": {
+    "enabled": true,
+    "sampling": true,
+    "address": "0.0.0.0:6060",
+    "token": "replace-with-a-secret"
+  }
+}
 ```
 
-地址会直接交给监听器，因此也可以绑定非回环接口。非回环监听必须认证；可以使用
-`--profile-token TOKEN`，或设置环境变量 `GLULX_PROFILE_TOKEN`。请求携带
-`Authorization: Bearer TOKEN`：
-
-```sh
-GLULX_PROFILE_TOKEN="replace-with-a-secret" \
-  cargo run --release -- --profile-http 0.0.0.0:6060 path/to/story.gblorb
-curl -H 'Authorization: Bearer replace-with-a-secret' \
-  http://127.0.0.1:6060/debug/metrics
-```
-
-回环监听可以不认证，适合本机调试。Token 是 bearer 凭据，不要放入共享的命令历史或日志。
+非回环监听必须配置 `token`；客户端使用 `Authorization: Bearer TOKEN` 请求。
+回环监听可以不认证，适合本机调试。Token 是 bearer 凭据，不要放入共享日志。
+`enabled` 和 `sampling` 分别控制监听和本机 CPU 采样；修改后重启播放器生效。
 
 在浏览器打开 `/debug/pprof/`，或请求 `/debug/metrics` 获取 VM 状态、时间片耗时、
 解码缓存命中率和 opcode 计数的 JSON 快照。Linux 和 macOS 上，
@@ -73,9 +71,9 @@ curl -H 'Authorization: Bearer replace-with-a-secret' \
 `wpr.exe` 返回有界 ETL（需要安装 WPR，可能需要追踪权限），可在 WPA 中按 `glulx-rs.exe` 过滤。
 接口先尝试用当前权限启动 WPR；只有 Windows 报告缺少系统性能权限时，才通过 UAC 启动短时 helper。
 只有 helper 提权，拒绝 UAC 会返回 HTTP 403。单次采集最多 60 秒、ETL 最大 256 MiB。
-远程 HTTP 请求可以触发 UAC 提示，因此应配置 token 并只监听可信网络；本机采集请绑定回环地址。
+远程 HTTP 请求可以触发 UAC 提示，因此应在配置中设置 token 并只监听可信网络；本机采集请绑定回环地址。
 Windows 仍提供 JSON 指标接口，可用于比较真实故事路线。
-服务只监听命令行指定的地址；非回环地址没有 token 时会拒绝启动。
+服务只监听配置文件指定的地址；非回环地址没有 token 时会拒绝启动。
 
 游戏画布和**日志＋输入**辅助窗口都可以输入命令。只有当前获得焦点的窗口负责提交键盘输入，因此同时打开辅助窗口不会重复提交同一行。调整或关闭辅助窗口不会改变画布尺寸；工具栏的 Log 和 Translation 按钮用于显示或隐藏窗口，Settings 打开独立设置窗口；也可从 View 菜单或快捷键 Ctrl+Shift+L / Ctrl+Shift+T 重新打开辅助窗口。画面在 Glk 事件边界发布，下一幅画面完成前保留上一幅完整画面。
 

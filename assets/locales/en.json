@@ -184,5 +184,11 @@
   "ui.sampling_parameters_help": "Unchecked parameters are omitted (server defaults). top_k and repetition_penalty require endpoint support.",
   "ui.temperature": "Temperature",
   "ui.max_tokens": "Maximum output tokens (max_tokens)",
-  "ui.glulx_player_translation_settings": "Glulx Player — Translation settings"
+  "ui.glulx_player_translation_settings": "Glulx Player — Translation settings",
+  "ui.profiling": "Profiling",
+  "ui.enable_profiling_listener": "Enable profiling HTTP listener",
+  "ui.enable_profiling_sampling": "Enable native CPU sampling",
+  "ui.profiling_address": "Listen address",
+  "ui.profiling_token": "Bearer token",
+  "ui.profiling_restart_hint": "Changes take effect after restarting the player. Non-loopback addresses require a token."
 }

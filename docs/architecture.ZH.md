@@ -4,8 +4,9 @@
 
 解释器使用 Rust 实现，运行时不依赖 C 解释器。Eframe/egui 提供 Windows、Linux 和 macOS GUI；同一个可执行文件还提供面向行输入的无界面自动化适配器。交互 TTY 使用完整终端显示/输入宿主。
 
-Profiling HTTP 默认只监听回环地址；`--profile-http ADDRESS` 也可以绑定非回环接口，但必须配置
-`--profile-token TOKEN` 或 `GLULX_PROFILE_TOKEN`，客户端使用 `Authorization: Bearer TOKEN`。
+Profiling HTTP 默认只监听回环地址；Release 构建可在 `glulx-settings.json` 的 `profiling` 对象中配置
+`enabled`、`sampling`、`address` 和 `token`。非回环接口必须配置 `token`，客户端使用
+`Authorization: Bearer TOKEN`；修改后重启播放器生效。
 
 ## 模块
 
@@ -13,7 +14,7 @@ Profiling HTTP 默认只监听回环地址；`--profile-http ADDRESS` 也可以�
 
 `Vm` 负责指令解码、执行、栈和 Glk 对象模型。有界运行接口让 GUI 保持响应。不支持的指令会产生携带执行上下文的类型化错误。宿主行为分布于 `src/vm` 下的 `windows`、`streams`、`events`、`presentation`、`unicode`、`datetime`、`sound`、`save`、`session`、`acceleration`、`strings` 和 `grid` 模块。虚拟机不依赖 egui 或 HTTP；声音使用 rodio；MOD/XM/S3M/IT 资源由 Rust tracker 播放器增量生成；采样格式在解码器 EOF 处重复播放，不把整段音频展开到内存。多播声道作为一个对齐的音源送入设备。图片模块验证源图像，并与首次图形绘制共享解码结果，只采样可见的目标像素，因此超大绘制请求不会分配超大图片。呈现层返回窗口矩形、带图像/流标记的文本段和图形命令。GUI 文本缓冲区布局将行内图像、浮动边缘图像和样式文本一起排版，保留缩放规则并按故事缓存纹理。样式通过共享的虚拟机/呈现模型统一解析，使 style_measure 与实际渲染尺寸和颜色一致。网格单元保留样式和超链接属性，绘制与输入使用一致的几何信息。宿主字体覆盖范围和度量以回调方式注入，不进入可移植存档或桌面序列化，由 GUI 重新安装，从而让虚拟机不依赖 egui。
 
-VM 在 UI 事件循环线程中以约 8 毫秒短时间片执行（每 1024 条指令检查时间），采用单一所有权；本 egui 宿主通过短时间片维持响应，并在输入／事件等待时让出执行。输入直接交给同一份 VM 状态，避免所有权交换和过期状态。没有中间宿主操作的连续空 select_poll 不再强制刷新。翻译请求和音频播放使用后台任务，GPU 上传留在 UI 线程。Debug 构建默认监听回环 profiling HTTP 接口，release 构建通过 `--profile-http ADDRESS` 启用；接口提供 VM 快照、opcode 计数、阶段耗时和解码缓存统计。Linux/macOS 还提供 pprof-rs protobuf 与火焰图；Windows 注册 ETW provider，供 WPR/WPA CPU 采样关联时间片标记，也可通过 `/debug/etw/profile?seconds=N` 请求 ETL。WPR 缺少系统性能权限时会由 UAC 启动短时 helper；JSON 可观测性接口仍可用。`PlayerApp` 提供键盘、鼠标、超链接和文件选择结果。主画布与日志/输入窗口共享 VM 输入状态，只有当前获得焦点的窗口提交键盘输入；翻译与设置位于独立原生窗口，只有主画布决定 Glk 尺寸。图形保留带裁剪的图片/矩形图元，在事件边界与窗口视图一并发布。硬件 OpenGL 负责 GPU 缩放和混合；软件驱动使用增量 CPU 位图。覆盖绘制会移除被遮挡图元，过长历史会压缩，近期图片缓存使用可配置的像素数据预算（默认 512 MiB）。CPU 栅格化也用于兼容原有桌面快照格式。等待状态区分行输入、字符输入、文件（含覆盖确认）和一般事件。管道适配器使用工作线程读取 stdin，避免等待一行输入时阻碍定时器事件投递。流在句柄之间共享文件内容，各自保留独立游标，仅在停止/保存时写回已修改的内容。
+VM 在 UI 事件循环线程中以约 8 毫秒短时间片执行（每 1024 条指令检查时间），采用单一所有权；本 egui 宿主通过短时间片维持响应，并在输入／事件等待时让出执行。输入直接交给同一份 VM 状态，避免所有权交换和过期状态。没有中间宿主操作的连续空 select_poll 不再强制刷新。翻译请求和音频播放使用后台任务，GPU 上传留在 UI 线程。Debug 构建默认监听回环 profiling HTTP 接口，Release 构建从 `glulx-settings.json` 的 `profiling` 对象读取；接口提供 VM 快照、opcode 计数、阶段耗时和解码缓存统计，`enabled` 和 `sampling` 分别控制监听和本机采样。Linux/macOS 还提供 pprof-rs protobuf 与火焰图；Windows 注册 ETW provider，供 WPR/WPA CPU 采样关联时间片标记，也可通过 `/debug/etw/profile?seconds=N` 请求 ETL。WPR 缺少系统性能权限时会由 UAC 启动短时 helper；JSON 可观测性接口仍可用。`PlayerApp` 提供键盘、鼠标、超链接和文件选择结果。主画布与日志/输入窗口共享 VM 输入状态，只有当前获得焦点的窗口提交键盘输入；翻译与设置位于独立原生窗口，只有主画布决定 Glk 尺寸。图形保留带裁剪的图片/矩形图元，在事件边界与窗口视图一并发布。硬件 OpenGL 负责 GPU 缩放和混合；软件驱动使用增量 CPU 位图。覆盖绘制会移除被遮挡图元，过长历史会压缩，近期图片缓存使用可配置的像素数据预算（默认 512 MiB）。CPU 栅格化也用于兼容原有桌面快照格式。等待状态区分行输入、字符输入、文件（含覆盖确认）和一般事件。管道适配器使用工作线程读取 stdin，避免等待一行输入时阻碍定时器事件投递。流在句柄之间共享文件内容，各自保留独立游标，仅在停止/保存时写回已修改的内容。
 
 `Story` 将执行文件容器与可选外置资源映射分开；包/目录选择先检查身份，再替换资源状态。散装目录转换为自包含资源 Blorb 以保存桌面会话。GUI 用新 VM 应用资源选择。`terminal` 依据 stdin/stdout 是否为终端选择完整 TTY 屏幕/编辑器或管道协议。SONG 装配器先解析 AIFF 引用，再交给已有 tracker 播放。
 

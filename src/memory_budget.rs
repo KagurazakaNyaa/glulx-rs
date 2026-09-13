@@ -91,6 +91,52 @@ pub struct ResourceBudgets {
     pub audio_resource_mib: Budget,
     pub song_pcm_mib: Budget,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProfilingSettings {
+    #[serde(default = "default_profiling_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_profiling_sampling")]
+    pub sampling: bool,
+    #[serde(default = "default_profiling_address")]
+    pub address: String,
+    #[serde(default)]
+    pub token: String,
+}
+
+impl ProfilingSettings {
+    pub fn default_for_build() -> Self {
+        Self {
+            enabled: default_profiling_enabled(),
+            sampling: default_profiling_sampling(),
+            address: default_profiling_address(),
+            token: String::new(),
+        }
+    }
+}
+
+fn default_profiling_enabled() -> bool {
+    cfg!(debug_assertions)
+}
+
+fn default_profiling_sampling() -> bool {
+    cfg!(debug_assertions)
+}
+
+fn default_profiling_address() -> String {
+    if cfg!(debug_assertions) {
+        "127.0.0.1:6060".to_owned()
+    } else {
+        String::new()
+    }
+}
+
+impl Default for ProfilingSettings {
+    fn default() -> Self {
+        Self::default_for_build()
+    }
+}
 impl Default for ResourceBudgets {
     fn default() -> Self {
         let defaults = crate::memory::ResourceLimits::default();
@@ -122,12 +168,13 @@ impl ResourceBudgets {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MemoryPolicy {
     pub max_memory_mib: Budget,
     pub max_process_memory_mib: Budget,
     pub resource_limits: ResourceBudgets,
+    pub profiling: ProfilingSettings,
 }
 impl Default for MemoryPolicy {
     fn default() -> Self {
@@ -135,6 +182,7 @@ impl Default for MemoryPolicy {
             max_memory_mib: Budget::Fixed(crate::memory::MAX_MEMORY_SIZE / MIB as u32),
             max_process_memory_mib: Budget::Fixed(0),
             resource_limits: Default::default(),
+            profiling: ProfilingSettings::default(),
         }
     }
 }
@@ -265,7 +313,7 @@ mod tests {
             process: Some(Budget::Fixed(0)),
             resources: [("--max-undo-memory".into(), Budget::Fixed(8192))].into(),
         };
-        let effective = overrides.apply(policy);
+        let effective = overrides.apply(policy.clone());
         let snapshot = Ok(Snapshot {
             bytes: 8 * 1024 * MIB,
             source: "test",
@@ -286,5 +334,44 @@ mod tests {
     #[test]
     fn startup_snapshot_is_captured_only_once() {
         assert!(std::ptr::eq(startup_snapshot(), startup_snapshot()));
+    }
+
+    #[test]
+    fn profiling_settings_round_trip_and_keep_build_defaults_when_omitted() {
+        let policy: MemoryPolicy = serde_json::from_str(
+            r#"{
+                "profiling": {
+                    "enabled": true,
+                    "sampling": false,
+                    "address": "0.0.0.0:6060",
+                    "token": "secret"
+                }
+            }"#,
+        )
+        .unwrap();
+        assert!(policy.profiling.enabled);
+        assert!(!policy.profiling.sampling);
+        assert_eq!(policy.profiling.address, "0.0.0.0:6060");
+        assert_eq!(policy.profiling.token, "secret");
+
+        let partial: MemoryPolicy = serde_json::from_str(r#"{"profiling": {}}"#).unwrap();
+        assert_eq!(
+            partial.profiling.enabled,
+            cfg!(debug_assertions),
+            "missing listener switch uses the build default"
+        );
+        assert_eq!(
+            partial.profiling.sampling,
+            cfg!(debug_assertions),
+            "missing sampling switch uses the build default"
+        );
+        assert_eq!(
+            partial.profiling.address,
+            if cfg!(debug_assertions) {
+                "127.0.0.1:6060"
+            } else {
+                ""
+            }
+        );
     }
 }

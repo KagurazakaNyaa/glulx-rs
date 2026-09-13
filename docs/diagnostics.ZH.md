@@ -2,8 +2,8 @@
 
 Debug 版默认在当前工作目录生成 `glulx-debug.log`，用于收集闪烁和无响应的线索。
 `--diagnostics LOG` 仅用于改用其他文件名或路径；release 版仍需此参数才能启用日志。
-Debug 版同时默认监听 `127.0.0.1:6060` 的 profiling HTTP 接口；release 版需要显式传入
-`--profile-http ADDRESS`。打开 `/debug/pprof/` 可查看入口，`/debug/metrics` 返回可供脚本
+Debug 版默认监听 `127.0.0.1:6060` 的 profiling HTTP 接口；release 版默认关闭。
+监听地址和 token 配置在 `glulx-settings.json` 的 `profiling` 对象中。打开 `/debug/pprof/` 可查看入口，`/debug/metrics` 返回可供脚本
 读取的 JSON，包括 VM 状态、时间片、解码缓存和 opcode 计数。Linux/macOS 可用
 `/debug/pprof/profile` 下载 pprof protobuf 或用 `/debug/pprof/flamegraph` 下载 SVG；追加
 `?seconds=N`（最多 300 秒）可采集新的有限时间窗口；
@@ -33,15 +33,22 @@ Settings 支持分别选择比例/等宽字体的原生字体选择器（Windows
 .\glulx-rs.exe --diagnostics "<log-path>" "<游戏文件路径>"
 ```
 
-启用 HTTP 指标（release 构建也适用）：
+启用 HTTP 指标（release 构建也适用）时，在 `glulx-settings.json` 中写入：
 
-```powershell
-.\glulx-rs.exe --profile-http 127.0.0.1:6060 "<游戏文件路径>"
+```json
+{
+  "profiling": {
+    "enabled": true,
+    "sampling": true,
+    "address": "0.0.0.0:6060",
+    "token": "replace-with-a-secret"
+  }
+}
 ```
 
-`ADDRESS` 会直接绑定到指定接口。非回环地址必须同时提供 `--profile-token TOKEN`，
-或设置 `GLULX_PROFILE_TOKEN`；客户端使用 `Authorization: Bearer TOKEN` 请求。
+非回环地址必须配置 `token`；客户端使用 `Authorization: Bearer TOKEN` 请求。
 回环地址可以不认证。Token 是 bearer 凭据，不要放入共享命令历史或日志。
+`enabled` 和 `sampling` 分别控制监听和本机 CPU 采样；修改后重启播放器生效。
 
 运行期间可在另一个 PowerShell 窗口执行：
 
@@ -50,7 +57,7 @@ Invoke-WebRequest http://127.0.0.1:6060/debug/metrics -OutFile "<output-dir>\met
 ```
 
 返回的 `opcode_counts` 按累计执行次数排序；`vm_ms`、`ui_ms` 和
-`decode_cache_hit_rate` 可用来区分 VM、界面和指令解码成本。服务可以绑定任意地址；非回环地址
+`decode_cache_hit_rate` 可用来区分 VM、界面和指令解码成本。服务可以绑定任意配置地址；非回环地址
 没有 token 时会拒绝启动。涉及 ETW/UAC 的采集仍应只暴露给可信网络。
 
 Windows 原生 CPU 采样可在另一个 PowerShell 窗口执行：

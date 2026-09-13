@@ -71,9 +71,15 @@ impl Drop for Server {
     }
 }
 
-/// Start a local profiling endpoint at `address`.
-pub fn start(address: &str, configured_token: Option<&str>) -> io::Result<Server> {
-    let token = resolve_token(configured_token)?;
+/// Start the profiling endpoint configured in `glulx-settings.json`.
+pub fn start(settings: &crate::memory_budget::ProfilingSettings) -> io::Result<Option<Server>> {
+    validate_settings(settings)?;
+    if !settings.enabled {
+        return Ok(None);
+    }
+    let address = settings.address.trim();
+    let token = (!settings.token.is_empty()).then(|| settings.token.clone());
+    let sampling = settings.sampling;
     let listener = TcpListener::bind(address)?;
     listener.set_nonblocking(true)?;
     let address = listener.local_addr()?;
@@ -81,7 +87,7 @@ pub fn start(address: &str, configured_token: Option<&str>) -> io::Result<Server
     let token = Arc::new(token);
     crate::diagnostics::initialize();
     #[cfg(windows)]
-    if let Err(error) = etw::start() {
+    if sampling && let Err(error) = etw::start() {
         crate::diagnostics::record(format_args!("etw provider registration failed={error}"));
     }
     let stop = Arc::new(AtomicBool::new(false));
@@ -92,9 +98,13 @@ pub fn start(address: &str, configured_token: Option<&str>) -> io::Result<Server
         .spawn(move || {
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             {
-                let (guard, native_error) = match build_native_guard() {
-                    Ok(guard) => (Some(guard), None),
-                    Err(error) => (None, Some(error)),
+                let (guard, native_error) = if sampling {
+                    match build_native_guard() {
+                        Ok(guard) => (Some(guard), None),
+                        Err(error) => (None, Some(error)),
+                    }
+                } else {
+                    (None, None)
                 };
                 let _ = ready_sender.send(native_error);
                 serve(
@@ -120,14 +130,16 @@ pub fn start(address: &str, configured_token: Option<&str>) -> io::Result<Server
             }
             crate::diagnostics::record(format_args!(
                 "profile_http address={address} native_sampler={}",
-                native_error.is_none() && cfg!(any(target_os = "linux", target_os = "macos"))
+                sampling
+                    && native_error.is_none()
+                    && cfg!(any(target_os = "linux", target_os = "macos"))
             ));
             crate::diagnostics::record(format_args!("etw_provider_enabled={}", etw_enabled()));
-            Ok(Server {
+            Ok(Some(Server {
                 address,
                 stop,
                 join: Some(join),
-            })
+            }))
         }
         Err(error) => {
             stop.store(true, Ordering::Release);
@@ -256,39 +268,34 @@ fn handle_connection(
     dispatch(&mut stream, &request, &stop, &capture);
 }
 
-fn resolve_token(configured_token: Option<&str>) -> io::Result<Option<String>> {
-    if let Some(token) = configured_token {
-        if token.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "profiling token must not be empty",
-            ));
-        }
-        return Ok(Some(token.to_owned()));
-    }
-    let Some(value) = std::env::var_os("GLULX_PROFILE_TOKEN") else {
-        return Ok(None);
-    };
-    let token = value.into_string().map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "GLULX_PROFILE_TOKEN must be valid UTF-8",
-        )
-    })?;
-    if token.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "GLULX_PROFILE_TOKEN must not be empty",
-        ));
-    }
-    Ok(Some(token))
-}
-
 fn require_token_for_address(address: SocketAddr, token: Option<&str>) -> io::Result<()> {
     if !address.ip().is_loopback() && token.is_none() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "a profiling token is required for non-loopback addresses",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_settings(settings: &crate::memory_budget::ProfilingSettings) -> io::Result<()> {
+    if !settings.enabled {
+        return Ok(());
+    }
+    if settings.address.trim().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "profiling address must not be empty when listening is enabled",
+        ));
+    }
+    if settings
+        .token
+        .bytes()
+        .any(|byte| byte.is_ascii_whitespace())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "profiling token must not contain whitespace",
         ));
     }
     Ok(())
@@ -747,12 +754,26 @@ mod tests {
     }
 
     #[test]
-    fn configured_tokens_must_not_be_empty() {
-        assert_eq!(
-            resolve_token(Some("secret")).unwrap(),
-            Some("secret".to_owned())
-        );
-        assert!(resolve_token(Some("")).is_err());
+    fn profiling_token_validation() {
+        let settings = crate::memory_budget::ProfilingSettings {
+            enabled: true,
+            sampling: false,
+            address: "127.0.0.1:6060".to_owned(),
+            token: "secret".to_owned(),
+        };
+        assert_eq!(settings.token, "secret");
+        let empty = crate::memory_budget::ProfilingSettings {
+            address: settings.address.clone(),
+            enabled: true,
+            sampling: false,
+            token: String::new(),
+        };
+        assert!(validate_settings(&empty).is_ok());
+        let invalid = crate::memory_budget::ProfilingSettings {
+            token: "has whitespace".to_owned(),
+            ..empty
+        };
+        assert!(validate_settings(&invalid).is_err());
     }
 
     #[test]
@@ -764,11 +785,30 @@ mod tests {
         assert!(require_token_for_address(loopback, None).is_ok());
     }
 
+    #[test]
+    fn disabled_profiling_does_not_start_a_listener() {
+        let settings = crate::memory_budget::ProfilingSettings {
+            enabled: false,
+            sampling: true,
+            address: String::new(),
+            token: String::new(),
+        };
+        assert!(start(&settings).unwrap().is_none());
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     #[ignore = "requires local socket permissions"]
     fn server_serves_a_json_metrics_snapshot() {
-        let server = start("127.0.0.1:0", None).expect("native profiler should start");
+        let settings = crate::memory_budget::ProfilingSettings {
+            enabled: true,
+            sampling: false,
+            address: "127.0.0.1:0".to_owned(),
+            token: String::new(),
+        };
+        let server = start(&settings)
+            .expect("native profiler should start")
+            .expect("profiling address is configured");
         let mut stream = TcpStream::connect(server.address()).unwrap();
         stream
             .write_all(b"GET /debug/metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
