@@ -87,7 +87,7 @@ pub(crate) fn record_vm(snapshot: &crate::vm::VmDiagnosticSnapshot) {
 
 pub(crate) fn status_json() -> Vec<u8> {
     format!(
-        r#"{{"enabled":{},"provider":"{}","events":["stage","vm_slice"],"sampling":"WPR/WPA CPU sampling; filter this process","markers":"Enable this provider in the ETW session to correlate VM phases","uac":"Prompts only when WPR reports missing system-profile privilege","capture_endpoint":"/debug/etw/profile?seconds=10"}}"#,
+        r#"{{"enabled":{},"provider":"{}","events":["stage","vm_slice"],"sampling":"WPR/WPA CPU sampling; filter this process","markers":"Enable this provider in the ETW session to correlate VM phases","uac":"Prompts when WPR reports missing system-profile privilege or access denied","capture_endpoint":"/debug/etw/profile?seconds=10"}}"#,
         enabled(), PROVIDER_GUID
     )
     .into_bytes()
@@ -218,10 +218,12 @@ fn start_wpr() -> Result<(), WprFailure> {
 }
 
 fn wpr_needs_elevation(exit_code: Option<i32>, output: &str) -> bool {
-    exit_code.is_some_and(|code| matches!(code as u32, 1314 | 0xc558_5011))
+    exit_code.is_some_and(|code| matches!(code as u32, 1314 | 0xc558_5011 | 0x8007_0005))
         || output.contains("0xc5585011")
+        || output.contains("0x80070005")
         || output.contains("failed to enable the policy to profile system performance")
         || output.contains("privilege not held")
+        || output.contains("access is denied")
 }
 
 struct WprFailure {
@@ -429,11 +431,13 @@ mod tests {
             "failed to enable the policy to profile system performance"
         ));
         assert!(wpr_needs_elevation(Some(0xc558_5011u32 as i32), ""));
+        assert!(wpr_needs_elevation(Some(0x8007_0005u32 as i32), ""));
         assert!(wpr_needs_elevation(Some(1314), ""));
         assert!(wpr_needs_elevation(
             None,
             "a required privilege is not held by the client"
         ));
+        assert!(wpr_needs_elevation(None, "access is denied"));
         assert!(!wpr_needs_elevation(
             Some(1),
             "a WPR session is already running"
