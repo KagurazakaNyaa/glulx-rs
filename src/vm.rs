@@ -2345,9 +2345,9 @@ impl Vm {
                     window.trim_text_history();
                     window.content_revision = window.content_revision.wrapping_add(1);
                     self.output.push(character);
-                    if window.style != 8
-                        && let Some(events) = &mut self.text_buffer_events
-                    {
+                    // Input echo temporarily removes this collector in finish_line;
+                    // story text may legitimately use every Glk style.
+                    if let Some(events) = &mut self.text_buffer_events {
                         if let Some(TextBufferEvent::Text { window, text }) = events.last_mut()
                             && *window == window_id
                         {
@@ -4163,6 +4163,7 @@ pub(crate) mod tests {
         text_buffer_glk(&mut vm, 0x2a, &[grid]);
         text_buffer_glk(&mut vm, 0x24, &[grid, 0]);
         text_buffer_glk(&mut vm, 0x87, &[main_stream, 8]);
+        // Style 8 is a valid story style, not an indication of player input.
         text_buffer_glk(&mut vm, 0x81, &[main_stream, 'I' as u32]);
         text_buffer_glk(&mut vm, 0x87, &[main_stream, 0]);
         text_buffer_glk(&mut vm, 0x81, &[main_stream, 'C' as u32]);
@@ -4174,7 +4175,7 @@ pub(crate) mod tests {
             vec![
                 TextBufferEvent::Text {
                     window: main,
-                    text: "ABC".to_owned(),
+                    text: "ABIC".to_owned(),
                 },
                 TextBufferEvent::Clear { window: main },
                 TextBufferEvent::Text {
