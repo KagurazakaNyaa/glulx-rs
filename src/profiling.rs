@@ -113,12 +113,19 @@ pub fn start(settings: &crate::memory_budget::ProfilingSettings) -> io::Result<O
                     guard,
                     Arc::new(Mutex::new(())),
                     token,
+                    sampling,
                 );
             }
             #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             {
                 let _ = ready_sender.send(None);
-                serve(listener, thread_stop, Arc::new(Mutex::new(())), token);
+                serve(
+                    listener,
+                    thread_stop,
+                    Arc::new(Mutex::new(())),
+                    token,
+                    sampling,
+                );
             }
         })?;
     match ready_receiver.recv_timeout(Duration::from_secs(5)) {
@@ -158,6 +165,7 @@ fn serve(
     guard: Option<NativeGuard>,
     capture: Arc<Mutex<()>>,
     token: Arc<Option<String>>,
+    sampling: bool,
 ) {
     let guard = Arc::new(Mutex::new(guard));
     while !stop.load(Ordering::Acquire) {
@@ -167,8 +175,9 @@ fn serve(
                 let stop = Arc::clone(&stop);
                 let capture = Arc::clone(&capture);
                 let token = Arc::clone(&token);
-                let _ =
-                    thread::spawn(move || handle_connection(stream, guard, stop, capture, token));
+                let _ = thread::spawn(move || {
+                    handle_connection(stream, guard, stop, capture, token, sampling)
+                });
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 thread::sleep(SHUTDOWN_POLL);
@@ -187,6 +196,7 @@ fn serve(
     stop: Arc<AtomicBool>,
     capture: Arc<Mutex<()>>,
     token: Arc<Option<String>>,
+    sampling: bool,
 ) {
     while !stop.load(Ordering::Acquire) {
         match listener.accept() {
@@ -194,7 +204,9 @@ fn serve(
                 let stop = Arc::clone(&stop);
                 let capture = Arc::clone(&capture);
                 let token = Arc::clone(&token);
-                let _ = thread::spawn(move || handle_connection(stream, stop, capture, token));
+                let _ = thread::spawn(move || {
+                    handle_connection(stream, stop, capture, token, sampling)
+                });
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 thread::sleep(SHUTDOWN_POLL);
@@ -214,6 +226,7 @@ fn handle_connection(
     stop: Arc<AtomicBool>,
     capture: Arc<Mutex<()>>,
     token: Arc<Option<String>>,
+    sampling: bool,
 ) {
     if let Err(error) = stream.set_read_timeout(Some(REQUEST_TIMEOUT)) {
         crate::diagnostics::record(format_args!("profile_http timeout_error={error}"));
@@ -235,7 +248,7 @@ fn handle_connection(
         let _ = write_unauthorized(&mut stream);
         return;
     }
-    dispatch(&mut stream, &request, &guard, &stop, &capture);
+    dispatch(&mut stream, &request, &guard, &stop, &capture, sampling);
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -244,6 +257,7 @@ fn handle_connection(
     stop: Arc<AtomicBool>,
     capture: Arc<Mutex<()>>,
     token: Arc<Option<String>>,
+    sampling: bool,
 ) {
     if let Err(error) = stream.set_read_timeout(Some(REQUEST_TIMEOUT)) {
         crate::diagnostics::record(format_args!("profile_http timeout_error={error}"));
@@ -265,7 +279,7 @@ fn handle_connection(
         let _ = write_unauthorized(&mut stream);
         return;
     }
-    dispatch(&mut stream, &request, &stop, &capture);
+    dispatch(&mut stream, &request, &stop, &capture, sampling);
 }
 
 fn require_token_for_address(address: SocketAddr, token: Option<&str>) -> io::Result<()> {
@@ -367,6 +381,7 @@ fn dispatch(
     guard: &Arc<Mutex<Option<NativeGuard>>>,
     stop: &AtomicBool,
     capture: &Mutex<()>,
+    sampling: bool,
 ) {
     let (method, target) = request_line(request);
     if method != Some("GET") {
@@ -393,7 +408,13 @@ fn dispatch(
             let body = etw_status_json();
             let _ = write_response(stream, 200, "application/json; charset=utf-8", &body);
         }
-        "/debug/etw/profile" => write_etw_profile(stream, query, stop),
+        "/debug/etw/profile" => {
+            if sampling {
+                write_etw_profile(stream, query, stop);
+            } else {
+                write_sampling_disabled(stream);
+            }
+        }
         "/debug/pprof/profile" => {
             let _capture = capture.lock().unwrap_or_else(|e| e.into_inner());
             let mut guard = guard.lock().unwrap_or_else(|e| e.into_inner());
@@ -411,7 +432,13 @@ fn dispatch(
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn dispatch(stream: &mut TcpStream, request: &str, stop: &AtomicBool, capture: &Mutex<()>) {
+fn dispatch(
+    stream: &mut TcpStream,
+    request: &str,
+    stop: &AtomicBool,
+    capture: &Mutex<()>,
+    sampling: bool,
+) {
     let (method, target) = request_line(request);
     if method != Some("GET") {
         let _ = write_response(stream, 405, "text/plain; charset=utf-8", b"GET required\n");
@@ -438,8 +465,12 @@ fn dispatch(stream: &mut TcpStream, request: &str, stop: &AtomicBool, capture: &
             let _ = write_response(stream, 200, "application/json; charset=utf-8", &body);
         }
         "/debug/etw/profile" => {
-            let _capture = capture.lock().unwrap_or_else(|e| e.into_inner());
-            write_etw_profile(stream, query, stop);
+            if sampling {
+                let _capture = capture.lock().unwrap_or_else(|e| e.into_inner());
+                write_etw_profile(stream, query, stop);
+            } else {
+                write_sampling_disabled(stream);
+            }
         }
         "/debug/pprof/profile" | "/debug/pprof/flamegraph" => {
             let body = br#"{"error":"native pprof-rs sampling is unavailable on Windows; use /debug/etw/profile or /debug/metrics"}"#;
@@ -545,6 +576,11 @@ fn write_etw_profile(stream: &mut TcpStream, query: &str, stop: &AtomicBool) {
 #[cfg(not(windows))]
 fn write_etw_profile(stream: &mut TcpStream, _query: &str, _stop: &AtomicBool) {
     let body = b"ETW CPU capture is only available on Windows\n";
+    let _ = write_response(stream, 501, "text/plain; charset=utf-8", body);
+}
+
+fn write_sampling_disabled(stream: &mut TcpStream) {
+    let body = b"profiling sampling is disabled\n";
     let _ = write_response(stream, 501, "text/plain; charset=utf-8", body);
 }
 
@@ -794,6 +830,31 @@ mod tests {
             token: String::new(),
         };
         assert!(start(&settings).unwrap().is_none());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    #[ignore = "requires local socket permissions"]
+    fn disabled_sampling_rejects_etw_capture_requests() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        let guard: Arc<Mutex<Option<NativeGuard>>> = Arc::new(Mutex::new(None));
+        let stop = AtomicBool::new(false);
+        let capture = Mutex::new(());
+        dispatch(
+            &mut server,
+            "GET /debug/etw/profile?seconds=10 HTTP/1.1\r\n\r\n",
+            &guard,
+            &stop,
+            &capture,
+            false,
+        );
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+        let response = String::from_utf8(response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 501 Not Implemented\r\n"));
+        assert!(response.contains("profiling sampling is disabled"));
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

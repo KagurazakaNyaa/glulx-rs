@@ -50,9 +50,17 @@ impl Vm {
             {
                 return Err(VmError::InvalidSave);
             }
+            save::validate_stack(&undo.stack, undo.memory_len)?;
+            undo.stack
+                .refresh_frame_bounds()
+                .map_err(|_| VmError::InvalidSave)?;
         }
         save::validate_stack(&self.stack, self.memory.len())?;
         self.stack.refresh_frame_bounds()?;
+        if crate::diagnostics::enabled() {
+            self.opcode_counts
+                .get_or_insert_with(|| Box::new([0; 0x240]));
+        }
         for window in self
             .glk_windows
             .values_mut()
@@ -344,5 +352,43 @@ mod tests {
             restored.validate_session(),
             Err(VmError::InvalidSave)
         ));
+    }
+
+    #[test]
+    fn sessions_restore_undo_with_rehydrated_stack_bounds() {
+        let program = [
+            0x81, 0x25, 0x0d, 0x20, // saveundo
+            0x81, 0x26, 0x0d, 0x24, // restoreundo
+            0x81, 0x20,
+        ];
+        let story =
+            Story::from_bytes(&super::super::tests::image_with_program(&program), None).unwrap();
+        let mut vm = Vm::new(story).unwrap();
+        vm.run_steps(1).unwrap();
+        let serialized = serde_json::to_vec(&vm).unwrap();
+        let decoded: Vm = serde_json::from_slice(&serialized).unwrap();
+        let mut restored = decoded.validate_session().unwrap();
+        let undo = restored.undo.front().unwrap();
+        assert!(undo.stack.current_frame_end > 0);
+        assert!(undo.stack.locals_base <= undo.stack.current_frame_end);
+        assert!(undo.stack.current_frame_end <= undo.stack.len());
+        assert_eq!(restored.run_steps(8).unwrap(), RunState::Halted);
+        assert_eq!(restored.memory.read32(0x120).unwrap(), u32::MAX);
+        assert_eq!(restored.memory.read32(0x124).unwrap(), 1);
+    }
+
+    #[test]
+    fn sessions_reinitialize_diagnostic_opcode_counts() {
+        crate::diagnostics::initialize();
+        let story = Story::from_bytes(
+            &super::super::tests::image_with_program(&[0x81, 0x20]),
+            None,
+        )
+        .unwrap();
+        let vm = Vm::new(story).unwrap();
+        let serialized = serde_json::to_vec(&vm).unwrap();
+        let decoded: Vm = serde_json::from_slice(&serialized).unwrap();
+        let restored = decoded.validate_session().unwrap();
+        assert!(restored.opcode_counts.is_some());
     }
 }
