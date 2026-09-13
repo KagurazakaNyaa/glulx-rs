@@ -189,12 +189,10 @@ impl Vm {
                     }
                 }
                 Continuation::Finish => {
-                    let frame_ptr = self.stack.pop_raw_u32()?;
-                    let pc = self.stack.pop_raw_u32()?;
-                    let address = self.stack.pop_raw_u32()?;
-                    match self.stack.pop_raw_u32()? {
+                    let [kind, address, pc, frame_ptr] = self.stack.pop_stub()?;
+                    match kind {
                         10 => {
-                            self.stack.frame_ptr = frame_ptr;
+                            self.stack.set_frame_ptr(frame_ptr)?;
                             Continuation::Compressed(pc, address as u8)
                         }
                         11 => {
@@ -214,10 +212,8 @@ impl Vm {
         address: u32,
         pc: u32,
     ) -> Result<(), VmError> {
-        for value in [kind, address, pc, self.stack.frame_ptr] {
-            self.stack.push_u32(value)?;
-        }
-        Ok(())
+        let frame_ptr = self.stack.frame_ptr;
+        self.stack.push_stub(kind, address, pc, frame_ptr)
     }
 }
 

@@ -314,6 +314,28 @@ impl Memory {
         ]))
     }
 
+    pub(crate) fn contains_u32(
+        &self,
+        address: u32,
+        count: u32,
+        value: u32,
+    ) -> Result<bool, VmError> {
+        let length = count.checked_mul(4).ok_or(VmError::MemoryRead(address))?;
+        if let Ok(raw) = self.slice(address, length) {
+            return Ok(raw
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|bytes| u32::from_be_bytes(*bytes) == value));
+        }
+        for index in 0..count {
+            if self.read32(address.wrapping_add(index.wrapping_mul(4)))? == value {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub(crate) fn key(&self, address: u32, length: u32) -> Result<[u8; 4], VmError> {
         if length == 0 {
             return Ok([0; 4]);

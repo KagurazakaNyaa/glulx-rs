@@ -119,6 +119,15 @@ impl Vm {
             self.accel_error("tried to find the ~.~ of (something)");
             return Ok(0);
         }
+        self.accel_property_table_unchecked(obj, id, modern)
+    }
+
+    fn accel_property_table_unchecked(
+        &self,
+        obj: u32,
+        id: u32,
+        modern: bool,
+    ) -> Result<u32, VmError> {
         let offset = if modern {
             3 + self.acceleration.parameters[7] / 4
         } else {
@@ -128,28 +137,38 @@ impl Vm {
         if table == 0 {
             return Ok(0);
         }
-        self.binary_search(
-            id,
-            2,
-            table.wrapping_add(4),
-            10,
-            self.memory.read32(table)?,
-            0,
-            0,
-        )
+        let mut low = 0u32;
+        let mut high = self.memory.read32(table)?;
+        let key = id as u16;
+        while low < high {
+            let index = low + (high - low) / 2;
+            let entry = table.wrapping_add(4).wrapping_add(index.wrapping_mul(10));
+            match self.memory.read16(entry)?.cmp(&key) {
+                Ordering::Less => low = index + 1,
+                Ordering::Greater => high = index,
+                Ordering::Equal => return Ok(entry),
+            }
+        }
+        Ok(0)
     }
 
     fn accel_property(&mut self, mut obj: u32, mut id: u32, modern: bool) -> Result<u32, VmError> {
         let mut class = 0;
-        if id & 0xffff_0000 != 0 {
+        let property = if id & 0xffff_0000 != 0 {
             class = self.accel_word(self.acceleration.parameters[0], id & 0xffff)?;
             if self.accel_ofclass(obj, class, modern)? == 0 {
                 return Ok(0);
             }
             id >>= 16;
             obj = class;
-        }
-        let property = self.accel_property_table(obj, id, modern)?;
+            self.accel_property_table(obj, id, modern)?
+        } else {
+            if self.accel_region(obj)? != 1 {
+                self.accel_error("tried to find the ~.~ of (something)");
+                return Ok(0);
+            }
+            self.accel_property_table_unchecked(obj, id, modern)?
+        };
         if property == 0 {
             return Ok(0);
         }
@@ -204,17 +223,25 @@ impl Vm {
             self.accel_error("tried to apply 'ofclass' with non-class");
             return Ok(0);
         }
-        let list = self.accel_property_address(obj, 2, modern)?;
+        let property = self.accel_property_table_unchecked(obj, 2, modern)?;
+        if property == 0 {
+            return Ok(0);
+        }
+        let first = parameters[1];
+        if self.accel_in_class(obj)? && (2 < first || 2 >= first.wrapping_add(8)) {
+            return Ok(0);
+        }
+        if self.memory.read32(parameters[6])? != obj
+            && self.memory.read8(property.wrapping_add(9))? & 1 != 0
+        {
+            return Ok(0);
+        }
+        let list = self.accel_word(property, 1)?;
         if list == 0 {
             return Ok(0);
         }
-        let length = self.accel_property_length(obj, 2, modern)? / 4;
-        for index in 0..length {
-            if self.accel_word(list, index)? == class {
-                return Ok(1);
-            }
-        }
-        Ok(0)
+        let length = u32::from(self.memory.read16(property.wrapping_add(2))?);
+        Ok(u32::from(self.memory.contains_u32(list, length, class)?))
     }
 }
 
@@ -438,14 +465,12 @@ mod tests {
         let initial_stack = vm.stack.len();
         vm.stack.push_u32(OBJ).unwrap();
         instruction(&mut vm, 0x30, &[FUNC, 1], true);
-        vm.step().unwrap();
         assert_eq!(vm.stack.pop_u32().unwrap(), 1);
         assert_eq!(vm.stack.len(), initial_stack);
         for argument_count in 0..=3 {
             let mut arguments = vec![FUNC];
             arguments.extend(std::iter::repeat_n(OBJ, argument_count));
             instruction(&mut vm, 0x160 + argument_count as u32, &arguments, true);
-            vm.step().unwrap();
             assert_eq!(vm.stack.pop_u32().unwrap(), u32::from(argument_count > 0));
             assert_eq!(vm.stack.len(), initial_stack);
         }
@@ -455,16 +480,33 @@ mod tests {
         vm.call(0x880, &[], Destination::Memory(0x120)).unwrap();
         vm.stack.push_u32(OBJ).unwrap();
         instruction(&mut vm, 0x34, &[FUNC, 1], false);
-        vm.step().unwrap();
         assert_eq!(vm.memory.read32(0x120).unwrap(), 1);
         assert_eq!(vm.pc, 0x43);
         assert_eq!(vm.stack.len(), initial_stack);
         // A top-level accelerated tailcall returns by halting.
         vm.stack.push_u32(OBJ).unwrap();
         instruction(&mut vm, 0x34, &[FUNC, 1], false);
-        vm.step().unwrap();
         assert_eq!(vm.state, RunState::Halted);
         assert_eq!(vm.stack.len(), 0);
+    }
+
+    #[test]
+    #[ignore = "manual performance measurement"]
+    fn benchmark_accel_ofclass() {
+        let mut vm = vm(7);
+        let iterations = std::hint::black_box(100_000usize);
+        let started = std::time::Instant::now();
+        let mut result = 0;
+        for _ in 0..iterations {
+            result ^= std::hint::black_box(vm.accelerate(5, &[OBJ, CLASS]).unwrap());
+        }
+        let elapsed = started.elapsed();
+        std::hint::black_box(result);
+        eprintln!(
+            "BENCHMARK name=accel_ofclass iterations={iterations} elapsed_ns={} ns_per_iteration={:.3}",
+            elapsed.as_nanos(),
+            elapsed.as_secs_f64() * 1_000_000_000.0 / iterations as f64
+        );
     }
 
     #[test]
@@ -536,7 +578,8 @@ mod tests {
     fn desktop_session_resumes_pending_accelerated_return() {
         let mut vm = vm(7);
         vm.set_acceleration(1, FUNC).unwrap();
-        vm.call(FUNC, &[OBJ], Destination::Memory(0x120)).unwrap();
+        vm.push_call_stub(1, 0x120, vm.pc).unwrap();
+        vm.enter_function(FUNC, &[OBJ]).unwrap();
         let encoded = serde_json::to_string(&vm).unwrap();
         let decoded: Vm = serde_json::from_str(&encoded).unwrap();
         let mut restored = decoded.validate_session().unwrap();

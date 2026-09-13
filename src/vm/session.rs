@@ -52,6 +52,7 @@ impl Vm {
             }
         }
         save::validate_stack(&self.stack, self.memory.len())?;
+        self.stack.refresh_frame_bounds()?;
         for window in self
             .glk_windows
             .values_mut()

@@ -19,7 +19,7 @@ mod conformance;
 
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
 };
 
 use thiserror::Error;
@@ -161,6 +161,15 @@ impl Default for DecodeCache {
     }
 }
 
+struct FunctionLayout {
+    function_type: u8,
+    pc: u32,
+    frame_len: u32,
+    locals_pos: u32,
+    format: Vec<u8>,
+    positions: Vec<(u32, u32)>,
+}
+
 #[derive(serde::Serialize, Debug, Clone)]
 pub(crate) struct OpcodeDiagnostic {
     pub(crate) opcode: u32,
@@ -189,10 +198,6 @@ pub(crate) struct VmDiagnosticSnapshot {
     pub(crate) queued_events: usize,
     pub(crate) graphics_requests: usize,
     pub(crate) opcode_counts: Vec<OpcodeDiagnostic>,
-}
-
-fn default_opcode_counts() -> [u64; 0x240] {
-    [0; 0x240]
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
@@ -420,6 +425,10 @@ struct Stack {
     bytes: Vec<u8>,
     frame_ptr: u32,
     maximum: u32,
+    #[serde(skip, default)]
+    current_frame_end: u32,
+    #[serde(skip, default)]
+    locals_base: u32,
 }
 
 impl Stack {
@@ -428,12 +437,16 @@ impl Stack {
             bytes: Vec::with_capacity(maximum.min(1024 * 1024) as usize),
             frame_ptr: 0,
             maximum,
+            current_frame_end: 0,
+            locals_base: 0,
         }
     }
 
     fn clear(&mut self) {
         self.bytes.clear();
         self.frame_ptr = 0;
+        self.current_frame_end = 0;
+        self.locals_base = 0;
     }
 
     fn len(&self) -> u32 {
@@ -453,11 +466,39 @@ impl Stack {
     }
 
     fn pop_u32(&mut self) -> Result<u32, VmError> {
-        let floor = self.frame_end()?;
-        if self.len() < floor + 4 {
-            return Err(VmError::StackUnderflow);
+        let start = self
+            .bytes
+            .len()
+            .checked_sub(4)
+            .filter(|start| *start >= self.current_frame_end as usize)
+            .ok_or(VmError::StackUnderflow)?;
+        let value = u32::from_be_bytes(
+            self.bytes[start..start + 4]
+                .try_into()
+                .expect("word length checked"),
+        );
+        self.bytes.truncate(start);
+        Ok(value)
+    }
+
+    fn pop_words_into(&mut self, values: &mut [u32]) -> Result<(), VmError> {
+        let byte_count = values.len().checked_mul(4).ok_or(VmError::StackUnderflow)?;
+        let start = self
+            .bytes
+            .len()
+            .checked_sub(byte_count)
+            .filter(|start| *start >= self.current_frame_end as usize)
+            .ok_or(VmError::StackUnderflow)?;
+        for (index, value) in values.iter_mut().enumerate() {
+            let end = self.bytes.len() - index * 4;
+            *value = u32::from_be_bytes(
+                self.bytes[end - 4..end]
+                    .try_into()
+                    .expect("word length checked"),
+            );
         }
-        self.pop_raw_u32()
+        self.bytes.truncate(start);
+        Ok(())
     }
 
     fn pop_raw_u32(&mut self) -> Result<u32, VmError> {
@@ -470,63 +511,152 @@ impl Stack {
         Ok(value)
     }
 
+    fn push_stub(
+        &mut self,
+        destination_type: u32,
+        address: u32,
+        pc: u32,
+        frame_ptr: u32,
+    ) -> Result<(), VmError> {
+        let end = self
+            .bytes
+            .len()
+            .checked_add(16)
+            .filter(|end| *end <= self.maximum as usize)
+            .ok_or(VmError::StackOverflow)?;
+        let mut encoded = [0; 16];
+        for (index, value) in [destination_type, address, pc, frame_ptr]
+            .into_iter()
+            .enumerate()
+        {
+            let start = index * 4;
+            encoded[start..start + 4].copy_from_slice(&value.to_be_bytes());
+        }
+        self.bytes.extend_from_slice(&encoded);
+        debug_assert_eq!(self.bytes.len(), end);
+        Ok(())
+    }
+
+    fn pop_stub(&mut self) -> Result<[u32; 4], VmError> {
+        let start = self
+            .bytes
+            .len()
+            .checked_sub(16)
+            .ok_or(VmError::StackUnderflow)?;
+        let mut values = [0; 4];
+        for (index, value) in values.iter_mut().enumerate() {
+            let offset = start + index * 4;
+            *value = u32::from_be_bytes(
+                self.bytes[offset..offset + 4]
+                    .try_into()
+                    .expect("stub length checked"),
+            );
+        }
+        self.bytes.truncate(start);
+        Ok(values)
+    }
+
     fn frame_end(&self) -> Result<u32, VmError> {
         if self.bytes.is_empty() {
             return Ok(0);
         }
-        Ok(self.frame_ptr + self.read_raw_u32(self.frame_ptr)?)
+        Ok(self.current_frame_end)
     }
 
-    fn local_address(&self, offset: u32) -> Result<u32, VmError> {
-        let locals_pos = self.read_raw_u32(self.frame_ptr + 4)?;
-        let address = self
-            .frame_ptr
+    fn set_frame_bounds(
+        &mut self,
+        frame_ptr: u32,
+        frame_len: u32,
+        locals_pos: u32,
+    ) -> Result<(), VmError> {
+        self.frame_ptr = frame_ptr;
+        self.current_frame_end = frame_ptr
+            .checked_add(frame_len)
+            .ok_or(VmError::StackUnderflow)?;
+        self.locals_base = frame_ptr
             .checked_add(locals_pos)
-            .and_then(|base| base.checked_add(offset))
-            .ok_or(VmError::InvalidLocal(offset))?;
-        if address >= self.frame_end()? {
-            return Err(VmError::InvalidLocal(offset));
+            .ok_or(VmError::StackUnderflow)?;
+        Ok(())
+    }
+
+    fn refresh_frame_bounds(&mut self) -> Result<(), VmError> {
+        if self.bytes.is_empty() {
+            self.frame_ptr = 0;
+            self.current_frame_end = 0;
+            self.locals_base = 0;
+            return Ok(());
         }
-        Ok(address)
+        let frame_ptr = self.frame_ptr;
+        let frame_len = self.read_raw_u32(frame_ptr)?;
+        let locals_pos = self.read_raw_u32(frame_ptr + 4)?;
+        self.set_frame_bounds(frame_ptr, frame_len, locals_pos)
+    }
+
+    fn set_frame_ptr(&mut self, frame_ptr: u32) -> Result<(), VmError> {
+        self.frame_ptr = frame_ptr;
+        self.refresh_frame_bounds()
     }
 
     fn checked_local_address(&self, offset: u32, width: Width) -> Result<u32, VmError> {
-        let address = self.local_address(offset)?;
+        let address = self
+            .locals_base
+            .checked_add(offset)
+            .ok_or(VmError::InvalidLocal(offset))?;
+        let frame_end = self.current_frame_end;
+        if address >= frame_end {
+            return Err(VmError::InvalidLocal(offset));
+        }
         let size = match width {
             Width::Byte => 1,
             Width::Short => 2,
             Width::Word => 4,
         };
-        if address
-            .checked_add(size)
-            .is_none_or(|end| end > self.frame_end().unwrap_or(0))
-        {
+        if address.checked_add(size).is_none_or(|end| end > frame_end) {
             return Err(VmError::InvalidLocal(offset));
         }
         Ok(address)
     }
 
     fn read_local(&self, offset: u32, width: Width) -> Result<u32, VmError> {
-        let address = self.checked_local_address(offset, width)?;
+        let address = self.checked_local_address(offset, width)? as usize;
         match width {
-            Width::Byte => Ok(self.read_raw(address, 1)?[0] as u32),
-            Width::Short => Ok(u16::from_be_bytes(
-                self.read_raw(address, 2)?
-                    .try_into()
-                    .expect("length checked"),
-            ) as u32),
-            Width::Word => self.read_raw_u32(address),
+            Width::Byte => self
+                .bytes
+                .get(address)
+                .copied()
+                .map(u32::from)
+                .ok_or(VmError::StackUnderflow),
+            Width::Short => self
+                .bytes
+                .get(address..address + 2)
+                .and_then(|bytes| bytes.try_into().ok())
+                .map(|bytes| u16::from_be_bytes(bytes) as u32)
+                .ok_or(VmError::StackUnderflow),
+            Width::Word => self
+                .bytes
+                .get(address..address + 4)
+                .and_then(|bytes| bytes.try_into().ok())
+                .map(u32::from_be_bytes)
+                .ok_or(VmError::StackUnderflow),
         }
     }
 
     fn write_local(&mut self, offset: u32, value: u32, width: Width) -> Result<(), VmError> {
         let address = self.checked_local_address(offset, width)? as usize;
         match width {
-            Width::Byte => self.bytes[address] = value as u8,
-            Width::Short => {
-                self.bytes[address..address + 2].copy_from_slice(&(value as u16).to_be_bytes())
+            Width::Byte => {
+                *self.bytes.get_mut(address).ok_or(VmError::StackUnderflow)? = value as u8
             }
-            Width::Word => self.bytes[address..address + 4].copy_from_slice(&value.to_be_bytes()),
+            Width::Short => self
+                .bytes
+                .get_mut(address..address + 2)
+                .ok_or(VmError::StackUnderflow)?
+                .copy_from_slice(&(value as u16).to_be_bytes()),
+            Width::Word => self
+                .bytes
+                .get_mut(address..address + 4)
+                .ok_or(VmError::StackUnderflow)?
+                .copy_from_slice(&value.to_be_bytes()),
         }
         Ok(())
     }
@@ -583,12 +713,15 @@ pub struct Vm {
     image_info: BTreeMap<u32, Option<[u32; 2]>>,
     #[serde(skip)]
     decoded_cache: DecodeCache,
+    // ROM function headers are immutable; RAM functions must be decoded each call.
+    #[serde(skip)]
+    function_cache: HashMap<u32, FunctionLayout>,
     #[serde(skip)]
     decode_cache_hits: u64,
     #[serde(skip)]
     decode_cache_misses: u64,
-    #[serde(skip, default = "default_opcode_counts")]
-    opcode_counts: [u64; 0x240],
+    #[serde(skip, default)]
+    opcode_counts: Option<Box<[u64; 0x240]>>,
     #[serde(skip)]
     presentation_revision: u64,
     #[serde(skip)]
@@ -723,9 +856,10 @@ impl Vm {
             text_appearance: TextAppearance::default(),
             image_info: BTreeMap::new(),
             decoded_cache: DecodeCache::default(),
+            function_cache: HashMap::new(),
             decode_cache_hits: 0,
             decode_cache_misses: 0,
-            opcode_counts: [0; 0x240],
+            opcode_counts: crate::diagnostics::enabled().then(|| Box::new([0; 0x240])),
             presentation_revision: 0,
             presentation_pending: false,
             instructions_executed: 0,
@@ -922,17 +1056,18 @@ impl Vm {
         let decode_total = self
             .decode_cache_hits
             .saturating_add(self.decode_cache_misses);
-        let mut opcode_counts = self
-            .opcode_counts
-            .iter()
-            .enumerate()
-            .filter_map(|(opcode, &count)| {
-                (count != 0).then_some(OpcodeDiagnostic {
-                    opcode: opcode as u32,
-                    count,
+        let mut opcode_counts = self.opcode_counts.as_ref().map_or_else(Vec::new, |counts| {
+            counts
+                .iter()
+                .enumerate()
+                .filter_map(|(opcode, &count)| {
+                    (count != 0).then_some(OpcodeDiagnostic {
+                        opcode: opcode as u32,
+                        count,
+                    })
                 })
-            })
-            .collect::<Vec<_>>();
+                .collect()
+        });
         opcode_counts.sort_unstable_by(|left, right| {
             right
                 .count
@@ -1003,7 +1138,9 @@ impl Vm {
         }
         let instruction_address = self.pc;
         let (opcode, operands) = self.fetch_decoded(instruction_address)?;
-        if let Some(count) = self.opcode_counts.get_mut(opcode as usize) {
+        if let Some(counts) = &mut self.opcode_counts
+            && let Some(count) = counts.get_mut(opcode as usize)
+        {
             *count = count.wrapping_add(1);
         }
         macro_rules! load {
@@ -1155,7 +1292,19 @@ impl Vm {
                 let arguments = self.pop_arguments(count)?;
                 let frame = self.stack.frame_ptr;
                 self.stack.truncate(frame)?;
-                self.enter_function(address, arguments.as_slice())?;
+                let accelerated = self.acceleration.functions.get(&address).copied();
+                if let Some(index) = accelerated {
+                    let value = self.accelerate(index, arguments.as_slice())?;
+                    let frame_ptr = self.stack.len();
+                    self.stack.set_frame_bounds(frame_ptr, 0, 0)?;
+                    self.return_from_function(value)?;
+                } else {
+                    self.enter_function_with_acceleration(
+                        address,
+                        arguments.as_slice(),
+                        accelerated,
+                    )?;
+                }
             }
             0x40 => {
                 let value = load!(0);
@@ -1723,13 +1872,18 @@ impl Vm {
 
     fn fetch_decoded(&mut self, address: u32) -> Result<(u32, [Operand; 8]), VmError> {
         let cacheable = address < self.memory.ram_start();
-        let index = (address as usize >> 2) & (DECODE_CACHE_SIZE - 1);
+        // Glulx instructions are not word-aligned; using the byte address
+        // avoids making adjacent short instructions share one cache slot.
+        let index = address as usize & (DECODE_CACHE_SIZE - 1);
         if cacheable {
-            let entry = self.decoded_cache.entries[index];
+            let entry = &self.decoded_cache.entries[index];
             if entry.valid && entry.address == address {
+                let next_pc = entry.next_pc;
+                let opcode = entry.opcode;
+                let operands = entry.operands;
                 self.decode_cache_hits = self.decode_cache_hits.wrapping_add(1);
-                self.pc = entry.next_pc;
-                return Ok((entry.opcode, entry.operands));
+                self.pc = next_pc;
+                return Ok((opcode, operands));
             }
             self.decode_cache_misses = self.decode_cache_misses.wrapping_add(1);
         }
@@ -1831,21 +1985,19 @@ impl Vm {
 
     fn pop_arguments(&mut self, count: u32) -> Result<ArgumentBuffer, VmError> {
         let count = count as usize;
-        let available = (self.stack.len() - self.stack.frame_end()?) / 4;
-        if count > available as usize {
-            return Err(VmError::StackUnderflow);
-        }
         if count <= INLINE_ARGUMENTS {
             let mut values = [0; INLINE_ARGUMENTS];
-            for value in &mut values[..count] {
-                *value = self.stack.pop_u32()?;
-            }
+            self.stack.pop_words_into(&mut values[..count])?;
             Ok(ArgumentBuffer {
                 inline: values,
                 heap: None,
                 length: count,
             })
         } else {
+            let available = (self.stack.len() - self.stack.current_frame_end) / 4;
+            if count > available as usize {
+                return Err(VmError::StackUnderflow);
+            }
             let mut values = Vec::new();
             values
                 .try_reserve_exact(count)
@@ -1900,17 +2052,50 @@ impl Vm {
     }
 
     fn enter_function(&mut self, address: u32, arguments: &[u32]) -> Result<(), VmError> {
-        if let Some(index) = self.acceleration.functions.get(&address).copied() {
+        let accelerated = self.acceleration.functions.get(&address).copied();
+        self.enter_function_with_acceleration(address, arguments, accelerated)
+    }
+
+    fn enter_function_with_acceleration(
+        &mut self,
+        address: u32,
+        arguments: &[u32],
+        accelerated: Option<u32>,
+    ) -> Result<(), VmError> {
+        if let Some(index) = accelerated {
             let value = self.accelerate(index, arguments)?;
             // A minimal frame and deferred return keep string/filter continuations
             // iterative, including strings with thousands of accelerated callbacks.
-            self.stack.frame_ptr = self.stack.len();
+            let frame_ptr = self.stack.len();
             self.stack.push_u32(12)?;
             self.stack.push_u32(12)?;
             self.stack.push_u32(0)?;
+            self.stack.set_frame_bounds(frame_ptr, 12, 12)?;
             self.accelerated_return = Some(value);
             return Ok(());
         }
+        if address < self.memory.ram_start() {
+            if let Some(layout) = self.function_cache.get(&address) {
+                return enter_function_with_layout(
+                    &mut self.stack,
+                    &mut self.pc,
+                    layout,
+                    arguments,
+                );
+            }
+            let layout = self.decode_function_layout(address)?;
+            self.function_cache.insert(address, layout);
+            let layout = self
+                .function_cache
+                .get(&address)
+                .expect("function cache entry inserted above");
+            return enter_function_with_layout(&mut self.stack, &mut self.pc, layout, arguments);
+        }
+        let layout = self.decode_function_layout(address)?;
+        enter_function_with_layout(&mut self.stack, &mut self.pc, &layout, arguments)
+    }
+
+    fn decode_function_layout(&self, address: u32) -> Result<FunctionLayout, VmError> {
         let function_type = self.memory.read8(address)?;
         if !matches!(function_type, 0xc0 | 0xc1) {
             return Err(VmError::InvalidFunction(address));
@@ -1932,7 +2117,6 @@ impl Vm {
             groups.push((local_type as u32, count as u32));
         }
 
-        let frame_ptr = self.stack.len();
         while format.len() % 4 != 0 {
             format.push(0);
         }
@@ -1947,36 +2131,14 @@ impl Vm {
             }
         }
         let frame_len = align(local_cursor, 4);
-        let frame_end = frame_ptr
-            .checked_add(frame_len)
-            .filter(|end| *end <= self.stack.maximum)
-            .ok_or(VmError::StackOverflow)?;
-        self.stack.frame_ptr = frame_ptr;
-        self.stack.push_u32(frame_len)?;
-        self.stack.push_u32(locals_pos)?;
-        self.stack.bytes.extend_from_slice(&format);
-        self.stack.bytes.resize(frame_end as usize, 0);
-
-        if function_type == 0xc1 {
-            for ((position, size), value) in positions.iter().zip(arguments.iter()) {
-                self.stack.write_local(
-                    position - locals_pos,
-                    *value,
-                    match size {
-                        1 => Width::Byte,
-                        2 => Width::Short,
-                        _ => Width::Word,
-                    },
-                )?;
-            }
-        } else {
-            for value in arguments.iter().rev() {
-                self.stack.push_u32(*value)?;
-            }
-            self.stack.push_u32(arguments.len() as u32)?;
-        }
-        self.pc = cursor;
-        Ok(())
+        Ok(FunctionLayout {
+            function_type,
+            pc: cursor,
+            frame_len,
+            locals_pos,
+            format,
+            positions,
+        })
     }
 
     fn call(
@@ -1988,12 +2150,14 @@ impl Vm {
         if address == 0 {
             return self.store_destination(&destination, 0, Width::Word);
         }
+        let accelerated = self.acceleration.functions.get(&address).copied();
+        if let Some(index) = accelerated {
+            let value = self.accelerate(index, arguments)?;
+            return self.store_destination(&destination, value, Width::Word);
+        }
         let (destination_type, destination_address) = destination_parts(&destination);
-        self.stack.push_u32(destination_type)?;
-        self.stack.push_u32(destination_address)?;
-        self.stack.push_u32(self.pc)?;
-        self.stack.push_u32(self.stack.frame_ptr)?;
-        self.enter_function(address, arguments)
+        self.push_call_stub(destination_type, destination_address, self.pc)?;
+        self.enter_function_with_acceleration(address, arguments, accelerated)
     }
 
     fn throw_to(&mut self, token: u32, value: u32) -> Result<(), VmError> {
@@ -2001,10 +2165,7 @@ impl Vm {
             return Err(VmError::InvalidCatchToken(token));
         }
         self.stack.truncate(token)?;
-        let frame_ptr = self.stack.pop_raw_u32()?;
-        let pc = self.stack.pop_raw_u32()?;
-        let destination_address = self.stack.pop_raw_u32()?;
-        let destination_type = self.stack.pop_raw_u32()?;
+        let [destination_type, destination_address, pc, frame_ptr] = self.stack.pop_stub()?;
         let destination = match destination_type {
             0 => Destination::Discard,
             1 => Destination::Memory(destination_address),
@@ -2015,7 +2176,7 @@ impl Vm {
         if frame_ptr > self.stack.len() {
             return Err(VmError::InvalidCatchToken(token));
         }
-        self.stack.frame_ptr = frame_ptr;
+        self.stack.set_frame_ptr(frame_ptr)?;
         self.pc = pc;
         self.store_destination(&destination, value, Width::Word)
     }
@@ -2024,14 +2185,12 @@ impl Vm {
         let frame_ptr = self.stack.frame_ptr;
         self.stack.truncate(frame_ptr)?;
         if self.stack.len() == 0 {
+            self.stack.refresh_frame_bounds()?;
             self.stop();
             return Ok(());
         }
-        let old_frame_ptr = self.stack.pop_raw_u32()?;
-        let pc = self.stack.pop_raw_u32()?;
-        let address = self.stack.pop_raw_u32()?;
-        let destination_type = self.stack.pop_raw_u32()?;
-        self.stack.frame_ptr = old_frame_ptr;
+        let [destination_type, address, pc, old_frame_ptr] = self.stack.pop_stub()?;
+        self.stack.set_frame_ptr(old_frame_ptr)?;
         self.pc = pc;
         let destination = match destination_type {
             0 => Destination::Discard,
@@ -3016,6 +3175,43 @@ impl Vm {
     }
 }
 
+fn enter_function_with_layout(
+    stack: &mut Stack,
+    pc: &mut u32,
+    layout: &FunctionLayout,
+    arguments: &[u32],
+) -> Result<(), VmError> {
+    let frame_ptr = stack.len();
+    let frame_end = frame_ptr
+        .checked_add(layout.frame_len)
+        .filter(|end| *end <= stack.maximum)
+        .ok_or(VmError::StackOverflow)?;
+    stack.set_frame_bounds(frame_ptr, layout.frame_len, layout.locals_pos)?;
+    stack.push_u32(layout.frame_len)?;
+    stack.push_u32(layout.locals_pos)?;
+    stack.bytes.extend_from_slice(&layout.format);
+    stack.bytes.resize(frame_end as usize, 0);
+
+    if layout.function_type == 0xc1 {
+        for ((position, size), value) in layout.positions.iter().zip(arguments.iter()) {
+            let address = frame_ptr as usize + *position as usize;
+            match size {
+                1 => stack.bytes[address] = *value as u8,
+                2 => stack.bytes[address..address + 2]
+                    .copy_from_slice(&(*value as u16).to_be_bytes()),
+                _ => stack.bytes[address..address + 4].copy_from_slice(&value.to_be_bytes()),
+            }
+        }
+    } else {
+        for value in arguments.iter().rev() {
+            stack.push_u32(*value)?;
+        }
+        stack.push_u32(arguments.len() as u32)?;
+    }
+    *pc = layout.pc;
+    Ok(())
+}
+
 fn unpredictable_seed() -> u32 {
     use std::hash::{BuildHasher, Hasher};
     // RandomState is seeded from the platform's entropy source by the standard library.
@@ -3553,6 +3749,16 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn decoded_cache_handles_unaligned_rom_instruction_addresses() {
+        let mut program = vec![0; 128];
+        program.extend_from_slice(&[0x20, 0x03, 0xff, 0xff, 0xff, 0x7c]);
+        let story = Story::from_bytes(&image_with_program(&program), None).unwrap();
+        let mut vm = Vm::new(story).unwrap();
+        assert_eq!(vm.run_steps(10_000).unwrap(), RunState::Running);
+        assert!(vm.decode_cache_hits > vm.decode_cache_misses);
+    }
+
+    #[test]
     #[ignore = "manual performance measurement"]
     fn benchmark_instruction_dispatch() {
         let story = Story::from_bytes(&image_with_program(&[0x20, 0x01, 0xff]), None).unwrap();
@@ -3566,6 +3772,73 @@ pub(crate) mod tests {
             "BENCHMARK name=instruction_dispatch iterations={iterations} elapsed_ns={} ns_per_iteration={:.3}",
             elapsed.as_nanos(),
             elapsed.as_secs_f64() * 1_000_000_000.0 / iterations as f64
+        );
+    }
+
+    #[test]
+    #[ignore = "manual performance measurement"]
+    fn benchmark_function_calls() {
+        let mut image = image_with_program(&[
+            0x81, 0x62, 0x33, 0x03, // callf 0x80, 1, 2, discard
+            0, 0, 0, 0x80, 0, 0, 0, 1, 0, 0, 0, 2, 0x20, 0x03, 0xff, 0xff, 0xff,
+            0xec, // loop back to callf
+        ]);
+        image[0x80..0x89].copy_from_slice(&[0xc1, 4, 4, 0, 0, 0x31, 0, 0, 0]);
+        update_checksum(&mut image);
+        let story = Story::from_bytes(&image, None).unwrap();
+        let mut vm = Vm::new(story).unwrap();
+        let iterations = std::hint::black_box(1_000_000usize);
+        let started = std::time::Instant::now();
+        assert_eq!(vm.run_steps(iterations).unwrap(), RunState::Running);
+        let elapsed = started.elapsed();
+        eprintln!(
+            "BENCHMARK name=function_calls iterations={iterations} elapsed_ns={} ns_per_iteration={:.3}",
+            elapsed.as_nanos(),
+            elapsed.as_secs_f64() * 1_000_000_000.0 / iterations as f64
+        );
+    }
+
+    #[test]
+    #[ignore = "manual performance measurement"]
+    fn benchmark_accelerated_calls() {
+        let mut image = image_with_program(&[
+            0x81, 0x61, 0x33, 0x00, // callf 0x80, 0x100, discard
+            0, 0, 0, 0x80, 0, 0, 1, 0, 0x20, 0x03, 0xff, 0xff, 0xff, 0xf0,
+        ]);
+        image[0x80..0x85].copy_from_slice(&[0xc0, 0, 0, 0x31, 0]);
+        update_checksum(&mut image);
+        let story = Story::from_bytes(&image, None).unwrap();
+        let mut vm = Vm::new(story).unwrap();
+        vm.set_acceleration(1, 0x80).unwrap();
+        let accelerated_calls = std::hint::black_box(1_000_000usize);
+        let iterations = accelerated_calls * 2;
+        let started = std::time::Instant::now();
+        assert_eq!(vm.run_steps(iterations).unwrap(), RunState::Running);
+        let elapsed = started.elapsed();
+        eprintln!(
+            "BENCHMARK name=accelerated_calls calls={accelerated_calls} iterations={iterations} elapsed_ns={} ns_per_call={:.3}",
+            elapsed.as_nanos(),
+            elapsed.as_secs_f64() * 1_000_000_000.0 / accelerated_calls as f64
+        );
+    }
+
+    #[test]
+    #[ignore = "manual performance measurement"]
+    fn benchmark_decode_cache() {
+        let mut program = vec![0; 128];
+        program.extend_from_slice(&[0x20, 0x03, 0xff, 0xff, 0xff, 0x7c]);
+        let story = Story::from_bytes(&image_with_program(&program), None).unwrap();
+        let mut vm = Vm::new(story).unwrap();
+        let iterations = std::hint::black_box(500_000usize);
+        let started = std::time::Instant::now();
+        assert_eq!(vm.run_steps(iterations).unwrap(), RunState::Running);
+        let elapsed = started.elapsed();
+        eprintln!(
+            "BENCHMARK name=decode_cache iterations={iterations} elapsed_ns={} ns_per_iteration={:.3} hits={} misses={}",
+            elapsed.as_nanos(),
+            elapsed.as_secs_f64() * 1_000_000_000.0 / iterations as f64,
+            vm.decode_cache_hits,
+            vm.decode_cache_misses,
         );
     }
 

@@ -178,6 +178,8 @@ impl Vm {
             bytes: bytes.to_vec(),
             frame_ptr: 0,
             maximum: self.stack.maximum,
+            current_frame_end: 0,
+            locals_base: 0,
         };
         stack.frame_ptr = stack.pop_raw_u32()?;
         let pc = stack.pop_raw_u32()?;
@@ -187,6 +189,9 @@ impl Vm {
             return Err(VmError::InvalidSave);
         }
         validate_stack(&stack, size)?;
+        stack
+            .refresh_frame_bounds()
+            .map_err(|_| VmError::InvalidSave)?;
         let destination = match kind {
             0 => Destination::Discard,
             1 => Destination::Memory(address),

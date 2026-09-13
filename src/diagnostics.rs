@@ -30,6 +30,10 @@ struct Logger {
 
 static LOGGER: OnceLock<Logger> = OnceLock::new();
 
+pub(crate) fn enabled() -> bool {
+    LOGGER.get().is_some()
+}
+
 fn new_logger(file: Option<File>) -> Logger {
     let now = Instant::now();
     Logger {
