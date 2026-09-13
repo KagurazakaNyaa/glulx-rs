@@ -39,6 +39,10 @@ Settings 支持分别选择比例/等宽字体的原生字体选择器（Windows
 .\glulx-rs.exe --profile-http 127.0.0.1:6060 "<游戏文件路径>"
 ```
 
+`ADDRESS` 会直接绑定到指定接口。非回环地址必须同时提供 `--profile-token TOKEN`，
+或设置 `GLULX_PROFILE_TOKEN`；客户端使用 `Authorization: Bearer TOKEN` 请求。
+回环地址可以不认证。Token 是 bearer 凭据，不要放入共享命令历史或日志。
+
 运行期间可在另一个 PowerShell 窗口执行：
 
 ```powershell
@@ -46,7 +50,8 @@ Invoke-WebRequest http://127.0.0.1:6060/debug/metrics -OutFile "<output-dir>\met
 ```
 
 返回的 `opcode_counts` 按累计执行次数排序；`vm_ms`、`ui_ms` 和
-`decode_cache_hit_rate` 可用来区分 VM、界面和指令解码成本。服务只应绑定回环地址。
+`decode_cache_hit_rate` 可用来区分 VM、界面和指令解码成本。服务可以绑定任意地址；非回环地址
+没有 token 时会拒绝启动。涉及 ETW/UAC 的采集仍应只暴露给可信网络。
 
 Windows 原生 CPU 采样可在另一个 PowerShell 窗口执行：
 

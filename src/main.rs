@@ -6,7 +6,7 @@ use glulx_rs::app::PlayerApp;
 use glulx_rs::memory_budget::{Budget, MemoryPolicy, Overrides, startup_snapshot};
 use glulx_rs::{ResourceSelection, Story, Vm};
 
-const USAGE: &str = "Usage: glulx-rs [--headless] [--strict-glk] [--trace-events PATH] [--profile-http ADDRESS] [--max-memory MIB] [--max-process-memory MIB] [--diagnostics LOG] [--resources PATH] [--no-auto-resources] [STORY]\n\n--headless          Play in the terminal (plain text when input or output is piped)\n--strict-glk        Fail when a story calls an unknown Glk selector\n--trace-events PATH Write delivered Glk events as JSON after headless playback\n--profile-http ADDRESS  Listen for local profiling and metrics HTTP requests\n--max-memory MIB   Game VM limit: MiB or percentage (e.g. 1024 or 25%)\n--max-process-memory MIB  OS hard limit: MiB or percentage (0 disables)\n--max-undo-memory SIZE       Undo payload budget\n--max-graphics-cache SIZE    Graphics cache budget\n--max-text-image-cache SIZE  Text image cache budget\n--max-decoded-image SIZE     Per-picture RGBA budget\n--max-audio-resource SIZE    Per-audio encoded budget\n--max-song-pcm SIZE          SONG PCM budget\nAll SIZE values accept MiB or 1%–100%. CLI overrides JSON for this run only.\n--diagnostics LOG   Write diagnostic heartbeats and slow operations to LOG\n--resources PATH    Use this Blorb archive or loose resource directory\n--no-auto-resources Disable discovery of same-name external resource archives\n--help              Show this help\n\nDebug builds default to ./glulx-debug.log and the profiling endpoint 127.0.0.1:6060.\nRelease builds enable profiling only with --profile-http.\n\nAn explicit --resources path takes priority over --no-auto-resources.";
+const USAGE: &str = "Usage: glulx-rs [--headless] [--strict-glk] [--trace-events PATH] [--profile-http ADDRESS] [--profile-token TOKEN] [--max-memory MIB] [--max-process-memory MIB] [--diagnostics LOG] [--resources PATH] [--no-auto-resources] [STORY]\n\n--headless          Play in the terminal (plain text when input or output is piped)\n--strict-glk        Fail when a story calls an unknown Glk selector\n--trace-events PATH Write delivered Glk events as JSON after headless playback\n--profile-http ADDRESS  Listen for profiling and metrics HTTP requests\n--profile-token TOKEN   Require Authorization: Bearer TOKEN for profiling requests\n--max-memory MIB   Game VM limit: MiB or percentage (e.g. 1024 or 25%)\n--max-process-memory MIB  OS hard limit: MiB or percentage (0 disables)\n--max-undo-memory SIZE       Undo payload budget\n--max-graphics-cache SIZE    Graphics cache budget\n--max-text-image-cache SIZE  Text image cache budget\n--max-decoded-image SIZE     Per-picture RGBA budget\n--max-audio-resource SIZE    Per-audio encoded budget\n--max-song-pcm SIZE          SONG PCM budget\nAll SIZE values accept MiB or 1%–100%. CLI overrides JSON for this run only.\n--diagnostics LOG   Write diagnostic heartbeats and slow operations to LOG\n--resources PATH    Use this Blorb archive or loose resource directory\n--no-auto-resources Disable discovery of same-name external resource archives\n--help              Show this help\n\nDebug builds default to ./glulx-debug.log and the profiling endpoint 127.0.0.1:6060.\nRelease builds enable profiling only with --profile-http. Non-loopback profiling addresses require a token; GLULX_PROFILE_TOKEN is also accepted.\n\nAn explicit --resources path takes priority over --no-auto-resources.";
 
 #[derive(Debug)]
 struct Arguments {
@@ -20,6 +20,7 @@ struct Arguments {
     resources: ResourceSelection,
     diagnostics: Option<PathBuf>,
     profile_http: Option<String>,
+    profile_token: Option<String>,
 }
 
 fn parse_arguments(
@@ -29,6 +30,8 @@ fn parse_arguments(
     let mut diagnostics = None;
     let mut profile_http = None;
     let mut profile_http_explicit = false;
+    let mut profile_token = None;
+    let mut profile_token_explicit = false;
     let mut resource_overrides = std::collections::BTreeMap::new();
     let mut max_memory_mib = None;
     let mut max_process_memory_mib = None;
@@ -104,6 +107,19 @@ fn parse_arguments(
                     .ok_or("--profile-http address must be valid UTF-8")?
                     .to_owned(),
             );
+        } else if !positional && argument == "--profile-token" {
+            let token = arguments.next().ok_or("--profile-token requires a token")?;
+            if profile_token_explicit {
+                return Err("Specify --profile-token only once".to_owned());
+            }
+            profile_token_explicit = true;
+            let token = token
+                .to_str()
+                .ok_or("--profile-token must be valid UTF-8")?;
+            if token.is_empty() {
+                return Err("--profile-token must not be empty".to_owned());
+            }
+            profile_token = Some(token.to_owned());
         } else if !positional && argument == "--no-auto-resources" {
             automatic = false;
         } else if !positional && argument == "--resources" {
@@ -126,6 +142,11 @@ fn parse_arguments(
     if story.is_none() && (explicit.is_some() || !automatic) {
         return Err("Resource options require a story".to_owned());
     }
+    let profile_http =
+        profile_http.or_else(|| cfg!(debug_assertions).then(|| "127.0.0.1:6060".to_owned()));
+    if profile_token.is_some() && profile_http.is_none() {
+        return Err("--profile-token requires --profile-http".to_owned());
+    }
     Ok(Some(Arguments {
         headless,
         strict_glk,
@@ -135,8 +156,8 @@ fn parse_arguments(
         max_process_memory_mib,
         diagnostics: diagnostics
             .or_else(|| cfg!(debug_assertions).then(|| PathBuf::from("glulx-debug.log"))),
-        profile_http: profile_http
-            .or_else(|| cfg!(debug_assertions).then(|| "127.0.0.1:6060".to_owned())),
+        profile_http,
+        profile_token,
         story,
         resources: explicit.map_or_else(
             || {
@@ -191,7 +212,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _profile_server = arguments
         .profile_http
         .as_deref()
-        .map(glulx_rs::profiling::start)
+        .map(|address| glulx_rs::profiling::start(address, arguments.profile_token.as_deref()))
         .transpose()
         .map_err(|error| format!("Could not start profiling HTTP server: {error}"))?;
     if arguments.headless {
@@ -349,6 +370,7 @@ mod tests {
         assert_eq!(args.diagnostics, expected);
         let expected_profile = cfg!(debug_assertions).then(|| "127.0.0.1:6060".to_owned());
         assert_eq!(args.profile_http, expected_profile);
+        assert_eq!(args.profile_token, None);
     }
 
     #[test]
@@ -379,6 +401,19 @@ mod tests {
             ])
             .is_err()
         );
+        let args = parse(&[
+            "--profile-http",
+            "0.0.0.0:6060",
+            "--profile-token",
+            "secret",
+            "game.gblorb",
+        ])
+        .unwrap()
+        .unwrap();
+        assert_eq!(args.profile_token, Some("secret".to_owned()));
+        assert!(parse(&["--profile-token"]).is_err());
+        assert!(parse(&["--profile-token", ""]).is_err());
+        assert!(parse(&["--profile-token", "a", "--profile-token", "b"]).is_err());
     }
 
     #[test]

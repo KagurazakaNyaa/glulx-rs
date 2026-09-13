@@ -72,10 +72,13 @@ impl Drop for Server {
 }
 
 /// Start a local profiling endpoint at `address`.
-pub fn start(address: &str) -> io::Result<Server> {
+pub fn start(address: &str, configured_token: Option<&str>) -> io::Result<Server> {
+    let token = resolve_token(configured_token)?;
     let listener = TcpListener::bind(address)?;
     listener.set_nonblocking(true)?;
     let address = listener.local_addr()?;
+    require_token_for_address(address, token.as_deref())?;
+    let token = Arc::new(token);
     crate::diagnostics::initialize();
     #[cfg(windows)]
     if let Err(error) = etw::start() {
@@ -94,12 +97,18 @@ pub fn start(address: &str) -> io::Result<Server> {
                     Err(error) => (None, Some(error)),
                 };
                 let _ = ready_sender.send(native_error);
-                serve(listener, thread_stop, guard, Arc::new(Mutex::new(())));
+                serve(
+                    listener,
+                    thread_stop,
+                    guard,
+                    Arc::new(Mutex::new(())),
+                    token,
+                );
             }
             #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             {
                 let _ = ready_sender.send(None);
-                serve(listener, thread_stop, Arc::new(Mutex::new(())));
+                serve(listener, thread_stop, Arc::new(Mutex::new(())), token);
             }
         })?;
     match ready_receiver.recv_timeout(Duration::from_secs(5)) {
@@ -136,6 +145,7 @@ fn serve(
     stop: Arc<AtomicBool>,
     guard: Option<NativeGuard>,
     capture: Arc<Mutex<()>>,
+    token: Arc<Option<String>>,
 ) {
     let guard = Arc::new(Mutex::new(guard));
     while !stop.load(Ordering::Acquire) {
@@ -144,7 +154,9 @@ fn serve(
                 let guard = Arc::clone(&guard);
                 let stop = Arc::clone(&stop);
                 let capture = Arc::clone(&capture);
-                let _ = thread::spawn(move || handle_connection(stream, guard, stop, capture));
+                let token = Arc::clone(&token);
+                let _ =
+                    thread::spawn(move || handle_connection(stream, guard, stop, capture, token));
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 thread::sleep(SHUTDOWN_POLL);
@@ -158,13 +170,19 @@ fn serve(
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn serve(listener: TcpListener, stop: Arc<AtomicBool>, capture: Arc<Mutex<()>>) {
+fn serve(
+    listener: TcpListener,
+    stop: Arc<AtomicBool>,
+    capture: Arc<Mutex<()>>,
+    token: Arc<Option<String>>,
+) {
     while !stop.load(Ordering::Acquire) {
         match listener.accept() {
             Ok((stream, _)) => {
                 let stop = Arc::clone(&stop);
                 let capture = Arc::clone(&capture);
-                let _ = thread::spawn(move || handle_connection(stream, stop, capture));
+                let token = Arc::clone(&token);
+                let _ = thread::spawn(move || handle_connection(stream, stop, capture, token));
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 thread::sleep(SHUTDOWN_POLL);
@@ -183,6 +201,7 @@ fn handle_connection(
     guard: Arc<Mutex<Option<NativeGuard>>>,
     stop: Arc<AtomicBool>,
     capture: Arc<Mutex<()>>,
+    token: Arc<Option<String>>,
 ) {
     if let Err(error) = stream.set_read_timeout(Some(REQUEST_TIMEOUT)) {
         crate::diagnostics::record(format_args!("profile_http timeout_error={error}"));
@@ -200,11 +219,20 @@ fn handle_connection(
             return;
         }
     };
+    if !request_authorized(&request, token.as_ref().as_deref()) {
+        let _ = write_unauthorized(&mut stream);
+        return;
+    }
     dispatch(&mut stream, &request, &guard, &stop, &capture);
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn handle_connection(mut stream: TcpStream, stop: Arc<AtomicBool>, capture: Arc<Mutex<()>>) {
+fn handle_connection(
+    mut stream: TcpStream,
+    stop: Arc<AtomicBool>,
+    capture: Arc<Mutex<()>>,
+    token: Arc<Option<String>>,
+) {
     if let Err(error) = stream.set_read_timeout(Some(REQUEST_TIMEOUT)) {
         crate::diagnostics::record(format_args!("profile_http timeout_error={error}"));
         return;
@@ -221,7 +249,49 @@ fn handle_connection(mut stream: TcpStream, stop: Arc<AtomicBool>, capture: Arc<
             return;
         }
     };
+    if !request_authorized(&request, token.as_ref().as_deref()) {
+        let _ = write_unauthorized(&mut stream);
+        return;
+    }
     dispatch(&mut stream, &request, &stop, &capture);
+}
+
+fn resolve_token(configured_token: Option<&str>) -> io::Result<Option<String>> {
+    if let Some(token) = configured_token {
+        if token.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "profiling token must not be empty",
+            ));
+        }
+        return Ok(Some(token.to_owned()));
+    }
+    let Some(value) = std::env::var_os("GLULX_PROFILE_TOKEN") else {
+        return Ok(None);
+    };
+    let token = value.into_string().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "GLULX_PROFILE_TOKEN must be valid UTF-8",
+        )
+    })?;
+    if token.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "GLULX_PROFILE_TOKEN must not be empty",
+        ));
+    }
+    Ok(Some(token))
+}
+
+fn require_token_for_address(address: SocketAddr, token: Option<&str>) -> io::Result<()> {
+    if !address.ip().is_loopback() && token.is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a profiling token is required for non-loopback addresses",
+        ));
+    }
+    Ok(())
 }
 
 fn read_request(stream: &mut TcpStream) -> io::Result<String> {
@@ -247,6 +317,40 @@ fn read_request(stream: &mut TcpStream) -> io::Result<String> {
     }
     String::from_utf8(request)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "request is not UTF-8"))
+}
+
+fn request_authorized(request: &str, expected: Option<&str>) -> bool {
+    let Some(expected) = expected else {
+        return true;
+    };
+    request
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split_once(':'))
+        .find_map(|(name, value)| {
+            name.eq_ignore_ascii_case("authorization")
+                .then(|| bearer_token(value.trim()))
+        })
+        .flatten()
+        .is_some_and(|provided| constant_time_eq(expected.as_bytes(), provided.as_bytes()))
+}
+
+fn bearer_token(value: &str) -> Option<&str> {
+    let mut parts = value.split_ascii_whitespace();
+    let scheme = parts.next()?;
+    let token = parts.next()?;
+    (scheme.eq_ignore_ascii_case("Bearer") && parts.next().is_none()).then_some(token)
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    let mut difference = left.len() ^ right.len();
+    for index in 0..left.len().max(right.len()) {
+        difference |= usize::from(
+            left.get(index).copied().unwrap_or_default()
+                ^ right.get(index).copied().unwrap_or_default(),
+        );
+    }
+    difference == 0
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -555,6 +659,7 @@ fn write_response(
         400 => "Bad Request",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        401 => "Unauthorized",
         403 => "Forbidden",
         500 => "Internal Server Error",
         501 => "Not Implemented",
@@ -563,6 +668,16 @@ fn write_response(
     write!(
         stream,
         "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n",
+        body.len()
+    )?;
+    stream.write_all(body)
+}
+
+fn write_unauthorized(stream: &mut TcpStream) -> io::Result<()> {
+    let body = b"profiling token required\n";
+    write!(
+        stream,
+        "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n",
         body.len()
     )?;
     stream.write_all(body)
@@ -611,11 +726,49 @@ mod tests {
         assert!(profile_seconds("seconds=bad").is_err());
     }
 
+    #[test]
+    fn bearer_auth_requires_the_configured_token() {
+        let request = "GET /debug/metrics HTTP/1.1\r\nAuthorization: Bearer secret\r\n\r\n";
+        assert!(request_authorized(request, None));
+        assert!(request_authorized(request, Some("secret")));
+        assert!(request_authorized(
+            "GET / HTTP/1.1\nAuthorization: bEaReR secret\n\n",
+            Some("secret")
+        ));
+        assert!(!request_authorized(request, Some("other")));
+        assert!(!request_authorized(
+            "GET / HTTP/1.1\r\nAuthorization: Basic secret\r\n\r\n",
+            Some("secret")
+        ));
+        assert!(!request_authorized(
+            "GET / HTTP/1.1\r\nAuthorization: Bearer secret extra\r\n\r\n",
+            Some("secret")
+        ));
+    }
+
+    #[test]
+    fn configured_tokens_must_not_be_empty() {
+        assert_eq!(
+            resolve_token(Some("secret")).unwrap(),
+            Some("secret".to_owned())
+        );
+        assert!(resolve_token(Some("")).is_err());
+    }
+
+    #[test]
+    fn non_loopback_addresses_require_authentication() {
+        let remote: SocketAddr = "0.0.0.0:6060".parse().unwrap();
+        let loopback: SocketAddr = "127.0.0.1:6060".parse().unwrap();
+        assert!(require_token_for_address(remote, None).is_err());
+        assert!(require_token_for_address(remote, Some("secret")).is_ok());
+        assert!(require_token_for_address(loopback, None).is_ok());
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     #[ignore = "requires local socket permissions"]
     fn server_serves_a_json_metrics_snapshot() {
-        let server = start("127.0.0.1:0").expect("native profiler should start");
+        let server = start("127.0.0.1:0", None).expect("native profiler should start");
         let mut stream = TcpStream::connect(server.address()).unwrap();
         stream
             .write_all(b"GET /debug/metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")

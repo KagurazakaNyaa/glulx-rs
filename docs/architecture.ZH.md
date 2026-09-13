@@ -4,6 +4,9 @@
 
 解释器使用 Rust 实现，运行时不依赖 C 解释器。Eframe/egui 提供 Windows、Linux 和 macOS GUI；同一个可执行文件还提供面向行输入的无界面自动化适配器。交互 TTY 使用完整终端显示/输入宿主。
 
+Profiling HTTP 默认只监听回环地址；`--profile-http ADDRESS` 也可以绑定非回环接口，但必须配置
+`--profile-token TOKEN` 或 `GLULX_PROFILE_TOKEN`，客户端使用 `Authorization: Bearer TOKEN`。
+
 ## 模块
 
 `Story` 校验可执行文件头和内存布局，解析 Blorb 资源索引，并提供元数据和封面资源。执行映像与 `Memory` 的初始映像基线共享；文件加载在可能时转移已拥有的容器字节，内嵌 Blorb 的容器 backing buffer 与执行映像视图共享。`Memory` 只保存从 RAMSTART 开始的按页写时复制可写范围，未修改页直接从共享初始映像或零页读取，ROM 直接从共享初始映像读取，同时实施 ROM 写保护、地址检查和有界分配策略。

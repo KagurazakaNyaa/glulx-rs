@@ -62,6 +62,21 @@ Debug builds start a local profiling and observability HTTP endpoint at
 cargo run --release -- --profile-http 127.0.0.1:6060 path/to/story.gblorb
 ```
 
+The address is passed directly to the listener and may be a non-loopback
+address. Non-loopback listeners require authentication; provide
+`--profile-token TOKEN` or set `GLULX_PROFILE_TOKEN` in the environment. Send
+the token as `Authorization: Bearer TOKEN`:
+
+```sh
+GLULX_PROFILE_TOKEN="replace-with-a-secret" \
+  cargo run --release -- --profile-http 0.0.0.0:6060 path/to/story.gblorb
+curl -H 'Authorization: Bearer replace-with-a-secret' \
+  http://127.0.0.1:6060/debug/metrics
+```
+
+Loopback listeners may remain unauthenticated for local debugging. Tokens are
+bearer credentials; keep them out of shared command history and logs.
+
 Open `/debug/pprof/` in a browser, or fetch `/debug/metrics` for a JSON snapshot
 of VM state, run timing, decode-cache use and opcode counts. On Linux and macOS,
 `/debug/pprof/profile` returns a protobuf profile accepted by the `pprof` tool and
@@ -78,8 +93,8 @@ The endpoint first tries WPR with the current token. If Windows reports that
 system-profile privilege is missing, it starts a short-lived capture helper with
 UAC; only that helper is elevated, and denying the prompt returns HTTP 403.
 ETW capture is capped at 60 seconds and 256 MiB. Because a remote request can
-trigger the UAC prompt, bind the server only to a trusted network; use loopback
-when collecting local data.
+trigger the UAC prompt, use a token and bind the server only to a trusted
+network; use loopback when collecting local data.
 
 The game canvas and the **Log and input** companion both accept commands. Only the
 focused viewport owns keyboard submission, so showing the companion cannot submit a
