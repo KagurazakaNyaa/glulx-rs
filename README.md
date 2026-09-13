@@ -73,8 +73,9 @@ Set the `profiling` object to enable it:
 Non-loopback listeners require `token`; clients send it as
 `Authorization: Bearer TOKEN`. Loopback listeners may remain unauthenticated
 for local debugging. Tokens are bearer credentials; keep them out of shared
-logs. The `enabled` and `sampling` switches control the listener and native
-CPU sampler respectively; changes take effect after restarting the player.
+logs. The `enabled` and `sampling` switches control the listener and the
+platform ETW marker provider respectively; changes take effect after
+restarting the player.
 
 Open `/debug/pprof/` in a browser, or fetch `/debug/metrics` for a JSON snapshot
 of VM state, run timing, decode-cache use and opcode counts. On Linux and macOS,
@@ -83,11 +84,15 @@ of VM state, run timing, decode-cache use and opcode counts. On Linux and macOS,
 300) to collect a fresh bounded sampling window; without it, the response is a
 snapshot of the current run. pprof-rs uses POSIX sampling
 signals and therefore is not the Windows sampler. Windows registers an ETW
-provider (see `/debug/etw`) so WPR/WPA CPU samples can be correlated with VM
-slice markers. `/debug/etw/profile?seconds=N` asks `wpr.exe` for a bounded ETL
-CPU capture (WPR must be installed and may require tracing privileges); open the
-result in WPA and filter to `glulx-rs.exe`. The JSON metrics endpoints include
-the VM counters needed for story-route comparisons.
+provider (see `/debug/etw`) for process-filtered TraceLogging markers and call
+stacks. `/debug/etw/profile?seconds=N` asks `wpr.exe` for a bounded ETL using a
+custom WPR profile whose provider GUID is derived from the current process PID;
+`ProcessExeFilter` is retained as defense in depth (WPR must be installed and
+may require tracing privileges). This result is a process-scoped marker and
+call-stack trace; it does not include kernel `SampledProfile` CPU samples. Use
+`/debug/metrics` for VM/UI timings, or run a separate WPR CPU profile and filter
+it to `glulx-rs.exe` in WPA when system CPU samples are required. The JSON
+metrics endpoints include the VM counters needed for story-route comparisons.
 The endpoint first tries WPR with the current token. If Windows reports that
 system-profile privilege is missing, it starts a short-lived capture helper with
 UAC; only that helper is elevated, and denying the prompt returns HTTP 403.

@@ -59,7 +59,7 @@ Profiling 配置保存在可执行文件旁的 `glulx-settings.json`。Debug 构
 
 非回环监听必须配置 `token`；客户端使用 `Authorization: Bearer TOKEN` 请求。
 回环监听可以不认证，适合本机调试。Token 是 bearer 凭据，不要放入共享日志。
-`enabled` 和 `sampling` 分别控制监听和本机 CPU 采样；修改后重启播放器生效。
+`enabled` 和 `sampling` 分别控制监听和平台 ETW 标记 provider；修改后重启播放器生效。
 
 在浏览器打开 `/debug/pprof/`，或请求 `/debug/metrics` 获取 VM 状态、时间片耗时、
 解码缓存命中率和 opcode 计数的 JSON 快照。Linux 和 macOS 上，
@@ -67,8 +67,10 @@ Profiling 配置保存在可执行文件旁的 `glulx-settings.json`。Debug 构
 `/debug/pprof/flamegraph` 返回 SVG 火焰图；添加 `?seconds=N`（最多 300 秒）可采集新的
 有限时间窗口，不带参数时返回当前运行的累计快照。pprof-rs 依赖 POSIX 采样信号，
 因此 Windows 不提供这两个原生采样接口；Windows 会注册 ETW provider（见 `/debug/etw`），
-可配合 WPR/WPA 的 CPU 采样与 VM 时间片标记关联。请求 `/debug/etw/profile?seconds=N` 会调用
-`wpr.exe` 返回有界 ETL（需要安装 WPR，可能需要追踪权限），可在 WPA 中按 `glulx-rs.exe` 过滤。
+用于进程过滤的 TraceLogging 标记和调用栈。请求 `/debug/etw/profile?seconds=N` 会调用 provider GUID
+由当前进程 PID 派生的自定义 WPR profile，`ProcessExeFilter` 作为第二层保护（需要安装 WPR，可能需要
+追踪权限）。该 ETL 不包含内核 `SampledProfile` CPU 采样；VM/UI 耗时应读取
+`/debug/metrics`，需要系统 CPU 样本时另行启动 WPR CPU profile 并在 WPA 中按 `glulx-rs.exe` 过滤。
 接口先尝试用当前权限启动 WPR；只有 Windows 报告缺少系统性能权限时，才通过 UAC 启动短时 helper。
 只有 helper 提权，拒绝 UAC 会返回 HTTP 403。单次采集最多 60 秒、ETL 最大 256 MiB。
 远程 HTTP 请求可以触发 UAC 提示，因此应在配置中设置 token 并只监听可信网络；本机采集请绑定回环地址。

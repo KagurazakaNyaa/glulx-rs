@@ -1,8 +1,8 @@
 //! Local HTTP profiling and VM observability.
 //!
 //! The HTTP server owns the native pprof guard so the VM remains owned by its
-//! event-loop thread. On Windows, ETW markers are registered for external
-//! WPR/WPA CPU sampling; the metrics and VM counters remain available there.
+//! event-loop thread. On Windows, ETW markers are registered for the
+//! process-filtered WPR trace; the metrics and VM counters remain available.
 
 use std::{
     io::{self, Read, Write},
@@ -32,13 +32,19 @@ const MAX_ETW_CAPTURE_SECONDS: u64 = 60;
 #[cfg(windows)]
 #[doc(hidden)]
 pub fn run_etw_capture_helper(arguments: &[std::ffi::OsString]) -> i32 {
-    if arguments.len() != 2 {
+    if arguments.len() != 3 {
         return 2;
     }
     let Some(seconds) = arguments[0].to_str() else {
         return 2;
     };
-    let result = etw::run_elevated_helper(seconds, std::path::Path::new(&arguments[1]));
+    let Some(process_id) = arguments[2]
+        .to_str()
+        .and_then(|value| value.parse::<u32>().ok())
+    else {
+        return 2;
+    };
+    let result = etw::run_elevated_helper(seconds, std::path::Path::new(&arguments[1]), process_id);
     i32::from(result.is_err())
 }
 
