@@ -1093,6 +1093,32 @@ mod tests {
     }
 
     #[test]
+    fn italic_word_visuals_stay_inside_their_logical_width() {
+        let context = egui::Context::default();
+        let output = context.run_ui(egui::RawInput::default(), |context| {
+            egui::CentralPanel::default().show(context, |ui| {
+                for text in ["game.", "million", "jewellery", "imagination."] {
+                    let (galley, _) = measure(ui, RichText::new(text).size(18.0).italics());
+                    let row = &galley.rows[0];
+                    assert!(
+                        row.visuals.mesh_bounds.right() <= row.size.x + 0.01,
+                        "italic word {text:?} overflows its logical width: mesh={:?}, row={:?}",
+                        row.visuals.mesh_bounds,
+                        row.size
+                    );
+                    assert!(
+                        galley.size().x + 0.01 >= row.visuals.mesh_bounds.right(),
+                        "italic word {text:?} galley width is stale: galley={:?}, mesh={:?}",
+                        galley.size(),
+                        row.visuals.mesh_bounds
+                    );
+                }
+            });
+        });
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
     fn image_rules_recompute_on_resize_and_unlimited_images_can_be_clipped() {
         let context = egui::Context::default();
         let output = context.run_ui(egui::RawInput::default(), |context| {

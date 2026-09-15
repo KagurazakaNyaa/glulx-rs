@@ -286,11 +286,12 @@ pub(super) fn repair_italic_galley(mut galley: Arc<egui::Galley>) -> Arc<egui::G
     let needs_repair = galley.rows.iter().any(|placed| {
         let vertices =
             &placed.row.visuals.mesh.vertices[placed.row.visuals.glyph_vertex_range.clone()];
-        vertices.as_chunks::<4>().0.iter().any(|vertices| {
+        let has_self_intersection = vertices.as_chunks::<4>().0.iter().any(|vertices| {
             let width = vertices[3].pos.x - vertices[2].pos.x;
             let shift = vertices[0].pos.x - vertices[2].pos.x;
             shift > (width - minimum_clearance).max(0.0)
-        })
+        });
+        has_self_intersection || placed.row.visuals.mesh_bounds.right() > placed.row.size.x
     });
     if !needs_repair {
         return galley;
@@ -298,6 +299,7 @@ pub(super) fn repair_italic_galley(mut galley: Arc<egui::Galley>) -> Arc<egui::G
 
     let galley_mut = Arc::make_mut(&mut galley);
     let mut mesh_bounds = egui::Rect::NOTHING;
+    let mut rect_right = galley_mut.rect.max.x;
     for placed in &mut galley_mut.rows {
         let row = Arc::make_mut(&mut placed.row);
         {
@@ -314,8 +316,14 @@ pub(super) fn repair_italic_galley(mut galley: Arc<egui::Galley>) -> Arc<egui::G
             }
         }
         row.visuals.mesh_bounds = row.visuals.mesh.calc_bounds();
+        // Faux italics overhang the advance width at the top of a glyph. The
+        // visual width must participate in the caller's wrapping and clipping
+        // decisions or the last glyph in a line can be cut in half.
+        row.size.x = row.size.x.max(row.visuals.mesh_bounds.right());
+        rect_right = rect_right.max(placed.pos.x + row.size.x);
         mesh_bounds |= row.visuals.mesh_bounds.translate(placed.pos.to_vec2());
     }
+    galley_mut.rect.max.x = rect_right;
     galley_mut.mesh_bounds = mesh_bounds;
     galley
 }
