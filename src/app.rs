@@ -35,6 +35,8 @@ const STORAGE_KEY: &str = "glulx-rs-settings";
 const MAX_DESKTOP_SNAPSHOT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_TRANSCRIPT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TRANSCRIPT_LINES: usize = 100_000;
+// Leave part of a 60 Hz frame for input and presentation while a story runs.
+const VM_SLICE_BUDGET: std::time::Duration = std::time::Duration::from_millis(12);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -2143,7 +2145,7 @@ fn run_vm_slice(vm: &mut Vm) -> Result<RunState, crate::VmError> {
         let state = vm.run_presentation_steps(1024)?;
         if state != RunState::Running
             || vm.presentation_revision() != revision
-            || started.elapsed() >= std::time::Duration::from_millis(8)
+            || started.elapsed() >= VM_SLICE_BUDGET
         {
             return Ok(state);
         }

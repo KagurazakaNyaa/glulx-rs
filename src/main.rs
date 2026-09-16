@@ -210,7 +210,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_min_inner_size([720.0, 480.0])
             .with_drag_and_drop(true),
         glow_options: eframe::egui_glow::GlowConfiguration {
-            vsync: false,
+            vsync: true,
             ..Default::default()
         },
         ..Default::default()

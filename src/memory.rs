@@ -275,6 +275,7 @@ impl Memory {
         self.ram_start
     }
 
+    #[inline(always)]
     pub fn read8(&self, address: u32) -> Result<u8, VmError> {
         if address < self.ram_start {
             self.initial
@@ -290,9 +291,24 @@ impl Memory {
         }
     }
 
+    #[inline(always)]
     pub fn read16(&self, address: u32) -> Result<u16, VmError> {
-        if let Ok(raw) = self.slice(address, 2) {
-            return Ok(u16::from_be_bytes(raw.try_into().expect("length checked")));
+        if let Some(end) = address.checked_add(2)
+            && end <= self.ram_start
+        {
+            let raw = &self.initial[address as usize..end as usize];
+            return Ok(u16::from_be_bytes([raw[0], raw[1]]));
+        }
+        if let Some(end) = address.checked_add(2)
+            && address >= self.ram_start
+            && end <= self.len()
+        {
+            let offset = (address - self.ram_start) as usize;
+            let within = offset & (PAGE_SIZE - 1);
+            if within <= PAGE_SIZE - 2 {
+                let page = self.current_page(offset / PAGE_SIZE);
+                return Ok(u16::from_be_bytes([page[within], page[within + 1]]));
+            }
         }
         let next = address.checked_add(1).ok_or(VmError::MemoryRead(address))?;
         Ok(u16::from_be_bytes([
@@ -301,9 +317,29 @@ impl Memory {
         ]))
     }
 
+    #[inline(always)]
     pub fn read32(&self, address: u32) -> Result<u32, VmError> {
-        if let Ok(raw) = self.slice(address, 4) {
-            return Ok(u32::from_be_bytes(raw.try_into().expect("length checked")));
+        if let Some(end) = address.checked_add(4)
+            && end <= self.ram_start
+        {
+            let raw = &self.initial[address as usize..end as usize];
+            return Ok(u32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]));
+        }
+        if let Some(end) = address.checked_add(4)
+            && address >= self.ram_start
+            && end <= self.len()
+        {
+            let offset = (address - self.ram_start) as usize;
+            let within = offset & (PAGE_SIZE - 1);
+            if within <= PAGE_SIZE - 4 {
+                let page = self.current_page(offset / PAGE_SIZE);
+                return Ok(u32::from_be_bytes([
+                    page[within],
+                    page[within + 1],
+                    page[within + 2],
+                    page[within + 3],
+                ]));
+            }
         }
         let end = address.checked_add(3).ok_or(VmError::MemoryRead(address))?;
         Ok(u32::from_be_bytes([
@@ -599,6 +635,7 @@ impl Memory {
         }
     }
 
+    #[inline(always)]
     fn baseline_page(&self, address: u32) -> &[u8] {
         if address < self.ext_start {
             &self.initial[address as usize..address as usize + PAGE_SIZE]
@@ -607,11 +644,13 @@ impl Memory {
         }
     }
 
+    #[inline(always)]
     fn current_page(&self, index: usize) -> &[u8] {
-        let address = self.ram_start + (index * PAGE_SIZE) as u32;
-        self.pages[index]
-            .as_ref()
-            .map_or_else(|| self.baseline_page(address), |page| page.as_slice())
+        if let Some(page) = self.pages[index].as_ref() {
+            page.as_slice()
+        } else {
+            self.baseline_page(self.ram_start + (index * PAGE_SIZE) as u32)
+        }
     }
 
     fn ensure_page(&mut self, index: usize) -> &mut [u8] {
@@ -877,6 +916,42 @@ mod tests {
                 elapsed.as_secs_f64() * 1_000_000_000.0 / dirty_pages as f64
             );
         }
+    }
+
+    #[test]
+    #[ignore = "manual performance measurement"]
+    fn benchmark_memory_read_paths() {
+        let mut memory = Memory::new_with_limit(&story(), 0x300).unwrap();
+        assert!(memory.resize(0x300).unwrap());
+        memory.write32(0x120, 0x1234_5678).unwrap();
+        let memory = std::hint::black_box(&memory);
+        let iterations = std::hint::black_box(2_000_000u32);
+
+        macro_rules! measure {
+            ($name:literal, $method:ident, $base:expr, $mask:expr) => {{
+                let started = std::time::Instant::now();
+                let mut checksum = 0u32;
+                for index in 0..iterations {
+                    let address = $base + (index & $mask);
+                    checksum ^= std::hint::black_box(memory.$method(address).unwrap() as u32);
+                }
+                let elapsed = started.elapsed();
+                std::hint::black_box(checksum);
+                eprintln!(
+                    "BENCHMARK name=memory_read path={} iterations={iterations} elapsed_ns={} ns_per_iteration={:.3}",
+                    $name,
+                    elapsed.as_nanos(),
+                    elapsed.as_secs_f64() * 1_000_000_000.0 / iterations as f64
+                );
+            }};
+        }
+
+        measure!("rom16", read16, 0x40, 0x1e);
+        measure!("ram16", read16, 0x120, 0x1e);
+        measure!("cross16", read16, 0x1ff, 0);
+        measure!("rom32", read32, 0x40, 0x1c);
+        measure!("ram32", read32, 0x120, 0x1c);
+        measure!("cross32", read32, 0x1fd, 0);
     }
 
     #[test]

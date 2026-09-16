@@ -1969,6 +1969,7 @@ impl Vm {
         Ok(value)
     }
 
+    #[inline(always)]
     fn load_operand(&mut self, operand: &Operand, width: Width) -> Result<u32, VmError> {
         match operand {
             Operand::Zero => Ok(0),
@@ -2013,6 +2014,7 @@ impl Vm {
         }
     }
 
+    #[inline(always)]
     fn store_operand(
         &mut self,
         operand: &Operand,
@@ -2023,6 +2025,7 @@ impl Vm {
         self.store_destination(&destination, value, width)
     }
 
+    #[inline(always)]
     fn destination(&self, operand: &Operand) -> Result<Destination, VmError> {
         match operand {
             Operand::Zero => Ok(Destination::Discard),
@@ -2033,6 +2036,7 @@ impl Vm {
         }
     }
 
+    #[inline(always)]
     fn store_destination(
         &mut self,
         destination: &Destination,
