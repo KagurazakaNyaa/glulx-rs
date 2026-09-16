@@ -597,6 +597,7 @@ impl Stack {
         self.refresh_frame_bounds()
     }
 
+    #[inline(always)]
     fn checked_local_address(&self, offset: u32, width: Width) -> Result<u32, VmError> {
         let address = self
             .locals_base
@@ -617,6 +618,7 @@ impl Stack {
         Ok(address)
     }
 
+    #[inline(always)]
     fn read_local(&self, offset: u32, width: Width) -> Result<u32, VmError> {
         let address = self.checked_local_address(offset, width)? as usize;
         match width {
@@ -629,18 +631,17 @@ impl Stack {
             Width::Short => self
                 .bytes
                 .get(address..address + 2)
-                .and_then(|bytes| bytes.try_into().ok())
-                .map(|bytes| u16::from_be_bytes(bytes) as u32)
+                .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]) as u32)
                 .ok_or(VmError::StackUnderflow),
             Width::Word => self
                 .bytes
                 .get(address..address + 4)
-                .and_then(|bytes| bytes.try_into().ok())
-                .map(u32::from_be_bytes)
+                .map(|bytes| u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
                 .ok_or(VmError::StackUnderflow),
         }
     }
 
+    #[inline(always)]
     fn write_local(&mut self, offset: u32, value: u32, width: Width) -> Result<(), VmError> {
         let address = self.checked_local_address(offset, width)? as usize;
         match width {
@@ -1237,26 +1238,43 @@ impl Vm {
                 let offset = load!(0);
                 self.branch(offset)?;
             }
-            0x22..=0x2d => {
+            0x22 => {
+                let value = load!(0);
+                let offset = load!(1);
+                if value == 0 {
+                    self.branch(offset)?;
+                }
+            }
+            0x23 => {
+                let value = load!(0);
+                let offset = load!(1);
+                if value != 0 {
+                    self.branch(offset)?;
+                }
+            }
+            0x26 => {
+                let a = load!(0) as i32;
+                let b = load!(1) as i32;
+                let offset = load!(2);
+                if a < b {
+                    self.branch(offset)?;
+                }
+            }
+            0x24..=0x25 | 0x27..=0x2d => {
                 let a = load!(0);
-                let (condition, offset) = if opcode <= 0x23 {
-                    (if opcode == 0x22 { a == 0 } else { a != 0 }, load!(1))
-                } else {
-                    let b = load!(1);
-                    let condition = match opcode {
-                        0x24 => a == b,
-                        0x25 => a != b,
-                        0x26 => (a as i32) < (b as i32),
-                        0x27 => (a as i32) >= (b as i32),
-                        0x28 => (a as i32) > (b as i32),
-                        0x29 => (a as i32) <= (b as i32),
-                        0x2a => a < b,
-                        0x2b => a >= b,
-                        0x2c => a > b,
-                        _ => a <= b,
-                    };
-                    (condition, load!(2))
+                let b = load!(1);
+                let condition = match opcode {
+                    0x24 => a == b,
+                    0x25 => a != b,
+                    0x27 => (a as i32) >= (b as i32),
+                    0x28 => (a as i32) > (b as i32),
+                    0x29 => (a as i32) <= (b as i32),
+                    0x2a => a < b,
+                    0x2b => a >= b,
+                    0x2c => a > b,
+                    _ => a <= b,
                 };
+                let offset = load!(2);
                 if condition {
                     self.branch(offset)?;
                 }
@@ -1326,13 +1344,18 @@ impl Vm {
                 let value = load!(0) as i8 as i32 as u32;
                 store!(1, value);
             }
-            0x48..=0x4b => {
+            0x48 => {
+                let base = load!(0);
+                let index = load!(1) as i32;
+                let value = self
+                    .memory
+                    .read32(base.wrapping_add((index as u32).wrapping_mul(4)))?;
+                store!(2, value);
+            }
+            0x49..=0x4b => {
                 let base = load!(0);
                 let index = load!(1) as i32;
                 let value = match opcode {
-                    0x48 => self
-                        .memory
-                        .read32(base.wrapping_add((index as u32).wrapping_mul(4)))?,
                     0x49 => self
                         .memory
                         .read16(base.wrapping_add((index as u32).wrapping_mul(2)))?
@@ -1642,7 +1665,13 @@ impl Vm {
                     self.linked_search(key, key_size, start, key_offset, next_offset, options)?;
                 store!(6, result);
             }
-            0x160..=0x163 => {
+            0x162 => {
+                let address = load!(0);
+                let arguments = [load!(1), load!(2)];
+                let destination = self.destination(&operands[3])?;
+                self.call(address, &arguments, destination)?;
+            }
+            0x160..=0x161 | 0x163 => {
                 let address = load!(0);
                 let argument_count = (opcode - 0x160) as usize;
                 let mut arguments = [0; 3];

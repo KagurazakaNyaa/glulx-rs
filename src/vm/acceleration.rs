@@ -5,10 +5,63 @@
 
 use super::*;
 
+const PROPERTY_CACHE_SIZE: usize = 1024;
+
+#[derive(Clone, Copy, Default)]
+struct PropertyCacheEntry {
+    table: u32,
+    id: u16,
+    modern: bool,
+    value: u32,
+    valid: bool,
+}
+
+struct PropertyCache {
+    entries: Box<[PropertyCacheEntry]>,
+}
+
+impl Default for PropertyCache {
+    fn default() -> Self {
+        Self {
+            entries: vec![PropertyCacheEntry::default(); PROPERTY_CACHE_SIZE].into_boxed_slice(),
+        }
+    }
+}
+
+impl PropertyCache {
+    #[inline(always)]
+    fn index(table: u32, id: u16, modern: bool) -> usize {
+        let hash = table.rotate_left(13)
+            ^ u32::from(id).wrapping_mul(0x9e37_79b9)
+            ^ u32::from(modern).wrapping_mul(0x85eb_ca6b);
+        hash as usize & (PROPERTY_CACHE_SIZE - 1)
+    }
+
+    #[inline(always)]
+    fn get(&self, table: u32, id: u16, modern: bool) -> Option<u32> {
+        let entry = &self.entries[Self::index(table, id, modern)];
+        (entry.valid && entry.table == table && entry.id == id && entry.modern == modern)
+            .then_some(entry.value)
+    }
+
+    #[inline(always)]
+    fn insert(&mut self, table: u32, id: u16, modern: bool, value: u32) {
+        self.entries[Self::index(table, id, modern)] = PropertyCacheEntry {
+            table,
+            id,
+            modern,
+            value,
+            valid: true,
+        };
+    }
+}
+
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 pub(super) struct Acceleration {
     pub(super) functions: BTreeMap<u32, u32>,
     parameters: [u32; 9],
+    #[serde(skip)]
+    property_cache: PropertyCache,
 }
 
 pub(super) fn supported(index: u32) -> bool {
@@ -123,7 +176,7 @@ impl Vm {
     }
 
     fn accel_property_table_unchecked(
-        &self,
+        &mut self,
         obj: u32,
         id: u32,
         modern: bool,
@@ -137,19 +190,33 @@ impl Vm {
         if table == 0 {
             return Ok(0);
         }
+        let key = id as u16;
+        let cacheable = table < self.memory.ram_start();
+        if cacheable
+            && let Some(property) = self.acceleration.property_cache.get(table, key, modern)
+        {
+            return Ok(property);
+        }
         let mut low = 0u32;
         let mut high = self.memory.read32(table)?;
-        let key = id as u16;
-        while low < high {
+        let property = loop {
+            if low >= high {
+                break 0;
+            }
             let index = low + (high - low) / 2;
             let entry = table.wrapping_add(4).wrapping_add(index.wrapping_mul(10));
             match self.memory.read16(entry)?.cmp(&key) {
                 Ordering::Less => low = index + 1,
                 Ordering::Greater => high = index,
-                Ordering::Equal => return Ok(entry),
+                Ordering::Equal => break entry,
             }
+        };
+        if cacheable {
+            self.acceleration
+                .property_cache
+                .insert(table, key, modern, property);
         }
-        Ok(0)
+        Ok(property)
     }
 
     fn accel_property(&mut self, mut obj: u32, mut id: u32, modern: bool) -> Result<u32, VmError> {
@@ -305,6 +372,51 @@ mod tests {
         // Deliberately different fallback, so the tests detect missed dispatch.
         bytes(&mut vm, FUNC, &[0xc1, 0, 0, 0x31, 0x01, 99]);
         vm
+    }
+
+    fn vm_with_rom_property_table(attributes: u32) -> Vm {
+        let mut image = image_with_program(&[0x81, 0x20]);
+        image[0x80..0x84].copy_from_slice(&1u32.to_be_bytes());
+        property_bytes(&mut image, 0x84, 2, 1, 0xa00, false);
+        image[32..36].fill(0);
+        let checksum = image
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|word| u32::from_be_bytes(*word))
+            .fold(0u32, u32::wrapping_add);
+        image[32..36].copy_from_slice(&checksum.to_be_bytes());
+
+        let mut vm = Vm::new(Story::from_bytes(&image, None).unwrap()).unwrap();
+        vm.memory.resize(0x2000).unwrap();
+        vm.acceleration.parameters = [
+            0x900, 256, METACLASS, OBJECT, ROUTINE, STRING, 0x940, attributes, 0x1000,
+        ];
+        for obj in [OBJ, CLASS, METACLASS, OBJECT, ROUTINE, STRING] {
+            vm.memory.write8(obj, 0x70).unwrap();
+        }
+        vm.memory
+            .write32(CLASS + 13 + attributes, METACLASS)
+            .unwrap();
+        vm.memory
+            .write32(OBJ + 4 * (3 + attributes / 4), 0x80)
+            .unwrap();
+        vm.memory.write32(0xa00, CLASS).unwrap();
+        vm
+    }
+
+    fn property_bytes(
+        image: &mut [u8],
+        entry: usize,
+        id: u16,
+        length: u16,
+        address: u32,
+        private: bool,
+    ) {
+        image[entry..entry + 2].copy_from_slice(&id.to_be_bytes());
+        image[entry + 2..entry + 4].copy_from_slice(&length.to_be_bytes());
+        image[entry + 4..entry + 8].copy_from_slice(&address.to_be_bytes());
+        image[entry + 8..entry + 10].copy_from_slice(&u16::from(private).to_be_bytes());
     }
 
     fn property(vm: &mut Vm, entry: u32, id: u16, length: u16, address: u32, private: bool) {
@@ -491,6 +603,44 @@ mod tests {
     }
 
     #[test]
+    fn property_table_cache_reuses_only_immutable_rom_tables() {
+        let mut rom_vm = vm_with_rom_property_table(7);
+        let first = rom_vm
+            .accel_property_table_unchecked(OBJ, 2, false)
+            .unwrap();
+        assert_eq!(first, 0x84);
+        assert_eq!(
+            rom_vm.acceleration.property_cache.get(0x80, 2, false),
+            Some(first)
+        );
+        assert_eq!(
+            rom_vm
+                .accel_property_table_unchecked(OBJ, 2, false)
+                .unwrap(),
+            first
+        );
+
+        let mut ram_vm = vm(7);
+        assert_eq!(
+            ram_vm
+                .accel_property_table_unchecked(OBJ, 10, false)
+                .unwrap(),
+            TABLE + 4 + 10
+        );
+        assert_eq!(
+            ram_vm.acceleration.property_cache.get(TABLE, 10, false),
+            None
+        );
+        ram_vm.memory.write16(TABLE + 4 + 10, 11).unwrap();
+        assert_eq!(
+            ram_vm
+                .accel_property_table_unchecked(OBJ, 10, false)
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
     #[ignore = "manual performance measurement"]
     fn benchmark_accel_ofclass() {
         let mut vm = vm(7);
@@ -504,6 +654,26 @@ mod tests {
         std::hint::black_box(result);
         eprintln!(
             "BENCHMARK name=accel_ofclass iterations={iterations} elapsed_ns={} ns_per_iteration={:.3}",
+            elapsed.as_nanos(),
+            elapsed.as_secs_f64() * 1_000_000_000.0 / iterations as f64
+        );
+    }
+
+    #[test]
+    #[ignore = "manual performance measurement"]
+    fn benchmark_accel_property_table() {
+        let mut vm = vm_with_rom_property_table(7);
+        let iterations = std::hint::black_box(1_000_000usize);
+        let started = std::time::Instant::now();
+        let mut result = 0;
+        for _ in 0..iterations {
+            result ^=
+                std::hint::black_box(vm.accel_property_table_unchecked(OBJ, 2, false).unwrap());
+        }
+        let elapsed = started.elapsed();
+        std::hint::black_box(result);
+        eprintln!(
+            "BENCHMARK name=accel_property_table iterations={iterations} elapsed_ns={} ns_per_iteration={:.3}",
             elapsed.as_nanos(),
             elapsed.as_secs_f64() * 1_000_000_000.0 / iterations as f64
         );
