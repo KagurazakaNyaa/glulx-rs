@@ -35,6 +35,31 @@ cargo run --release -- --headless path/to/story.ulx
 cargo run --release -- --headless --strict-glk path/to/story.ulx
 ```
 
+每次运行都可以选择指令执行后端。默认使用可移植的解释器；jit 启用 native ROM
+trace 后端。故事启动后会异步识别热点路径，并编译短 trace 专属的机器码分发器。
+整数和 float32 运算、分支、内存、栈操作及随机数混合会直接降低为机器码；依赖
+宿主的操作和不符合预期的 trace 分支通过明确的 slow path 执行。trace 尚未完成
+时回退到解释器：
+
+~~~sh
+cargo run --release -- --headless --execution-backend jit path/to/story.ulx
+~~~
+
+图形播放器会在“设置”中持久化执行后端；命令行显式指定的后端只覆盖本次运行。
+
+AOT 缓存默认关闭。请在 glulx-settings.json 中将 aot_cache_dir 配置为明确且可写的
+目录；只有选择 JIT 后端且该设置非空时才激活 AOT。设置为空时绝不会创建 AOT 缓存：
+
+~~~json
+{
+  "execution_backend": "jit",
+  "aot_cache_dir": "<aot-cache-dir>"
+}
+~~~
+
+无界面运行可使用 `--aot-cache-dir <aot-cache-dir>` 提供本次运行的缓存目录；
+只有同时选择 `--execution-backend jit` 时才会使用 AOT。
+
 若需要记录实际交付给故事的事件，可在无界面模式中指定 JSON 输出路径：
 
 ```sh
@@ -98,7 +123,8 @@ File → Choose resources 通过重启故事应用资源选择。交互终端中
 ## 性能与内存额度
 
 请使用 release 或 diagnostic 构建测试游戏速度。解释器的指令操作数解码和搜索比较已去掉临时堆分配。
-仓库提供固定微基准套件：500 万次分支指令分发、16,384 条记录的线性查找重复 1,000 次、4/8/16 KiB 文本输出、64 MiB 内存上的稀疏/密集 dirty-page 快照、16 KiB 冷/热文本布局和 512×384 CPU 画布栅格化。
+仓库提供固定微基准套件：500 万次解释器/native-JIT 指令分发、500 万次分支指令分发、
+16,384 条记录的线性查找重复 1,000 次、4/8/16 KiB 文本输出、64 MiB 内存上的稀疏/密集 dirty-page 快照、16 KiB 冷/热文本布局和 512×384 CPU 画布栅格化。
 基准工具会记录 commit、平台、Rust 版本、总耗时和每次操作耗时；这些指标不代表整款游戏的提速比例。
 当前 Linux release 构建的真实故事启动 workload，对代表性的 650 MB 和 705 MB Blorb 文件测得峰值 HWM 约为 `661620 KiB` 和 `715360 KiB`。这只是启动/驻留内存测量，不是完整游戏基准；硬件、分配器和故事内容都会影响结果。
 

@@ -277,6 +277,34 @@ impl PlayerApp {
         );
         ui.weak(language.text("ui.process_memory_hint"));
         ui.separator();
+        let backend_before = self.settings.execution_backend;
+        ui.heading(language.text("ui.execution_backend"));
+        ui.horizontal(|ui| {
+            ui.radio_value(
+                &mut self.settings.execution_backend,
+                ExecutionBackend::Interpreter,
+                language.text("ui.execution_backend_interpreter"),
+            );
+            ui.radio_value(
+                &mut self.settings.execution_backend,
+                ExecutionBackend::Jit,
+                language.text("ui.execution_backend_jit"),
+            );
+        });
+        ui.weak(language.text("ui.execution_backend_hint"));
+        if backend_before != self.settings.execution_backend {
+            self.execution_backend = self.settings.execution_backend;
+            if let Some(vm) = &mut self.vm {
+                vm.set_execution_backend(self.execution_backend);
+            }
+            self.settings_file.save(&self.settings);
+        }
+        ui.separator();
+        ui.heading(language.text("ui.aot"));
+        ui.label(language.text("ui.aot_cache_directory"));
+        ui.text_edit_singleline(&mut self.settings.aot_cache_dir);
+        ui.weak(language.text("ui.aot_cache_directory_hint"));
+        ui.separator();
         ui.heading(language.text("ui.profiling"));
         ui.checkbox(
             &mut self.settings.profiling.enabled,

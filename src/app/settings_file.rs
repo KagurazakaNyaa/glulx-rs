@@ -124,6 +124,8 @@ mod tests {
         loaded.max_memory_mib = crate::memory_budget::Budget::Fixed(512);
         loaded.max_process_memory_mib = crate::memory_budget::Budget::Percent { percent: 75 };
         loaded.resource_limits.undo_mib = crate::memory_budget::Budget::Fixed(16);
+        loaded.execution_backend = crate::ExecutionBackend::Jit;
+        loaded.aot_cache_dir = "aot-cache".to_owned();
         loaded.language = super::super::LanguagePreference::Chinese;
         assert!(file.save(&loaded));
         let (_, loaded) = SettingsFile::load(Some(path), PlayerSettings::default());
@@ -142,6 +144,8 @@ mod tests {
             loaded.resource_limits.undo_mib,
             crate::memory_budget::Budget::Fixed(16)
         );
+        assert_eq!(loaded.execution_backend, crate::ExecutionBackend::Jit);
+        assert_eq!(loaded.aot_cache_dir, "aot-cache");
         assert_eq!(loaded.language, super::super::LanguagePreference::Chinese);
     }
 
@@ -155,5 +159,22 @@ mod tests {
         assert!(file.error.is_some());
         assert!(!file.save(&settings));
         assert_eq!(fs::read(&path).unwrap(), b"{not valid json");
+    }
+
+    #[test]
+    fn execution_backend_defaults_and_accepts_legacy_variant_names() {
+        let defaulted: PlayerSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            defaulted.execution_backend,
+            crate::ExecutionBackend::Interpreter
+        );
+        let legacy: PlayerSettings =
+            serde_json::from_str(r#"{"execution_backend":"Interpreter"}"#).unwrap();
+        assert_eq!(
+            legacy.execution_backend,
+            crate::ExecutionBackend::Interpreter
+        );
+        let encoded = serde_json::to_string(&crate::ExecutionBackend::Jit).unwrap();
+        assert_eq!(encoded, r#""jit""#);
     }
 }

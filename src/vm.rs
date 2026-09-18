@@ -2,6 +2,8 @@ mod acceleration;
 mod datetime;
 mod events;
 mod grid;
+mod jit;
+mod native;
 mod presentation;
 mod save;
 mod session;
@@ -12,6 +14,7 @@ mod unicode;
 mod windows;
 use events::Request;
 pub use grid::{GRID_CELL_HEIGHT, GRID_CELL_WIDTH, GRID_FONT_SIZE, GridCell};
+pub use jit::ExecutionBackend;
 pub(crate) use presentation::WindowDescriptor;
 pub use presentation::{BufferImage, ResolvedStyle, TextAppearance, TextRun, WindowView};
 #[cfg(test)]
@@ -112,6 +115,15 @@ enum Operand {
     Local(u32),
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct DecodedInstruction {
+    address: u32,
+    next_pc: u32,
+    opcode: u32,
+    operands: [Operand; 8],
+}
+
 enum SearchKey {
     Inline { bytes: [u8; 4], length: usize },
     Owned(Vec<u8>),
@@ -178,6 +190,8 @@ pub(crate) struct OpcodeDiagnostic {
 
 #[derive(serde::Serialize, Debug, Clone)]
 pub(crate) struct VmDiagnosticSnapshot {
+    pub(crate) backend: ExecutionBackend,
+    pub(crate) aot_enabled: bool,
     pub(crate) state: RunState,
     pub(crate) pc: u32,
     pub(crate) instructions: u64,
@@ -197,6 +211,15 @@ pub(crate) struct VmDiagnosticSnapshot {
     pub(crate) requests: usize,
     pub(crate) queued_events: usize,
     pub(crate) graphics_requests: usize,
+    pub(crate) jit_blocks: usize,
+    pub(crate) jit_pending_blocks: usize,
+    pub(crate) jit_block_hits: u64,
+    pub(crate) jit_compiled_blocks: u64,
+    pub(crate) jit_compiled_instructions: u64,
+    pub(crate) jit_compile_requests: u64,
+    pub(crate) jit_compile_results: u64,
+    pub(crate) native_blocks: u64,
+    pub(crate) native_instructions: u64,
     pub(crate) opcode_counts: Vec<OpcodeDiagnostic>,
 }
 
@@ -707,6 +730,16 @@ pub struct Vm {
     #[serde(default)]
     acceleration: acceleration::Acceleration,
     #[serde(default)]
+    execution_backend: ExecutionBackend,
+    #[serde(skip, default)]
+    aot_cache_dir: Option<std::path::PathBuf>,
+    #[serde(skip, default)]
+    jit: jit::JitState,
+    #[serde(skip, default)]
+    native_state: native::NativeState,
+    #[serde(skip, default)]
+    native_state_valid: bool,
+    #[serde(default)]
     accelerated_return: Option<u32>,
     #[serde(default)]
     text_appearance: TextAppearance,
@@ -729,6 +762,10 @@ pub struct Vm {
     presentation_pending: bool,
     #[serde(skip)]
     instructions_executed: u64,
+    #[serde(skip, default)]
+    native_blocks: u64,
+    #[serde(skip, default)]
+    native_instructions: u64,
     #[serde(skip)]
     poll_calls: u64,
     #[serde(skip)]
@@ -785,6 +822,39 @@ pub struct Vm {
 impl Vm {
     pub fn resource_limits(&self) -> crate::memory::ResourceLimits {
         self.resource_limits
+    }
+
+    pub fn execution_backend(&self) -> ExecutionBackend {
+        self.execution_backend
+    }
+
+    pub fn set_aot_cache_dir(&mut self, directory: Option<std::path::PathBuf>) {
+        let directory = directory.filter(|path| !path.as_os_str().is_empty());
+        if self.aot_cache_dir != directory {
+            self.aot_cache_dir = directory;
+            if self.execution_backend == ExecutionBackend::Jit {
+                self.jit.clear();
+                self.native_state_valid = false;
+                self.start_jit_worker();
+            }
+        }
+    }
+
+    pub fn aot_enabled(&self) -> bool {
+        self.execution_backend == ExecutionBackend::Jit && self.aot_cache_dir.is_some()
+    }
+
+    /// Switch execution backends without changing the guest-visible state.
+    /// Generated blocks are deliberately discarded when the adapter changes.
+    pub fn set_execution_backend(&mut self, backend: ExecutionBackend) {
+        if self.execution_backend != backend {
+            self.jit.clear();
+            self.native_state_valid = false;
+            self.execution_backend = backend;
+            if backend == ExecutionBackend::Jit {
+                self.start_jit_worker();
+            }
+        }
     }
 
     /// Treat an unknown Glk selector as a VM error instead of a recorded no-op.
@@ -853,6 +923,11 @@ impl Vm {
             glyph_support: None,
             text_metrics: None,
             acceleration: acceleration::Acceleration::default(),
+            execution_backend: ExecutionBackend::Interpreter,
+            aot_cache_dir: None,
+            jit: jit::JitState::default(),
+            native_state: native::NativeState::default(),
+            native_state_valid: false,
             accelerated_return: None,
             text_appearance: TextAppearance::default(),
             image_info: BTreeMap::new(),
@@ -864,6 +939,8 @@ impl Vm {
             presentation_revision: 0,
             presentation_pending: false,
             instructions_executed: 0,
+            native_blocks: 0,
+            native_instructions: 0,
             poll_calls: 0,
             poll_yields: 0,
             graphical_host: true,
@@ -1022,6 +1099,11 @@ impl Vm {
     ) -> Result<RunState, VmError> {
         let revision = self.presentation_revision;
         self.poll_events()?;
+        if self.execution_backend == ExecutionBackend::Jit {
+            self.start_jit_worker();
+            self.run_jit_steps(budget, yield_at_presentation, revision)?;
+            return Ok(self.state);
+        }
         for _ in 0..budget {
             if self.state != RunState::Running
                 || (yield_at_presentation && self.presentation_revision != revision)
@@ -1034,10 +1116,102 @@ impl Vm {
         Ok(self.state)
     }
 
+    fn run_jit_steps(
+        &mut self,
+        budget: usize,
+        yield_at_presentation: bool,
+        revision: u64,
+    ) -> Result<(), VmError> {
+        let mut remaining = budget;
+        while remaining != 0
+            && self.state == RunState::Running
+            && !(yield_at_presentation && self.presentation_revision != revision)
+        {
+            if self.accelerated_return.is_some() {
+                self.commit_native_state(true)?;
+                self.instructions_executed = self.instructions_executed.wrapping_add(1);
+                self.step()?;
+                remaining -= 1;
+                continue;
+            }
+            let start = if self.native_state_valid {
+                self.native_state.pc
+            } else {
+                self.pc
+            };
+            let Some(block) = self.jit_block(start) else {
+                self.commit_native_state(true)?;
+                self.instructions_executed = self.instructions_executed.wrapping_add(1);
+                self.step()?;
+                remaining -= 1;
+                continue;
+            };
+            let native_length = block.instructions.len().min(remaining);
+            if let Some(executor) = block.executor() {
+                // Slow/native boundaries execute one instruction through the
+                // interpreter and invalidate the mirrored native state. Only
+                // rebuild that mirror when the next native block is ready;
+                // cold interpreter fallback must not copy the whole RAM.
+                self.prepare_native_state()?;
+                let result = unsafe {
+                    executor.run(
+                        &mut self.native_state,
+                        block.instructions.as_ptr().cast(),
+                        native_length,
+                    )
+                };
+                let slow = result & native::NATIVE_SLOW_FLAG != 0;
+                let executed = (result & native::NATIVE_COUNT_MASK) as usize;
+                self.record_native_opcodes(&block.instructions, executed);
+                if slow {
+                    self.commit_native_state(true)?;
+                    self.native_blocks = self.native_blocks.wrapping_add(1);
+                    self.native_instructions =
+                        self.native_instructions.wrapping_add(executed as u64);
+                    self.instructions_executed =
+                        self.instructions_executed.wrapping_add(executed as u64);
+                    remaining -= executed;
+                    if remaining == 0 {
+                        break;
+                    }
+                    self.instructions_executed = self.instructions_executed.wrapping_add(1);
+                    self.step()?;
+                    remaining -= 1;
+                } else if executed == 0 {
+                    if self.state != RunState::Running
+                        || (yield_at_presentation && self.presentation_revision != revision)
+                    {
+                        break;
+                    }
+                    self.commit_native_state(true)?;
+                    self.instructions_executed = self.instructions_executed.wrapping_add(1);
+                    self.step()?;
+                    remaining -= 1;
+                } else {
+                    self.native_blocks = self.native_blocks.wrapping_add(1);
+                    self.native_instructions =
+                        self.native_instructions.wrapping_add(executed as u64);
+                    self.instructions_executed =
+                        self.instructions_executed.wrapping_add(executed as u64);
+                    remaining -= executed.min(remaining);
+                }
+                continue;
+            }
+            self.commit_native_state(true)?;
+            self.instructions_executed = self.instructions_executed.wrapping_add(1);
+            self.step()?;
+            remaining -= 1;
+        }
+        self.commit_native_state(false)?;
+        Ok(())
+    }
+
     pub(crate) fn diagnostic_summary(&self) -> String {
         format!(
-            "vm={:?} pc={:#x} viewport={:?} windows={} requests={} events={:?} select={} graphics={} instructions={} polls={} poll_yields={} decode_hits={} decode_misses={}",
+            "vm={:?} backend={:?} aot={} pc={:#x} viewport={:?} windows={} requests={} events={:?} select={} graphics={} instructions={} polls={} poll_yields={} decode_hits={} decode_misses={} jit_blocks={} jit_pending={} jit_hits={} jit_compiled_blocks={} jit_compiled_instructions={} jit_requests={} jit_results={} native_blocks={} native_instructions={}",
             self.state,
+            self.execution_backend,
+            self.aot_enabled(),
             self.pc,
             self.viewport_size,
             self.glk_windows.len(),
@@ -1049,7 +1223,16 @@ impl Vm {
             self.poll_calls,
             self.poll_yields,
             self.decode_cache_hits,
-            self.decode_cache_misses
+            self.decode_cache_misses,
+            self.jit.block_count(),
+            self.jit.pending_count(),
+            self.jit.block_hits(),
+            self.jit.compiled_blocks(),
+            self.jit.compiled_instructions(),
+            self.jit.compile_requests(),
+            self.jit.compile_results(),
+            self.native_blocks,
+            self.native_instructions
         )
     }
 
@@ -1076,6 +1259,8 @@ impl Vm {
                 .then_with(|| left.opcode.cmp(&right.opcode))
         });
         VmDiagnosticSnapshot {
+            backend: self.execution_backend,
+            aot_enabled: self.aot_enabled(),
             state: self.state,
             pc: self.pc,
             instructions: self.instructions_executed,
@@ -1099,11 +1284,21 @@ impl Vm {
             requests: self.requests.len(),
             queued_events: self.events.len(),
             graphics_requests: self.graphics.len(),
+            jit_blocks: self.jit.block_count(),
+            jit_pending_blocks: self.jit.pending_count(),
+            jit_block_hits: self.jit.block_hits(),
+            jit_compiled_blocks: self.jit.compiled_blocks(),
+            jit_compiled_instructions: self.jit.compiled_instructions(),
+            jit_compile_requests: self.jit.compile_requests(),
+            jit_compile_results: self.jit.compile_results(),
+            native_blocks: self.native_blocks,
+            native_instructions: self.native_instructions,
             opcode_counts,
         }
     }
 
     pub fn provide_input(&mut self, text: &str) -> Result<(), VmError> {
+        self.invalidate_native_state();
         if self.state == RunState::WaitingForFile {
             return self.provide_file(text);
         }
@@ -1117,6 +1312,7 @@ impl Vm {
             events.clear();
         }
         self.accelerated_return = None;
+        self.native_state_valid = false;
         self.memory.restart(self.protection);
         self.stack.clear();
         self.pc = 0;
@@ -1133,12 +1329,81 @@ impl Vm {
         self.state = RunState::Halted;
     }
 
+    fn start_jit_worker(&mut self) {
+        self.jit.start(
+            std::sync::Arc::clone(&self.story.image),
+            self.memory.ram_start(),
+            self.pc,
+            if self.aot_enabled() {
+                self.aot_cache_dir.clone()
+            } else {
+                None
+            },
+        );
+    }
+
+    fn jit_block(&mut self, address: u32) -> Option<std::sync::Arc<jit::NativeBlock>> {
+        self.jit.block(address)
+    }
+
+    fn prepare_native_state(&mut self) -> Result<(), VmError> {
+        if !self.native_state_valid {
+            self.native_state.sync_from_vm(
+                &mut self.memory,
+                &self.stack,
+                self.pc,
+                self.random_state,
+            )?;
+            self.native_state_valid = true;
+        }
+        Ok(())
+    }
+
+    fn commit_native_state(&mut self, invalidate: bool) -> Result<(), VmError> {
+        if self.native_state_valid {
+            self.native_state.commit_to_vm(
+                &mut self.memory,
+                &mut self.stack,
+                &mut self.pc,
+                &mut self.random_state,
+            )?;
+        }
+        if invalidate {
+            self.native_state_valid = false;
+        }
+        Ok(())
+    }
+
+    pub(super) fn invalidate_native_state(&mut self) {
+        self.native_state_valid = false;
+    }
+
+    fn record_native_opcodes(&mut self, instructions: &[jit::TraceInstruction], count: usize) {
+        let Some(opcode_counts) = &mut self.opcode_counts else {
+            return;
+        };
+        for trace_instruction in instructions.iter().take(count) {
+            if let Some(counter) =
+                opcode_counts.get_mut(trace_instruction.instruction.opcode as usize)
+            {
+                *counter = counter.wrapping_add(1);
+            }
+        }
+    }
+
     fn step(&mut self) -> Result<(), VmError> {
         if let Some(value) = self.accelerated_return.take() {
             return self.return_from_function(value);
         }
-        let instruction_address = self.pc;
-        let (opcode, operands) = self.fetch_decoded(instruction_address)?;
+        let instruction = self.decode_at(self.pc)?;
+        self.pc = instruction.next_pc;
+        self.execute_decoded(instruction)
+    }
+
+    fn execute_decoded(&mut self, instruction: DecodedInstruction) -> Result<(), VmError> {
+        let instruction_address = instruction.address;
+        let opcode = instruction.opcode;
+        let operands = instruction.operands;
         if let Some(counts) = &mut self.opcode_counts
             && let Some(count) = counts.get_mut(opcode as usize)
         {
@@ -1899,7 +2164,7 @@ impl Vm {
         Ok(())
     }
 
-    fn fetch_decoded(&mut self, address: u32) -> Result<(u32, [Operand; 8]), VmError> {
+    fn decode_at(&mut self, address: u32) -> Result<DecodedInstruction, VmError> {
         let cacheable = address < self.memory.ram_start();
         // Glulx instructions are not word-aligned; using the byte address
         // avoids making adjacent short instructions share one cache slot.
@@ -1911,24 +2176,41 @@ impl Vm {
                 let opcode = entry.opcode;
                 let operands = entry.operands;
                 self.decode_cache_hits = self.decode_cache_hits.wrapping_add(1);
-                self.pc = next_pc;
-                return Ok((opcode, operands));
+                return Ok(DecodedInstruction {
+                    address,
+                    next_pc,
+                    opcode,
+                    operands,
+                });
             }
             self.decode_cache_misses = self.decode_cache_misses.wrapping_add(1);
         }
-        let opcode = self.fetch_opcode()?;
-        let count = operand_count(opcode).ok_or(VmError::UnsupportedOpcode { opcode, address })?;
-        let operands = self.fetch_operands(count)?;
-        if cacheable && self.pc <= self.memory.ram_start() {
-            self.decoded_cache.entries[index] = DecodeEntry {
+        let saved_pc = self.pc;
+        self.pc = address;
+        let decoded = (|| {
+            let opcode = self.fetch_opcode()?;
+            let count =
+                operand_count(opcode).ok_or(VmError::UnsupportedOpcode { opcode, address })?;
+            let operands = self.fetch_operands(count)?;
+            Ok::<_, VmError>(DecodedInstruction {
                 address,
                 next_pc: self.pc,
                 opcode,
                 operands,
+            })
+        })();
+        self.pc = saved_pc;
+        let decoded = decoded?;
+        if cacheable && decoded.next_pc <= self.memory.ram_start() {
+            self.decoded_cache.entries[index] = DecodeEntry {
+                address,
+                next_pc: decoded.next_pc,
+                opcode: decoded.opcode,
+                operands: decoded.operands,
                 valid: true,
             };
         }
-        Ok((opcode, operands))
+        Ok(decoded)
     }
 
     fn fetch_opcode(&mut self) -> Result<u32, VmError> {
@@ -3645,6 +3927,179 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn jit_backend_matches_interpreter_and_reuses_rom_blocks() {
+        // add 7 9 -> RAM+32; branch back to add.
+        let program = [0x10, 0x11, 0x07, 7, 9, 0, 0, 1, 0x20, 0x20, 0x01, 0xf6];
+        let image = image_with_program(&program);
+        let mut interpreter = Vm::new(Story::from_bytes(&image, None).unwrap()).unwrap();
+        let mut jit = Vm::new(Story::from_bytes(&image, None).unwrap()).unwrap();
+        jit.set_execution_backend(ExecutionBackend::Jit);
+
+        assert_eq!(interpreter.run_steps(100).unwrap(), RunState::Running);
+        assert_eq!(jit.run_steps(100).unwrap(), RunState::Running);
+        assert_eq!(jit.execution_backend(), ExecutionBackend::Jit);
+        assert_eq!(jit.pc, interpreter.pc);
+        assert_eq!(jit.stack.bytes, interpreter.stack.bytes);
+        assert_eq!(
+            jit.memory.read32(0x120).unwrap(),
+            interpreter.memory.read32(0x120).unwrap()
+        );
+        assert!(jit.jit.compile_requests() > 0);
+        for _ in 0..100 {
+            if jit.jit.block_hits() > 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            jit.run_steps(1).unwrap();
+        }
+        assert!(jit.jit.block_count() > 0);
+        assert!(jit.jit.block_hits() > 0);
+        assert!(jit.jit.native_executor_count() > 0);
+        jit.run_steps(1).unwrap();
+        assert!(jit.native_blocks > 0);
+        assert!(jit.native_instructions > 0);
+    }
+
+    #[test]
+    #[ignore = "temporary external-story JIT diagnosis"]
+    fn debug_external_story_jit_lockstep() {
+        let path = std::env::var_os("GLULX_DEBUG_STORY").expect("GLULX_DEBUG_STORY");
+        let story = Story::open(path).expect("story");
+        let mut interpreter = Vm::new(story.clone()).expect("interpreter");
+        let mut jit = Vm::new(story).expect("jit");
+        jit.random_state = interpreter.random_state;
+        jit.set_execution_backend(ExecutionBackend::Jit);
+
+        for round in 0..2_048 {
+            let interpreter_before_pc = interpreter.pc;
+            let jit_before_pc = jit.pc;
+            let interpreter_before_instruction = interpreter.decode_at(interpreter_before_pc).ok();
+            let jit_before_instruction = jit.decode_at(jit_before_pc).ok();
+            let interpreter_state = interpreter.run_steps(1_024).expect("interpreter run");
+            let jit_state = match jit.run_steps(1_024) {
+                Ok(state) => state,
+                Err(error) => {
+                    eprintln!(
+                        "JIT_ERROR round={round} error={error:?} interpreter_state={interpreter_state:?} interpreter_pc={:#x} jit_pc={:#x} interpreter_instructions={} jit_instructions={} interpreter_stack={} jit_stack={} interpreter_random={:#x} jit_random={:#x} native_blocks={} native_instructions={} compiled_blocks={}",
+                        interpreter.pc,
+                        jit.pc,
+                        interpreter.instructions_executed,
+                        jit.instructions_executed,
+                        interpreter.stack.len(),
+                        jit.stack.len(),
+                        interpreter.random_state,
+                        jit.random_state,
+                        jit.native_blocks,
+                        jit.native_instructions,
+                        jit.jit.compiled_blocks(),
+                    );
+                    panic!("external story JIT failed");
+                }
+            };
+            if interpreter_state != jit_state
+                || interpreter.pc != jit.pc
+                || interpreter.stack.bytes != jit.stack.bytes
+                || interpreter.status_text() != jit.status_text()
+            {
+                eprintln!(
+                    "JIT_MISMATCH round={round} interpreter_state={interpreter_state:?} jit_state={jit_state:?} interpreter_before_pc={interpreter_before_pc:#x} jit_before_pc={jit_before_pc:#x} interpreter_before_instruction={interpreter_before_instruction:?} jit_before_instruction={jit_before_instruction:?} interpreter_pc={:#x} jit_pc={:#x} interpreter_instructions={} jit_instructions={} interpreter_stack={} jit_stack={} interpreter_random={:#x} jit_random={:#x} compiled_blocks={} native_instructions={}",
+                    interpreter.pc,
+                    jit.pc,
+                    interpreter.instructions_executed,
+                    jit.instructions_executed,
+                    interpreter.stack.len(),
+                    jit.stack.len(),
+                    interpreter.random_state,
+                    jit.random_state,
+                    jit.jit.compiled_blocks(),
+                    jit.native_instructions,
+                );
+                panic!("external story JIT diverged");
+            }
+            if interpreter_state != RunState::Running {
+                return;
+            }
+        }
+    }
+
+    #[test]
+    fn jit_backend_selection_survives_session_serialization_without_cache() {
+        let story = Story::from_bytes(&image_with_program(&[0x00, 0x81, 0x20]), None).unwrap();
+        let mut vm = Vm::new(story).unwrap();
+        vm.set_execution_backend(ExecutionBackend::Jit);
+        vm.run_steps(1).unwrap();
+
+        let serialized = serde_json::to_vec(&vm).unwrap();
+        let restored: Vm = serde_json::from_slice(&serialized).unwrap();
+        assert_eq!(restored.execution_backend(), ExecutionBackend::Jit);
+        assert_eq!(restored.jit.block_count(), 0);
+    }
+
+    #[test]
+    fn aot_requires_both_jit_backend_and_an_explicit_cache_directory() {
+        let directory =
+            std::env::temp_dir().join(format!("glulx-rs-aot-gate-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        let story = Story::from_bytes(&image_with_program(&[0x81, 0x20]), None).unwrap();
+        let mut vm = Vm::new(story).unwrap();
+        assert!(!vm.aot_enabled());
+
+        vm.set_aot_cache_dir(Some(directory.clone()));
+        assert!(!vm.aot_enabled());
+        vm.set_execution_backend(ExecutionBackend::Jit);
+        assert!(vm.aot_enabled());
+
+        vm.set_aot_cache_dir(None);
+        assert!(!vm.aot_enabled());
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn aot_directory_is_ignored_by_the_interpreter_backend() {
+        let directory = std::env::temp_dir().join(format!(
+            "glulx-rs-aot-interpreter-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        let story = Story::from_bytes(&image_with_program(&[0x81, 0x20]), None).unwrap();
+        let mut vm = Vm::new(story).unwrap();
+        vm.set_aot_cache_dir(Some(directory.clone()));
+        vm.run_steps(2).unwrap();
+        assert!(!vm.aot_enabled());
+        assert!(!directory.exists());
+    }
+
+    #[test]
+    fn jit_builds_aot_cache_only_for_an_explicit_nonempty_directory() {
+        let directory =
+            std::env::temp_dir().join(format!("glulx-rs-aot-jit-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        let story = Story::from_bytes(&image_with_program(&[0x81, 0x20]), None).unwrap();
+        let mut vm = Vm::new(story).unwrap();
+        vm.set_aot_cache_dir(Some(directory.clone()));
+        vm.set_execution_backend(ExecutionBackend::Jit);
+        assert!(vm.aot_enabled());
+        vm.run_steps(1).unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !directory.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(directory.exists());
+        assert!(
+            std::fs::read_dir(&directory)
+                .unwrap()
+                .flatten()
+                .any(|entry| entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "bin"))
+        );
+        vm.set_execution_backend(ExecutionBackend::Interpreter);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
     fn streams_text_through_glk_io_system() {
         // setiosys 2 0; streamchar 'A'; quit
         let program = [0x81, 0x49, 0x11, 2, 0, 0x70, 0x01, b'A', 0x81, 0x20];
@@ -3789,6 +4244,75 @@ pub(crate) mod tests {
         let mut vm = Vm::new(story).unwrap();
         assert_eq!(vm.run_steps(10_000).unwrap(), RunState::Running);
         assert!(vm.decode_cache_hits > vm.decode_cache_misses);
+    }
+
+    #[test]
+    #[ignore = "manual performance measurement"]
+    fn benchmark_backend_dispatch() {
+        let mut program = vec![0x00; 64];
+        // Jump from the end of the block back to its first nop.
+        program.extend_from_slice(&[0x20, 0x03, 0xff, 0xff, 0xff, 0xbc]);
+        let image = image_with_program(&program);
+        let iterations = std::hint::black_box(5_000_000usize);
+        for backend in [ExecutionBackend::Interpreter, ExecutionBackend::Jit] {
+            let story = Story::from_bytes(&image, None).unwrap();
+            let mut vm = Vm::new(story).unwrap();
+            vm.set_execution_backend(backend);
+            let started = std::time::Instant::now();
+            assert_eq!(vm.run_steps(iterations).unwrap(), RunState::Running);
+            let elapsed = started.elapsed();
+            eprintln!(
+                "BENCHMARK name=backend_dispatch backend={backend:?} iterations={iterations} elapsed_ns={} ns_per_instruction={:.3} jit_hits={}",
+                elapsed.as_nanos(),
+                elapsed.as_secs_f64() * 1_000_000_000.0 / iterations as f64,
+                vm.jit.block_hits(),
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "manual performance measurement"]
+    fn benchmark_aot_backend() {
+        let mut program = vec![0x00; 64];
+        program.extend_from_slice(&[0x20, 0x03, 0xff, 0xff, 0xff, 0xbc]);
+        let image = image_with_program(&program);
+        let directory =
+            std::env::temp_dir().join(format!("glulx-rs-aot-benchmark-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        let iterations = std::hint::black_box(5_000_000usize);
+
+        let story = Story::from_bytes(&image, None).unwrap();
+        let mut cold = Vm::new(story).unwrap();
+        cold.set_aot_cache_dir(Some(directory.clone()));
+        cold.set_execution_backend(ExecutionBackend::Jit);
+        let started = std::time::Instant::now();
+        assert_eq!(cold.run_steps(iterations).unwrap(), RunState::Running);
+        let cold_elapsed = started.elapsed();
+        assert!(std::fs::read_dir(&directory).unwrap().next().is_some());
+
+        let story = Story::from_bytes(&image, None).unwrap();
+        let mut warm = Vm::new(story).unwrap();
+        warm.set_aot_cache_dir(Some(directory.clone()));
+        warm.set_execution_backend(ExecutionBackend::Jit);
+        for _ in 0..100 {
+            warm.run_steps(1_000).unwrap();
+            if warm.native_instructions != 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let started = std::time::Instant::now();
+        assert_eq!(warm.run_steps(iterations).unwrap(), RunState::Running);
+        let warm_elapsed = started.elapsed();
+        eprintln!(
+            "BENCHMARK name=aot_backend iterations={iterations} cold_ns={} cold_ns_per_instruction={:.3} warm_ns={} warm_ns_per_instruction={:.3} warm_native_instructions={}",
+            cold_elapsed.as_nanos(),
+            cold_elapsed.as_secs_f64() * 1_000_000_000.0 / iterations as f64,
+            warm_elapsed.as_nanos(),
+            warm_elapsed.as_secs_f64() * 1_000_000_000.0 / iterations as f64,
+            warm.native_instructions,
+        );
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]

@@ -86,6 +86,8 @@ pub struct Memory {
     original_end: u32,
     #[serde(skip)]
     dirty_pages: BTreeSet<u32>,
+    #[serde(skip, default)]
+    native_dirty_pages: BTreeSet<u32>,
 }
 
 impl Memory {
@@ -158,9 +160,14 @@ impl Memory {
         self.dirty_pages.clear();
     }
 
+    pub(crate) fn clear_native_dirty_pages(&mut self) {
+        self.native_dirty_pages.clear();
+    }
+
     pub(crate) fn mark_all_pages_dirty(&mut self) {
-        self.dirty_pages
-            .extend((self.ram_start..self.len()).step_by(256));
+        let pages = (self.ram_start..self.len()).step_by(256);
+        self.dirty_pages.extend(pages.clone());
+        self.native_dirty_pages.extend(pages);
     }
 
     pub(crate) fn validate_session(&mut self, story: &Story) -> Result<(), VmError> {
@@ -241,6 +248,7 @@ impl Memory {
             ext_start: story.header.ext_start,
             original_end: story.header.end_mem,
             dirty_pages: BTreeSet::new(),
+            native_dirty_pages: BTreeSet::new(),
         })
     }
 
@@ -273,6 +281,68 @@ impl Memory {
 
     pub fn ram_start(&self) -> u32 {
         self.ram_start
+    }
+
+    /// Keep the immutable ROM backing alive while generated code borrows it.
+    pub(crate) fn native_rom(&self) -> Arc<StoryImage> {
+        Arc::clone(&self.initial)
+    }
+
+    /// Return only the writable address space in the byte order used by Glulx.
+    pub(crate) fn native_ram_snapshot(&self) -> Vec<u8> {
+        let mut bytes = vec![0; (self.len() - self.ram_start) as usize];
+        for (index, _) in self.pages.iter().enumerate() {
+            let start = index * PAGE_SIZE;
+            bytes[start..start + PAGE_SIZE].copy_from_slice(self.current_page(index));
+        }
+        bytes
+    }
+
+    /// Apply a native executor's dirty RAM range back to paged memory.
+    pub(crate) fn sync_native_ram_range(
+        &mut self,
+        native: &[u8],
+        start: u32,
+        end: u32,
+    ) -> Result<(), VmError> {
+        if native.len() != (self.len() - self.ram_start) as usize {
+            return Err(VmError::MemoryWrite(start));
+        }
+        let start = start.max(self.ram_start);
+        let end = end.min(self.len());
+        if start >= end {
+            return Ok(());
+        }
+        let first_page = (start - self.ram_start) as usize / PAGE_SIZE;
+        let last_page = (end - 1 - self.ram_start) as usize / PAGE_SIZE;
+        for page in first_page..=last_page {
+            let page_start = page * PAGE_SIZE;
+            let changed = self.current_page(page) != &native[page_start..page_start + PAGE_SIZE];
+            if changed {
+                self.ensure_page(page)
+                    .copy_from_slice(&native[page_start..page_start + PAGE_SIZE]);
+                self.mark_undo_dirty_range(self.ram_start + page_start as u32, PAGE_SIZE as u32);
+            }
+        }
+        Ok(())
+    }
+
+    /// Refresh only pages changed by the ordinary VM/interpreter since the
+    /// native mirror was last synchronized.
+    pub(crate) fn sync_native_ram_delta(&mut self, native: &mut [u8]) -> Result<(), VmError> {
+        if native.len() != (self.len() - self.ram_start) as usize {
+            return Err(VmError::MemoryRead(self.ram_start));
+        }
+        let dirty_pages = std::mem::take(&mut self.native_dirty_pages);
+        for address in dirty_pages {
+            if address < self.ram_start || address >= self.len() {
+                continue;
+            }
+            let page = (address - self.ram_start) as usize / PAGE_SIZE;
+            let page_start = page * PAGE_SIZE;
+            native[page_start..page_start + PAGE_SIZE].copy_from_slice(self.current_page(page));
+        }
+        Ok(())
     }
 
     #[inline(always)]
@@ -716,18 +786,31 @@ impl Memory {
     }
 
     fn mark_dirty_range(&mut self, address: u32, length: u32) {
-        if length == 0 {
+        let Some((start, end)) = self.dirty_page_bounds(address, length) else {
             return;
+        };
+        let pages = (start..=end).step_by(256);
+        self.dirty_pages.extend(pages.clone());
+        self.native_dirty_pages.extend(pages);
+    }
+
+    fn mark_undo_dirty_range(&mut self, address: u32, length: u32) {
+        let Some((start, end)) = self.dirty_page_bounds(address, length) else {
+            return;
+        };
+        self.dirty_pages.extend((start..=end).step_by(256));
+    }
+
+    fn dirty_page_bounds(&self, address: u32, length: u32) -> Option<(u32, u32)> {
+        if length == 0 {
+            return None;
         }
         let start = address.max(self.ram_start) & !255;
         let end = address
             .saturating_add(length.saturating_sub(1))
             .min(self.len().saturating_sub(1))
             & !255;
-        if start > end {
-            return;
-        }
-        self.dirty_pages.extend((start..=end).step_by(256));
+        (start <= end).then_some((start, end))
     }
 
     fn protected_bytes(

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::story::ResourceSelection;
 use crate::{
-    GraphicsRequest, InputRequest, RunState, Vm,
+    ExecutionBackend, GraphicsRequest, InputRequest, RunState, Vm,
     translation::{Submission, TranslationSettings, Translator},
 };
 
@@ -46,6 +46,10 @@ pub struct PlayerSettings {
     pub max_process_memory_mib: Budget,
     pub resource_limits: ResourceBudgets,
     pub profiling: ProfilingSettings,
+    #[serde(default)]
+    pub execution_backend: ExecutionBackend,
+    /// Empty disables AOT artifacts; the directory is intentionally explicit.
+    pub aot_cache_dir: String,
     pub font_size: f32,
     pub proportional_font: String,
     pub monospace_font: String,
@@ -71,6 +75,8 @@ impl Default for PlayerSettings {
             max_process_memory_mib: Budget::Fixed(0),
             resource_limits: ResourceBudgets::default(),
             profiling: ProfilingSettings::default(),
+            execution_backend: ExecutionBackend::Interpreter,
+            aot_cache_dir: String::new(),
             font_size: 18.0,
             proportional_font: String::new(),
             monospace_font: String::new(),
@@ -243,6 +249,8 @@ pub struct PlayerApp {
     settings: PlayerSettings,
     memory_overrides: Overrides,
     strict_glk: bool,
+    execution_backend: ExecutionBackend,
+    aot_cache_override: Option<PathBuf>,
     settings_file: settings_file::SettingsFile,
     vm: Option<Vm>,
     story_path: Option<PathBuf>,
@@ -439,6 +447,62 @@ impl PlayerApp {
         memory_overrides: Overrides,
         strict_glk: bool,
     ) -> Self {
+        Self::new_with_memory_policy_and_strict_glk_and_backend_override(
+            creation,
+            initial_story,
+            selection,
+            memory_overrides,
+            strict_glk,
+            None,
+        )
+    }
+
+    pub fn new_with_memory_policy_and_strict_glk_and_backend(
+        creation: &eframe::CreationContext<'_>,
+        initial_story: Option<PathBuf>,
+        selection: ResourceSelection,
+        memory_overrides: Overrides,
+        strict_glk: bool,
+        execution_backend: ExecutionBackend,
+    ) -> Self {
+        Self::new_with_memory_policy_and_strict_glk_and_backend_override(
+            creation,
+            initial_story,
+            selection,
+            memory_overrides,
+            strict_glk,
+            Some(execution_backend),
+        )
+    }
+
+    pub fn new_with_memory_policy_and_strict_glk_and_backend_override(
+        creation: &eframe::CreationContext<'_>,
+        initial_story: Option<PathBuf>,
+        selection: ResourceSelection,
+        memory_overrides: Overrides,
+        strict_glk: bool,
+        execution_backend: Option<ExecutionBackend>,
+    ) -> Self {
+        Self::new_with_memory_policy_and_strict_glk_and_runtime_overrides(
+            creation,
+            initial_story,
+            selection,
+            memory_overrides,
+            strict_glk,
+            execution_backend,
+            None,
+        )
+    }
+
+    pub fn new_with_memory_policy_and_strict_glk_and_runtime_overrides(
+        creation: &eframe::CreationContext<'_>,
+        initial_story: Option<PathBuf>,
+        selection: ResourceSelection,
+        memory_overrides: Overrides,
+        strict_glk: bool,
+        execution_backend: Option<ExecutionBackend>,
+        aot_cache_override: Option<PathBuf>,
+    ) -> Self {
         let _ = startup_snapshot();
         let _stage = crate::diagnostics::stage("create-app-or-restore-session");
         let mut gpu_canvas = false;
@@ -466,6 +530,7 @@ impl PlayerApp {
             .unwrap_or_default();
         let (mut settings_file, settings) = settings_file::SettingsFile::application(settings);
         settings_file.save(&settings);
+        let execution_backend = execution_backend.unwrap_or(settings.execution_backend);
         let fonts = fonts::Fonts::new(
             &creation.egui_ctx,
             &settings.fallback_font,
@@ -478,6 +543,8 @@ impl PlayerApp {
             settings,
             memory_overrides,
             strict_glk,
+            execution_backend,
+            aot_cache_override,
             settings_file,
             vm: None,
             story_path: None,
@@ -541,6 +608,7 @@ impl PlayerApp {
             match (|| {
                 let mut vm = session.vm;
                 vm.set_strict_glk(app.strict_glk);
+                vm.set_aot_cache_dir(app.configured_aot_cache_dir());
                 let policy = app.memory_policy();
                 vm.set_resource_limits(policy.resource_limits.resolve(startup_snapshot())?);
                 vm.set_memory_limit(policy.max_memory_mib.vm_bytes(startup_snapshot())?)
@@ -548,6 +616,7 @@ impl PlayerApp {
                 vm.validate_session().map_err(|error| error.to_string())
             })() {
                 Ok(mut vm) => {
+                    vm.set_execution_backend(app.execution_backend);
                     vm.enable_audio();
                     vm.resume_timer(session.timer);
                     app.story_title = vm.story_title().to_owned();
@@ -596,11 +665,21 @@ impl PlayerApp {
         })
     }
 
+    fn configured_aot_cache_dir(&self) -> Option<PathBuf> {
+        if let Some(path) = &self.aot_cache_override {
+            return Some(path.clone());
+        }
+        let path = self.settings.aot_cache_dir.trim();
+        (!path.is_empty()).then(|| PathBuf::from(path))
+    }
+
     fn load_story(&mut self, path: PathBuf) {
         self.load_story_with_resources(path, ResourceSelection::Auto);
     }
 
-    fn install_story(&mut self, path: PathBuf, vm: Vm) {
+    fn install_story(&mut self, path: PathBuf, mut vm: Vm) {
+        vm.set_aot_cache_dir(self.configured_aot_cache_dir());
+        vm.set_execution_backend(self.execution_backend);
         self.story_title = vm.story_title().to_owned();
         self.show_resources = false;
         self.resource_choice = 0;
@@ -710,6 +789,7 @@ impl PlayerApp {
         self.sync_translation_capture();
         let _stage = crate::diagnostics::stage("vm-slice");
         let capture_translation = self.settings.translation.enabled;
+        let previous_state = self.last_state;
         let Some((
             presentation_revision,
             output,
@@ -719,6 +799,7 @@ impl PlayerApp {
             initial_input,
             current_presentation_revision,
             vm_error,
+            state_diagnostics,
         )) = self.vm.as_mut().map(|vm| {
             if capture_translation {
                 vm.enable_text_buffer_events();
@@ -737,11 +818,13 @@ impl PlayerApp {
                 word(self.settings.background_color),
             );
             let presentation_revision = vm.presentation_revision();
+            let vm_slice_started = std::time::Instant::now();
             let vm_error = run_vm_slice(vm).err().map(|error| {
                 let pc = vm.pc();
                 vm.stop();
                 format!("{error}\nProgram counter: {pc:#010x}")
             });
+            let vm_slice_ms = vm_slice_started.elapsed().as_millis();
             let output = vm.take_output();
             crate::diagnostics::vm(vm);
             let game_status = vm.status_text();
@@ -749,6 +832,13 @@ impl PlayerApp {
             let state = vm.state();
             let initial_input = (state == RunState::WaitingForLine).then(|| vm.initial_input());
             let current_presentation_revision = vm.presentation_revision();
+            let state_diagnostics = (state != previous_state).then(|| {
+                format!(
+                    "{} vm_total_ms={}",
+                    vm.diagnostic_summary(),
+                    crate::diagnostics::vm_time_ms().saturating_add(vm_slice_ms)
+                )
+            });
             (
                 presentation_revision,
                 output,
@@ -758,6 +848,7 @@ impl PlayerApp {
                 initial_input,
                 current_presentation_revision,
                 vm_error,
+                state_diagnostics,
             )
         })
         else {
@@ -772,8 +863,11 @@ impl PlayerApp {
             self.status = "ui.vm_stopped_after_an_error".to_owned();
         }
         let output_boundary = current_presentation_revision != presentation_revision;
-        if state != self.last_state {
-            crate::diagnostics::record(format_args!("state {:?} -> {state:?}", self.last_state));
+        if let Some(state_diagnostics) = state_diagnostics {
+            crate::diagnostics::record(format_args!(
+                "state {:?} -> {state:?} {state_diagnostics}",
+                self.last_state
+            ));
         }
         // A timer can cancel and re-request input during one VM slice, leaving
         // the same RunState but supplying a different prefilled line.

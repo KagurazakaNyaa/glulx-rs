@@ -7,11 +7,13 @@ use glulx_rs::memory_budget::{Budget, MemoryPolicy, Overrides, startup_snapshot}
 use glulx_rs::{ResourceSelection, Story, Vm};
 
 const USAGE: &str = concat!(
-    "Usage: glulx-rs [--headless] [--strict-glk] [--trace-events PATH] ",
+    "Usage: glulx-rs [--headless] [--strict-glk] [--execution-backend NAME] [--aot-cache-dir PATH] [--trace-events PATH] ",
     "[--max-memory MIB] [--max-process-memory MIB] [--diagnostics LOG] ",
     "[--resources PATH] [--no-auto-resources] [STORY]\n\n",
     "--headless          Play in the terminal (plain text when input or output is piped)\n",
     "--strict-glk        Fail when a story calls an unknown Glk selector\n",
+    "--execution-backend NAME  Use interpreter or jit (default: interpreter)\n",
+    "--aot-cache-dir PATH  Use an explicit AOT cache directory for this run\n",
     "--trace-events PATH Write delivered Glk events as JSON after headless playback\n",
     "--max-memory MIB   Game VM limit: MiB or percentage (e.g. 1024 or 25%)\n",
     "--max-process-memory MIB  OS hard limit: MiB or percentage (0 disables)\n",
@@ -34,6 +36,8 @@ const USAGE: &str = concat!(
 struct Arguments {
     headless: bool,
     strict_glk: bool,
+    execution_backend: Option<glulx_rs::ExecutionBackend>,
+    aot_cache_dir: Option<PathBuf>,
     trace_events: Option<PathBuf>,
     max_memory_mib: Option<Budget>,
     max_process_memory_mib: Option<Budget>,
@@ -52,6 +56,8 @@ fn parse_arguments(
     let mut max_memory_mib = None;
     let mut max_process_memory_mib = None;
     let mut strict_glk = false;
+    let mut execution_backend = None;
+    let mut aot_cache_dir = None;
     let mut trace_events = None;
     let (mut headless, mut story, mut explicit, mut automatic, mut positional) =
         (false, None, None, true, false);
@@ -64,6 +70,29 @@ fn parse_arguments(
             headless = true;
         } else if !positional && argument == "--strict-glk" {
             strict_glk = true;
+        } else if !positional
+            && matches!(argument.to_str(), Some("--execution-backend" | "--backend"))
+        {
+            let name = argument.to_string_lossy();
+            let value = arguments
+                .next()
+                .ok_or_else(|| format!("{name} requires interpreter or jit"))?;
+            let value = value
+                .to_str()
+                .ok_or("execution backend must be valid UTF-8")?
+                .parse::<glulx_rs::ExecutionBackend>()?;
+            if execution_backend.replace(value).is_some() {
+                return Err("Specify the execution backend only once".to_owned());
+            }
+        } else if !positional && argument == "--aot-cache-dir" {
+            let path = arguments.next().ok_or("--aot-cache-dir requires a path")?;
+            let path = PathBuf::from(path);
+            if path.as_os_str().is_empty() {
+                return Err("--aot-cache-dir requires a non-empty path".to_owned());
+            }
+            if aot_cache_dir.replace(path).is_some() {
+                return Err("Specify --aot-cache-dir only once".to_owned());
+            }
         } else if !positional && argument == "--trace-events" {
             let path = arguments
                 .next()
@@ -134,6 +163,8 @@ fn parse_arguments(
     Ok(Some(Arguments {
         headless,
         strict_glk,
+        execution_backend,
+        aot_cache_dir,
         trace_events,
         max_memory_mib,
         resource_overrides,
@@ -197,6 +228,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let story = Story::open_with_resources(arguments.story.unwrap(), arguments.resources)?;
         let mut vm = Vm::new_with_memory_limit(story, game_limit)?;
         vm.set_strict_glk(arguments.strict_glk);
+        vm.set_aot_cache_dir(arguments.aot_cache_dir.clone());
+        vm.set_execution_backend(arguments.execution_backend.unwrap_or_default());
         vm.set_resource_limits(resources);
         return glulx_rs::terminal::run_with_event_trace(vm, arguments.trace_events);
     }
@@ -219,13 +252,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Glulx Player",
         options,
         Box::new(move |creation| {
-            Ok(Box::new(PlayerApp::new_with_memory_policy_and_strict_glk(
-                creation,
-                arguments.story,
-                arguments.resources,
-                overrides,
-                arguments.strict_glk,
-            )))
+            Ok(Box::new(
+                PlayerApp::new_with_memory_policy_and_strict_glk_and_runtime_overrides(
+                    creation,
+                    arguments.story,
+                    arguments.resources,
+                    overrides,
+                    arguments.strict_glk,
+                    arguments.execution_backend,
+                    arguments.aot_cache_dir,
+                ),
+            ))
         }),
     );
     match gui_result {
@@ -365,6 +402,39 @@ mod tests {
         let args = parse(&["--strict-glk", "game.ulx"]).unwrap().unwrap();
         assert!(args.strict_glk);
         assert!(!parse(&["game.ulx"]).unwrap().unwrap().strict_glk);
+    }
+
+    #[test]
+    fn execution_backend_is_parsed_and_defaults_to_interpreter() {
+        assert_eq!(
+            parse(&["game.ulx"]).unwrap().unwrap().execution_backend,
+            None
+        );
+        assert_eq!(
+            parse(&["--execution-backend", "jit", "game.ulx"])
+                .unwrap()
+                .unwrap()
+                .execution_backend,
+            Some(glulx_rs::ExecutionBackend::Jit)
+        );
+        assert_eq!(
+            parse(&["--backend", "interp", "game.ulx"])
+                .unwrap()
+                .unwrap()
+                .execution_backend,
+            Some(glulx_rs::ExecutionBackend::Interpreter)
+        );
+        assert!(parse(&["--execution-backend", "native", "game.ulx"]).is_err());
+        assert!(
+            parse(&[
+                "--execution-backend",
+                "jit",
+                "--backend",
+                "interpreter",
+                "game.ulx"
+            ])
+            .is_err()
+        );
     }
 
     #[test]

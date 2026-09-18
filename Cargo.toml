@@ -33,17 +33,20 @@ roxmltree = "0.21"
 unicode-normalization = "0.1"
 unicode-case-mapping = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# Native VM blocks use Cranelift's in-process JIT. Object emission is kept
+# available for explicit, target-keyed AOT cache artifacts.
+cranelift-codegen = "=0.135.2"
+cranelift-frontend = "=0.135.2"
+cranelift-native = "=0.135.2"
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 # pprof-rs uses POSIX sampling signals; Windows exposes the same HTTP metrics
 # service, but cannot link the native sampler.
 pprof = { version = "0.15", default-features = false, features = ["flamegraph", "prost-codec"] }
-
-[target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Security", "Win32_System_Diagnostics_Etw", "Win32_System_JobObjects", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_System_Console", "Win32_Graphics_Gdi", "Win32_UI_Controls_Dialogs", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse"] }
+windows-sys = { version = "0.61", features = ["Win32_Security", "Win32_System_Diagnostics_Etw", "Win32_System_JobObjects", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_System_Console", "Win32_System_Memory", "Win32_Graphics_Gdi", "Win32_UI_Controls_Dialogs", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse"] }
 
 [profile.release]
 lto = "thin"

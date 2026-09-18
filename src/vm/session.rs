@@ -114,6 +114,9 @@ impl Vm {
         self.story.path = path;
         self.story.header.decoding_table = table;
         self.restore_file_streams()?;
+        if self.execution_backend == ExecutionBackend::Jit {
+            self.start_jit_worker();
+        }
         Ok(self)
     }
     pub fn metadata(&self) -> crate::story::Metadata {

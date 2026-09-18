@@ -47,6 +47,35 @@ that use host extensions:
 cargo run --release -- --headless --strict-glk path/to/story.ulx
 ```
 
+The instruction backend can be selected for a run. The default is the portable
+interpreter; jit enables the native ROM trace backend. It decodes hot paths and
+compiles short trace-specific machine-code dispatchers asynchronously after the
+story starts. Integer and float32 arithmetic, branches, memory, stack
+operations, and random mixing are lowered directly; host-bound operations and
+unexpected trace branches use an explicit slow edge. The interpreter remains
+available while a native trace is pending:
+
+~~~sh
+cargo run --release -- --headless --execution-backend jit path/to/story.ulx
+~~~
+
+In the graphical player, the execution backend is persistent under Settings.
+An explicit command-line backend overrides the saved setting for that run.
+
+The AOT cache is opt-in. Set aot_cache_dir to an explicit writable directory
+in glulx-settings.json; AOT is active only when the JIT backend is selected
+and the setting is non-empty. An empty setting never creates an AOT cache:
+
+~~~json
+{
+  "execution_backend": "jit",
+  "aot_cache_dir": "<aot-cache-dir>"
+}
+~~~
+
+For headless runs, `--aot-cache-dir <aot-cache-dir>` supplies the same
+run-scoped override. AOT is used only together with `--execution-backend jit`.
+
 Headless playback can optionally write the events actually delivered to the story:
 
 ```sh
@@ -150,7 +179,8 @@ The interface supports English and Chinese. **Settings → Interface language** 
 
 Use release or diagnostic builds for gameplay performance. Operand decoding and search comparisons
 now avoid temporary heap allocations. The repository provides a fixed microbenchmark suite: five million
-branch dispatches, 1,000 linear searches through 16,384 records, 4/8/16 KiB text output,
+interpreter/native-JIT instruction dispatches, five million branch dispatches,
+1,000 linear searches through 16,384 records, 4/8/16 KiB text output,
 sparse/dense dirty-page snapshots on 64 MiB memory, 16 KiB cold/warm text layout, and
 512x384 CPU canvas rasterization. The benchmark tool records the
 commit, platform, Rust version, total time and time per operation; these metrics do not predict whole-game speedups.

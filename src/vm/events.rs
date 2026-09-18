@@ -23,6 +23,7 @@ impl Vm {
         }
     }
     pub fn update_line_input(&mut self, text: &str) -> Result<(), VmError> {
+        self.invalidate_native_state();
         let maximum = self.line_input_max_len();
         if let Some(Request::Line(request)) = self.requests.get_mut(&self.input_window) {
             request.initial = text.chars().take(maximum as usize).collect();
@@ -88,6 +89,7 @@ impl Vm {
         self.provide_window_key(self.input_window, key)
     }
     pub fn provide_window_key(&mut self, window: u32, key: u32) -> Result<(), VmError> {
+        self.invalidate_native_state();
         if self.pending_select.is_none() {
             return Err(VmError::UnexpectedInput);
         }
@@ -124,6 +126,7 @@ impl Vm {
         text: &str,
         terminator: u32,
     ) -> Result<(), VmError> {
+        self.invalidate_native_state();
         if self.pending_select.is_none() {
             return Err(VmError::UnexpectedInput);
         }
@@ -241,6 +244,7 @@ impl Vm {
         if self.pending_select.is_some()
             && let Some(event) = self.events.pop_front()
         {
+            self.invalidate_native_state();
             self.record_event(event);
             let select = self.pending_select.take().unwrap();
             self.write_event(select.event_address, event)?;

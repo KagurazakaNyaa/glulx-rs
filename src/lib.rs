@@ -11,4 +11,6 @@ pub mod translation;
 pub mod vm;
 
 pub use story::{ResourceSelection, Story, StoryError, StoryHeader, StoryImage};
-pub use vm::{GraphicsRequest, ImageRequest, InputRequest, RunState, Vm, VmError};
+pub use vm::{
+    ExecutionBackend, GraphicsRequest, ImageRequest, InputRequest, RunState, Vm, VmError,
+};

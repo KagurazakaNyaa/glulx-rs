@@ -148,6 +148,20 @@ pub(crate) fn vm(vm: &crate::Vm) {
     }
 }
 
+pub(crate) fn vm_time_ms() -> u128 {
+    LOGGER
+        .get()
+        .map(|logger| {
+            logger
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .vm_time
+                .as_millis()
+        })
+        .unwrap_or_default()
+}
+
 #[derive(serde::Serialize)]
 struct Snapshot {
     version: &'static str,
