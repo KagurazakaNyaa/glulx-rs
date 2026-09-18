@@ -3,7 +3,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        mpsc::{self, Receiver, SyncSender, TrySendError},
+        mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
     },
     thread,
 };
@@ -304,12 +304,15 @@ impl JitState {
     }
 
     fn poll(&mut self) {
-        let results = self
-            .worker
-            .as_ref()
-            .map(|worker| worker.results.try_iter().collect::<Vec<_>>())
-            .unwrap_or_default();
-        for result in results {
+        loop {
+            let result = match self.worker.as_ref().map(|worker| worker.results.try_recv()) {
+                Some(Ok(result)) => result,
+                Some(Err(TryRecvError::Empty)) | None => break,
+                Some(Err(TryRecvError::Disconnected)) => {
+                    self.worker = None;
+                    break;
+                }
+            };
             self.pending.remove(&result.address);
             self.compile_results = self.compile_results.wrapping_add(1);
             if let Some(block) = result.block {
