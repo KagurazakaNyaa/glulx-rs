@@ -1153,7 +1153,13 @@ impl Vm {
                 // rebuild that mirror when the next native block is ready;
                 // cold interpreter fallback must not copy the whole RAM.
                 self.prepare_native_state()?;
-                let result = executor.run(&mut self.native_state, native_length);
+                let result = {
+                    let mut prepared = self
+                        .native_state
+                        .prepared()
+                        .ok_or(VmError::NativeStateUnavailable)?;
+                    executor.run(&mut prepared, native_length)
+                };
                 let slow = result & native::NATIVE_SLOW_FLAG != 0;
                 let executed = (result & native::NATIVE_COUNT_MASK) as usize;
                 self.record_native_opcodes(&block.instructions, executed);
@@ -3682,6 +3688,8 @@ pub enum VmError {
     MemoryLimit { required: u32, maximum: u32 },
     #[error("could not allocate {0} bytes of game memory")]
     MemoryAllocation(u32),
+    #[error("native VM state is not prepared")]
+    NativeStateUnavailable,
     #[error("invalid or incompatible save file")]
     InvalidSave,
     #[error("invalid or unrepresentable date/time")]
