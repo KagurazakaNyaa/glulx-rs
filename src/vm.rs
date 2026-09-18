@@ -1135,7 +1135,7 @@ impl Vm {
                 continue;
             }
             let start = if self.native_state_valid {
-                self.native_state.pc
+                self.native_state.abi.pc
             } else {
                 self.pc
             };

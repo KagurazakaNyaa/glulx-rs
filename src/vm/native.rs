@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     collections::HashMap,
     fs,
     mem::{align_of, offset_of, size_of},
@@ -16,11 +17,10 @@ use cranelift_codegen::{
         condcodes::{FloatCC, IntCC},
         types,
     },
-    isa::{OwnedTargetIsa, TargetIsa},
+    isa::{OwnedTargetIsa, TargetFrontendConfig, TargetIsa},
     settings::{self, Configurable},
 };
-use cranelift_frontend::{FuncInstBuilder, FunctionBuilder, FunctionBuilderContext};
-use std::marker::PhantomData;
+use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 
 use crate::{memory::Memory, story::StoryImage};
 
@@ -28,20 +28,16 @@ use super::{DecodedInstruction, Operand, Stack, Width, jit::TraceInstruction};
 
 const AOT_MAGIC: &[u8; 8] = b"GLXAOT02";
 const AOT_VERSION: u32 = 7;
-const NATIVE_CODEGEN_VERSION: &str = "cranelift-0.135.2-native-traces-v5";
+const NATIVE_CODEGEN_VERSION: &str = "cranelift-0.135.2-native-traces-v6";
 const MAX_EXECUTOR_BYTES: usize = 4 * 1024 * 1024;
 const AOT_FLUSH_BLOCKS: usize = 64;
 
 pub(super) const NATIVE_SLOW_FLAG: u32 = 0x8000_0000;
 pub(super) const NATIVE_COUNT_MASK: u32 = !NATIVE_SLOW_FLAG;
 
-/// The small, C-layout state surface exposed to generated code.
-///
-/// The two storage vectors are implementation details owned by the VM. Their
-/// pointers are refreshed before a native run and remain stable until it
-/// returns. Generated code only touches the fields above them.
+/// The C-layout state surface exposed to generated code.
 #[repr(C)]
-pub(super) struct NativeState {
+pub(super) struct NativeAbiState {
     pub(super) rom_ptr: *const u8,
     pub(super) ram_ptr: *mut u8,
     pub(super) memory_len: u32,
@@ -64,6 +60,12 @@ pub(super) struct NativeState {
     pub(super) rollback_dirty_max: u32,
     pub(super) rollback_stack_dirty: u32,
     pub(super) rollback_random_state: u32,
+}
+
+/// Host-owned native state. The ABI-visible fields are kept separate from the
+/// storage that owns their backing allocations.
+pub(super) struct NativeState {
+    pub(super) abi: NativeAbiState,
     ram_storage: Vec<u8>,
     rom_storage: Option<Arc<StoryImage>>,
     stack_storage: Vec<u8>,
@@ -72,28 +74,30 @@ pub(super) struct NativeState {
 impl Default for NativeState {
     fn default() -> Self {
         Self {
-            rom_ptr: ptr::null(),
-            ram_ptr: ptr::null_mut(),
-            memory_len: 0,
-            ram_start: 0,
-            ram_len: 0,
-            stack_ptr: ptr::null_mut(),
-            stack_len: 0,
-            stack_capacity: 0,
-            stack_maximum: 0,
-            stack_frame_end: 0,
-            locals_base: 0,
-            pc: 0,
-            random_state: 0,
-            dirty_min: u32::MAX,
-            dirty_max: 0,
-            stack_dirty: 0,
-            rollback_stack_len: 0,
-            rollback_pc: 0,
-            rollback_dirty_min: u32::MAX,
-            rollback_dirty_max: 0,
-            rollback_stack_dirty: 0,
-            rollback_random_state: 0,
+            abi: NativeAbiState {
+                rom_ptr: ptr::null(),
+                ram_ptr: ptr::null_mut(),
+                memory_len: 0,
+                ram_start: 0,
+                ram_len: 0,
+                stack_ptr: ptr::null_mut(),
+                stack_len: 0,
+                stack_capacity: 0,
+                stack_maximum: 0,
+                stack_frame_end: 0,
+                locals_base: 0,
+                pc: 0,
+                random_state: 0,
+                dirty_min: u32::MAX,
+                dirty_max: 0,
+                stack_dirty: 0,
+                rollback_stack_len: 0,
+                rollback_pc: 0,
+                rollback_dirty_min: u32::MAX,
+                rollback_dirty_max: 0,
+                rollback_stack_dirty: 0,
+                rollback_random_state: 0,
+            },
             ram_storage: Vec::new(),
             rom_storage: None,
             stack_storage: Vec::new(),
@@ -134,27 +138,27 @@ impl NativeState {
         // initialized so committing it does not require Vec::set_len.
         self.stack_storage.resize(stack_capacity, 0);
 
-        self.rom_ptr = self
+        self.abi.rom_ptr = self
             .rom_storage
             .as_ref()
             .expect("ROM backing installed above")
             .as_slice()
             .as_ptr();
-        self.ram_ptr = self.ram_storage.as_mut_ptr();
-        self.memory_len = memory.len();
-        self.ram_start = memory.ram_start();
-        self.ram_len = self.ram_storage.len() as u32;
-        self.stack_ptr = self.stack_storage.as_mut_ptr();
-        self.stack_len = stack.bytes.len() as u32;
-        self.stack_capacity = stack_capacity as u32;
-        self.stack_maximum = stack.maximum;
-        self.stack_frame_end = stack.current_frame_end;
-        self.locals_base = stack.locals_base;
-        self.pc = pc;
-        self.random_state = random_state;
-        self.dirty_min = u32::MAX;
-        self.dirty_max = 0;
-        self.stack_dirty = 0;
+        self.abi.ram_ptr = self.ram_storage.as_mut_ptr();
+        self.abi.memory_len = memory.len();
+        self.abi.ram_start = memory.ram_start();
+        self.abi.ram_len = self.ram_storage.len() as u32;
+        self.abi.stack_ptr = self.stack_storage.as_mut_ptr();
+        self.abi.stack_len = stack.bytes.len() as u32;
+        self.abi.stack_capacity = stack_capacity as u32;
+        self.abi.stack_maximum = stack.maximum;
+        self.abi.stack_frame_end = stack.current_frame_end;
+        self.abi.locals_base = stack.locals_base;
+        self.abi.pc = pc;
+        self.abi.random_state = random_state;
+        self.abi.dirty_min = u32::MAX;
+        self.abi.dirty_max = 0;
+        self.abi.stack_dirty = 0;
         Ok(())
     }
 
@@ -165,32 +169,36 @@ impl NativeState {
         pc: &mut u32,
         random_state: &mut u32,
     ) -> Result<(), super::VmError> {
-        if self.dirty_min != u32::MAX {
-            memory.sync_native_ram_range(&self.ram_storage, self.dirty_min, self.dirty_max)?;
+        if self.abi.dirty_min != u32::MAX {
+            memory.sync_native_ram_range(
+                &self.ram_storage,
+                self.abi.dirty_min,
+                self.abi.dirty_max,
+            )?;
         }
 
-        let stack_len = usize::try_from(self.stack_len)
+        let stack_len = usize::try_from(self.abi.stack_len)
             .ok()
             .filter(|length| *length <= self.stack_storage.len())
             .ok_or(super::VmError::StackOverflow)?;
         self.stack_storage.truncate(stack_len);
-        if self.stack_dirty != 0 || stack.bytes.len() != stack_len {
+        if self.abi.stack_dirty != 0 || stack.bytes.len() != stack_len {
             stack.bytes.clear();
             stack.bytes.extend_from_slice(&self.stack_storage);
         }
-        stack.current_frame_end = self.stack_frame_end;
-        stack.locals_base = self.locals_base;
-        *pc = self.pc;
-        *random_state = self.random_state;
+        stack.current_frame_end = self.abi.stack_frame_end;
+        stack.locals_base = self.abi.locals_base;
+        *pc = self.abi.pc;
+        *random_state = self.abi.random_state;
 
-        self.dirty_min = u32::MAX;
-        self.dirty_max = 0;
-        self.stack_dirty = 0;
+        self.abi.dirty_min = u32::MAX;
+        self.abi.dirty_max = 0;
+        self.abi.stack_dirty = 0;
         Ok(())
     }
 }
 
-pub(super) type NativeBlockFn = unsafe extern "C" fn(*mut NativeState, u32) -> u32;
+pub(super) type NativeBlockFn = unsafe extern "C" fn(*mut NativeAbiState, u32) -> u32;
 
 struct ExecutableMemory {
     ptr: NonNull<u8>,
@@ -254,7 +262,7 @@ impl NativeExecutor {
         let budget = u32::try_from(budget).unwrap_or(u32::MAX);
         // SAFETY: the executor owns the generated function's executable memory,
         // and this wrapper supplies a live native state for the duration of the call.
-        unsafe { (self.function)(state, budget) }
+        unsafe { (self.function)(&mut state.abi, budget) }
     }
 }
 
@@ -268,14 +276,15 @@ struct BlockKey {
     fingerprint: u64,
 }
 
-// Cranelift's instruction builder borrows FunctionBuilder mutably. Native
-// lowering deliberately builds small expressions from several instructions;
-// this wrapper keeps that sequencing in one controlled unsafe adapter so a
-// generated expression cannot accidentally retain a Rust borrow across an
-// instruction insertion.
-struct IrBuilder<'a> {
-    pointer: *mut FunctionBuilder<'a>,
-    marker: PhantomData<&'a mut FunctionBuilder<'a>>,
+// Cranelift's instruction builder borrows FunctionBuilder mutably. The proxy
+// keeps each borrow inside one instruction operation, so nested lowering calls
+// remain safe without manufacturing overlapping Rust references.
+struct IrBuilder<'function> {
+    builder: RefCell<FunctionBuilder<'function>>,
+}
+
+struct IrInstBuilder<'builder, 'function> {
+    builder: &'builder RefCell<FunctionBuilder<'function>>,
 }
 
 #[derive(Clone, Copy)]
@@ -295,32 +304,171 @@ struct TraceBranch {
     fallthrough: u32,
 }
 
-impl<'a> IrBuilder<'a> {
-    fn new(builder: &mut FunctionBuilder<'a>) -> Self {
+impl<'function> IrBuilder<'function> {
+    fn new(builder: FunctionBuilder<'function>) -> Self {
         Self {
-            pointer: builder,
-            marker: PhantomData,
+            builder: RefCell::new(builder),
         }
     }
 
-    fn ins<'short>(&'short self) -> FuncInstBuilder<'short, 'a> {
-        unsafe { (&mut *self.pointer).ins() }
+    fn ins(&self) -> IrInstBuilder<'_, 'function> {
+        IrInstBuilder {
+            builder: &self.builder,
+        }
     }
 
     fn create_block(&self) -> ir::Block {
-        unsafe { (&mut *self.pointer).create_block() }
+        self.builder.borrow_mut().create_block()
     }
 
     fn switch_to_block(&self, block: ir::Block) {
-        unsafe { (&mut *self.pointer).switch_to_block(block) }
+        self.builder.borrow_mut().switch_to_block(block)
     }
 
     fn block_param(&self, block: ir::Block, index: usize) -> ir::Value {
-        unsafe { (&*self.pointer).block_params(block)[index] }
+        self.builder.borrow().block_params(block)[index]
     }
 
     fn append_block_param(&self, block: ir::Block, ty: ir::Type) -> ir::Value {
-        unsafe { (&mut *self.pointer).append_block_param(block, ty) }
+        self.builder.borrow_mut().append_block_param(block, ty)
+    }
+
+    fn append_block_params_for_function_params(&self, block: ir::Block) {
+        self.builder
+            .borrow_mut()
+            .append_block_params_for_function_params(block);
+    }
+
+    fn seal_all_blocks(&self) {
+        self.builder.borrow_mut().seal_all_blocks();
+    }
+
+    fn finalize(self, config: TargetFrontendConfig) {
+        self.builder.into_inner().finalize(config);
+    }
+}
+
+impl<'builder, 'function> IrInstBuilder<'builder, 'function> {
+    fn jump(&self, block: ir::Block, args: &[BlockArg]) -> ir::Inst {
+        self.builder.borrow_mut().ins().jump(block, args)
+    }
+
+    fn brif(
+        &self,
+        condition: ir::Value,
+        then_block: ir::Block,
+        then_args: &[BlockArg],
+        else_block: ir::Block,
+        else_args: &[BlockArg],
+    ) -> ir::Inst {
+        self.builder
+            .borrow_mut()
+            .ins()
+            .brif(condition, then_block, then_args, else_block, else_args)
+    }
+
+    fn return_(&self, values: &[ir::Value]) -> ir::Inst {
+        self.builder.borrow_mut().ins().return_(values)
+    }
+
+    fn iconst<T: Into<ir::immediates::Imm64>>(&self, ty: ir::Type, value: T) -> ir::Value {
+        self.builder.borrow_mut().ins().iconst(ty, value)
+    }
+
+    fn icmp<T: Into<ir::condcodes::IntCC>>(
+        &self,
+        condition: T,
+        left: ir::Value,
+        right: ir::Value,
+    ) -> ir::Value {
+        self.builder.borrow_mut().ins().icmp(condition, left, right)
+    }
+
+    fn fcmp<T: Into<ir::condcodes::FloatCC>>(
+        &self,
+        condition: T,
+        left: ir::Value,
+        right: ir::Value,
+    ) -> ir::Value {
+        self.builder.borrow_mut().ins().fcmp(condition, left, right)
+    }
+
+    fn load<T1: Into<ir::MemFlagsData>, T2: Into<ir::immediates::Offset32>>(
+        &self,
+        ty: ir::Type,
+        flags: T1,
+        pointer: ir::Value,
+        offset: T2,
+    ) -> ir::Value {
+        self.builder
+            .borrow_mut()
+            .ins()
+            .load(ty, flags, pointer, offset)
+    }
+
+    fn store<T1: Into<ir::MemFlagsData>, T2: Into<ir::immediates::Offset32>>(
+        &self,
+        flags: T1,
+        value: ir::Value,
+        pointer: ir::Value,
+        offset: T2,
+    ) -> ir::Inst {
+        self.builder
+            .borrow_mut()
+            .ins()
+            .store(flags, value, pointer, offset)
+    }
+}
+
+macro_rules! value_ops {
+    ($(fn $name:ident($($arg:ident: $ty:ty),*);)*) => {
+        $(
+            fn $name(&self, $($arg: $ty),*) -> ir::Value {
+                self.builder.borrow_mut().ins().$name($($arg),*)
+            }
+        )*
+    };
+}
+
+impl<'builder, 'function> IrInstBuilder<'builder, 'function> {
+    value_ops! {
+        fn iadd(left: ir::Value, right: ir::Value);
+        fn isub(left: ir::Value, right: ir::Value);
+        fn imul(left: ir::Value, right: ir::Value);
+        fn sdiv(left: ir::Value, right: ir::Value);
+        fn srem(left: ir::Value, right: ir::Value);
+        fn urem(left: ir::Value, right: ir::Value);
+        fn band(left: ir::Value, right: ir::Value);
+        fn bor(left: ir::Value, right: ir::Value);
+        fn bxor(left: ir::Value, right: ir::Value);
+        fn bnot(value: ir::Value);
+        fn ineg(value: ir::Value);
+        fn ishl(left: ir::Value, right: ir::Value);
+        fn ushr(left: ir::Value, right: ir::Value);
+        fn sshr(left: ir::Value, right: ir::Value);
+        fn select(condition: ir::Value, when_true: ir::Value, when_false: ir::Value);
+        fn bswap(value: ir::Value);
+        fn fadd(left: ir::Value, right: ir::Value);
+        fn fsub(left: ir::Value, right: ir::Value);
+        fn fmul(left: ir::Value, right: ir::Value);
+        fn fdiv(left: ir::Value, right: ir::Value);
+        fn fneg(value: ir::Value);
+        fn floor(value: ir::Value);
+        fn ireduce(ty: ir::Type, value: ir::Value);
+        fn uextend(ty: ir::Type, value: ir::Value);
+        fn sextend(ty: ir::Type, value: ir::Value);
+        fn fpromote(ty: ir::Type, value: ir::Value);
+        fn fdemote(ty: ir::Type, value: ir::Value);
+        fn fcvt_from_sint(ty: ir::Type, value: ir::Value);
+    }
+
+    fn bitcast<T: Into<ir::MemFlagsData>>(
+        &self,
+        ty: ir::Type,
+        flags: T,
+        value: ir::Value,
+    ) -> ir::Value {
+        self.builder.borrow_mut().ins().bitcast(ty, flags, value)
     }
 }
 
@@ -523,27 +671,27 @@ impl NativeCompiler {
     }
 }
 
-const ROM_PTR: i32 = offset_of!(NativeState, rom_ptr) as i32;
-const RAM_PTR: i32 = offset_of!(NativeState, ram_ptr) as i32;
-const MEMORY_LEN: i32 = offset_of!(NativeState, memory_len) as i32;
-const RAM_START: i32 = offset_of!(NativeState, ram_start) as i32;
-const STACK_PTR: i32 = offset_of!(NativeState, stack_ptr) as i32;
-const STACK_LEN: i32 = offset_of!(NativeState, stack_len) as i32;
-const STACK_CAPACITY: i32 = offset_of!(NativeState, stack_capacity) as i32;
-const STACK_MAXIMUM: i32 = offset_of!(NativeState, stack_maximum) as i32;
-const STACK_FRAME_END: i32 = offset_of!(NativeState, stack_frame_end) as i32;
-const LOCALS_BASE: i32 = offset_of!(NativeState, locals_base) as i32;
-const PC: i32 = offset_of!(NativeState, pc) as i32;
-const RANDOM_STATE: i32 = offset_of!(NativeState, random_state) as i32;
-const DIRTY_MIN: i32 = offset_of!(NativeState, dirty_min) as i32;
-const DIRTY_MAX: i32 = offset_of!(NativeState, dirty_max) as i32;
-const STACK_DIRTY: i32 = offset_of!(NativeState, stack_dirty) as i32;
-const ROLLBACK_STACK_LEN: i32 = offset_of!(NativeState, rollback_stack_len) as i32;
-const ROLLBACK_PC: i32 = offset_of!(NativeState, rollback_pc) as i32;
-const ROLLBACK_DIRTY_MIN: i32 = offset_of!(NativeState, rollback_dirty_min) as i32;
-const ROLLBACK_DIRTY_MAX: i32 = offset_of!(NativeState, rollback_dirty_max) as i32;
-const ROLLBACK_STACK_DIRTY: i32 = offset_of!(NativeState, rollback_stack_dirty) as i32;
-const ROLLBACK_RANDOM_STATE: i32 = offset_of!(NativeState, rollback_random_state) as i32;
+const ROM_PTR: i32 = offset_of!(NativeAbiState, rom_ptr) as i32;
+const RAM_PTR: i32 = offset_of!(NativeAbiState, ram_ptr) as i32;
+const MEMORY_LEN: i32 = offset_of!(NativeAbiState, memory_len) as i32;
+const RAM_START: i32 = offset_of!(NativeAbiState, ram_start) as i32;
+const STACK_PTR: i32 = offset_of!(NativeAbiState, stack_ptr) as i32;
+const STACK_LEN: i32 = offset_of!(NativeAbiState, stack_len) as i32;
+const STACK_CAPACITY: i32 = offset_of!(NativeAbiState, stack_capacity) as i32;
+const STACK_MAXIMUM: i32 = offset_of!(NativeAbiState, stack_maximum) as i32;
+const STACK_FRAME_END: i32 = offset_of!(NativeAbiState, stack_frame_end) as i32;
+const LOCALS_BASE: i32 = offset_of!(NativeAbiState, locals_base) as i32;
+const PC: i32 = offset_of!(NativeAbiState, pc) as i32;
+const RANDOM_STATE: i32 = offset_of!(NativeAbiState, random_state) as i32;
+const DIRTY_MIN: i32 = offset_of!(NativeAbiState, dirty_min) as i32;
+const DIRTY_MAX: i32 = offset_of!(NativeAbiState, dirty_max) as i32;
+const STACK_DIRTY: i32 = offset_of!(NativeAbiState, stack_dirty) as i32;
+const ROLLBACK_STACK_LEN: i32 = offset_of!(NativeAbiState, rollback_stack_len) as i32;
+const ROLLBACK_PC: i32 = offset_of!(NativeAbiState, rollback_pc) as i32;
+const ROLLBACK_DIRTY_MIN: i32 = offset_of!(NativeAbiState, rollback_dirty_min) as i32;
+const ROLLBACK_DIRTY_MAX: i32 = offset_of!(NativeAbiState, rollback_dirty_max) as i32;
+const ROLLBACK_STACK_DIRTY: i32 = offset_of!(NativeAbiState, rollback_stack_dirty) as i32;
+const ROLLBACK_RANDOM_STATE: i32 = offset_of!(NativeAbiState, rollback_random_state) as i32;
 
 fn compile_native_trace(
     isa: &dyn TargetIsa,
@@ -569,13 +717,15 @@ fn compile_native_trace(
     context.func.name = ir::UserFuncName::user(0, address);
 
     let mut builder_context = FunctionBuilderContext::new();
-    let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_context);
+    let builder = IrBuilder::new(FunctionBuilder::new(
+        &mut context.func,
+        &mut builder_context,
+    ));
     let entry = builder.create_block();
     builder.append_block_params_for_function_params(entry);
     builder.switch_to_block(entry);
-    let parameters = builder.block_params(entry);
-    let state = parameters[0];
-    let budget = parameters[1];
+    let state = builder.block_param(entry, 0);
+    let budget = builder.block_param(entry, 1);
 
     let done = builder.create_block();
     builder.append_block_param(done, types::I32);
@@ -599,24 +749,21 @@ fn compile_native_trace(
         // A failed native guard returns to the interpreter. These values make
         // that transition transactional for stack and memory metadata.
         let next = builder.create_block();
-        terminated = {
-            let ir_builder = IrBuilder::new(&mut builder);
-            copy_field(&ir_builder, state, STACK_LEN, ROLLBACK_STACK_LEN);
-            copy_field(&ir_builder, state, PC, ROLLBACK_PC);
-            copy_field(&ir_builder, state, DIRTY_MIN, ROLLBACK_DIRTY_MIN);
-            copy_field(&ir_builder, state, DIRTY_MAX, ROLLBACK_DIRTY_MAX);
-            copy_field(&ir_builder, state, STACK_DIRTY, ROLLBACK_STACK_DIRTY);
-            copy_field(&ir_builder, state, RANDOM_STATE, ROLLBACK_RANDOM_STATE);
-            emit_instruction(
-                &ir_builder,
-                state,
-                slow,
-                done,
-                next,
-                index as u32,
-                trace_instruction,
-            )
-        };
+        copy_field(&builder, state, STACK_LEN, ROLLBACK_STACK_LEN);
+        copy_field(&builder, state, PC, ROLLBACK_PC);
+        copy_field(&builder, state, DIRTY_MIN, ROLLBACK_DIRTY_MIN);
+        copy_field(&builder, state, DIRTY_MAX, ROLLBACK_DIRTY_MAX);
+        copy_field(&builder, state, STACK_DIRTY, ROLLBACK_STACK_DIRTY);
+        copy_field(&builder, state, RANDOM_STATE, ROLLBACK_RANDOM_STATE);
+        terminated = emit_instruction(
+            &builder,
+            state,
+            slow,
+            done,
+            next,
+            index as u32,
+            trace_instruction,
+        );
         if terminated {
             break;
         }
@@ -632,16 +779,13 @@ fn compile_native_trace(
     }
 
     builder.switch_to_block(slow);
-    {
-        let ir_builder = IrBuilder::new(&mut builder);
-        copy_field(&ir_builder, state, ROLLBACK_STACK_LEN, STACK_LEN);
-        copy_field(&ir_builder, state, ROLLBACK_PC, PC);
-        copy_field(&ir_builder, state, ROLLBACK_DIRTY_MIN, DIRTY_MIN);
-        copy_field(&ir_builder, state, ROLLBACK_DIRTY_MAX, DIRTY_MAX);
-        copy_field(&ir_builder, state, ROLLBACK_STACK_DIRTY, STACK_DIRTY);
-        copy_field(&ir_builder, state, ROLLBACK_RANDOM_STATE, RANDOM_STATE);
-    }
-    let slow_count = builder.block_params(slow)[0];
+    copy_field(&builder, state, ROLLBACK_STACK_LEN, STACK_LEN);
+    copy_field(&builder, state, ROLLBACK_PC, PC);
+    copy_field(&builder, state, ROLLBACK_DIRTY_MIN, DIRTY_MIN);
+    copy_field(&builder, state, ROLLBACK_DIRTY_MAX, DIRTY_MAX);
+    copy_field(&builder, state, ROLLBACK_STACK_DIRTY, STACK_DIRTY);
+    copy_field(&builder, state, ROLLBACK_RANDOM_STATE, RANDOM_STATE);
+    let slow_count = builder.block_param(slow, 0);
     let slow_flag = builder
         .ins()
         .iconst(types::I32, i64::from(NATIVE_SLOW_FLAG as i32));
@@ -649,7 +793,7 @@ fn compile_native_trace(
     builder.ins().return_(&[slow_result]);
 
     builder.switch_to_block(done);
-    let count = builder.block_params(done)[0];
+    let count = builder.block_param(done, 0);
     builder.ins().return_(&[count]);
     builder.seal_all_blocks();
     builder.finalize(isa.frontend_config());
@@ -2686,28 +2830,30 @@ mod tests {
         let memory_len = memory.len();
         let (rom, ram) = memory.split_at_mut(0x100);
         NativeState {
-            rom_ptr: rom.as_ptr(),
-            ram_ptr: ram.as_mut_ptr(),
-            memory_len: memory_len as u32,
-            ram_start: 0x100,
-            ram_len: ram.len() as u32,
-            stack_ptr: stack.as_mut_ptr(),
-            stack_len: 0,
-            stack_capacity: stack.capacity() as u32,
-            stack_maximum: stack.capacity() as u32,
-            stack_frame_end: 0,
-            locals_base: 0,
-            pc: 0x40,
-            random_state: 1,
-            dirty_min: u32::MAX,
-            dirty_max: 0,
-            stack_dirty: 0,
-            rollback_stack_len: 0,
-            rollback_pc: 0,
-            rollback_dirty_min: u32::MAX,
-            rollback_dirty_max: 0,
-            rollback_stack_dirty: 0,
-            rollback_random_state: 0,
+            abi: NativeAbiState {
+                rom_ptr: rom.as_ptr(),
+                ram_ptr: ram.as_mut_ptr(),
+                memory_len: memory_len as u32,
+                ram_start: 0x100,
+                ram_len: ram.len() as u32,
+                stack_ptr: stack.as_mut_ptr(),
+                stack_len: 0,
+                stack_capacity: stack.capacity() as u32,
+                stack_maximum: stack.capacity() as u32,
+                stack_frame_end: 0,
+                locals_base: 0,
+                pc: 0x40,
+                random_state: 1,
+                dirty_min: u32::MAX,
+                dirty_max: 0,
+                stack_dirty: 0,
+                rollback_stack_len: 0,
+                rollback_pc: 0,
+                rollback_dirty_min: u32::MAX,
+                rollback_dirty_max: 0,
+                rollback_stack_dirty: 0,
+                rollback_random_state: 0,
+            },
             ram_storage: Vec::new(),
             rom_storage: None,
             stack_storage: Vec::new(),
@@ -2769,7 +2915,7 @@ mod tests {
         let mut state = state_for(&mut memory, &mut stack);
         let result = executor.run(&mut state, 2);
         assert_eq!(result, 2);
-        assert_eq!(state.stack_len, 0);
+        assert_eq!(state.abi.stack_len, 0);
         assert_eq!(&memory[0x120..0x124], &16u32.to_be_bytes());
     }
 
@@ -2798,7 +2944,7 @@ mod tests {
         let mut stack = Vec::with_capacity(64);
         let mut state = state_for(&mut memory, &mut stack);
         assert_eq!(executor.run(&mut state, 1), 1);
-        assert_eq!(state.pc, 0x52);
+        assert_eq!(state.abi.pc, 0x52);
 
         let false_instruction = DecodedInstruction {
             operands: [
@@ -2816,9 +2962,9 @@ mod tests {
         let executor = compiler
             .executor(false_instruction.address, &[false_instruction])
             .expect("native false branch");
-        state.pc = false_instruction.address;
+        state.abi.pc = false_instruction.address;
         assert_eq!(executor.run(&mut state, 1), 1);
-        assert_eq!(state.pc, false_instruction.next_pc);
+        assert_eq!(state.abi.pc, false_instruction.next_pc);
 
         let special_instruction = DecodedInstruction {
             operands: [
@@ -2836,9 +2982,9 @@ mod tests {
         let executor = compiler
             .executor(special_instruction.address, &[special_instruction])
             .expect("native special branch");
-        state.pc = special_instruction.address;
+        state.abi.pc = special_instruction.address;
         assert_eq!(executor.run(&mut state, 1), NATIVE_SLOW_FLAG);
-        assert_eq!(state.pc, special_instruction.address);
+        assert_eq!(state.abi.pc, special_instruction.address);
     }
 
     #[test]
@@ -2923,7 +3069,7 @@ mod tests {
             u32::from_be_bytes(memory[0x120..0x124].try_into().unwrap()),
             expected % 3
         );
-        assert_eq!(state.random_state, 1u32.wrapping_add(0x9e37_79b9));
+        assert_eq!(state.abi.random_state, 1u32.wrapping_add(0x9e37_79b9));
     }
 
     #[test]
@@ -2974,9 +3120,9 @@ mod tests {
         let executor = compiler
             .executor(branch.address, &[branch])
             .expect("native float branch");
-        state.pc = branch.address;
+        state.abi.pc = branch.address;
         assert_eq!(executor.run(&mut state, 1), 1);
-        assert_eq!(state.pc, 0x5e);
+        assert_eq!(state.abi.pc, 0x5e);
     }
 
     #[test]
