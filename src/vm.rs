@@ -1153,13 +1153,7 @@ impl Vm {
                 // rebuild that mirror when the next native block is ready;
                 // cold interpreter fallback must not copy the whole RAM.
                 self.prepare_native_state()?;
-                let result = unsafe {
-                    executor.run(
-                        &mut self.native_state,
-                        block.instructions.as_ptr().cast(),
-                        native_length,
-                    )
-                };
+                let result = executor.run(&mut self.native_state, native_length);
                 let slow = result & native::NATIVE_SLOW_FLAG != 0;
                 let executed = (result & native::NATIVE_COUNT_MASK) as usize;
                 self.record_native_opcodes(&block.instructions, executed);

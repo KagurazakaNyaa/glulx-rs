@@ -210,7 +210,7 @@ fn detect() -> io::Result<Snapshot> {
     use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
     // SAFETY: the initialized buffer has the size required by this API.
     unsafe {
-        let mut status: MEMORYSTATUSEX = std::mem::zeroed();
+        let mut status = MEMORYSTATUSEX::default();
         status.dwLength = std::mem::size_of_val(&status) as u32;
         if GlobalMemoryStatusEx(&mut status) == 0 {
             return Err(io::Error::last_os_error());

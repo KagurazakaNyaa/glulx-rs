@@ -28,7 +28,7 @@ use super::{DecodedInstruction, Operand, Stack, Width, jit::TraceInstruction};
 
 const AOT_MAGIC: &[u8; 8] = b"GLXAOT02";
 const AOT_VERSION: u32 = 7;
-const NATIVE_CODEGEN_VERSION: &str = "cranelift-0.135.2-native-traces-v4";
+const NATIVE_CODEGEN_VERSION: &str = "cranelift-0.135.2-native-traces-v5";
 const MAX_EXECUTOR_BYTES: usize = 4 * 1024 * 1024;
 const AOT_FLUSH_BLOCKS: usize = 64;
 
@@ -128,6 +128,11 @@ impl NativeState {
             )
             .map_err(|_| super::VmError::MemoryAllocation(stack.bytes.len() as u32))?;
         self.stack_storage.extend_from_slice(&stack.bytes);
+        let stack_capacity = self.stack_storage.capacity().min(u32::MAX as usize);
+        // Native code writes directly through stack_ptr while stack_len remains
+        // the guest-visible logical length. Keep the whole writable range
+        // initialized so committing it does not require Vec::set_len.
+        self.stack_storage.resize(stack_capacity, 0);
 
         self.rom_ptr = self
             .rom_storage
@@ -141,7 +146,7 @@ impl NativeState {
         self.ram_len = self.ram_storage.len() as u32;
         self.stack_ptr = self.stack_storage.as_mut_ptr();
         self.stack_len = stack.bytes.len() as u32;
-        self.stack_capacity = self.stack_storage.capacity().min(u32::MAX as usize) as u32;
+        self.stack_capacity = stack_capacity as u32;
         self.stack_maximum = stack.maximum;
         self.stack_frame_end = stack.current_frame_end;
         self.locals_base = stack.locals_base;
@@ -166,14 +171,9 @@ impl NativeState {
 
         let stack_len = usize::try_from(self.stack_len)
             .ok()
-            .filter(|length| *length <= self.stack_storage.capacity())
+            .filter(|length| *length <= self.stack_storage.len())
             .ok_or(super::VmError::StackOverflow)?;
-        // Native stores may extend beyond Vec::len() while staying within its
-        // reserved capacity. Make that initialized range visible before it is
-        // copied into the VM's ordinary stack.
-        unsafe {
-            self.stack_storage.set_len(stack_len);
-        }
+        self.stack_storage.truncate(stack_len);
         if self.stack_dirty != 0 || stack.bytes.len() != stack_len {
             stack.bytes.clear();
             stack.bytes.extend_from_slice(&self.stack_storage);
@@ -190,8 +190,7 @@ impl NativeState {
     }
 }
 
-pub(super) type NativeBlockFn =
-    unsafe extern "C" fn(*mut NativeState, *const DecodedInstruction, u32) -> u32;
+pub(super) type NativeBlockFn = unsafe extern "C" fn(*mut NativeState, u32) -> u32;
 
 struct ExecutableMemory {
     ptr: NonNull<u8>,
@@ -251,13 +250,11 @@ impl NativeExecutor {
         }))
     }
 
-    pub(super) unsafe fn run(
-        &self,
-        state: *mut NativeState,
-        instructions: *const DecodedInstruction,
-        budget: usize,
-    ) -> u32 {
-        unsafe { (self.function)(state, instructions, budget as u32) }
+    pub(super) fn run(&self, state: &mut NativeState, budget: usize) -> u32 {
+        let budget = u32::try_from(budget).unwrap_or(u32::MAX);
+        // SAFETY: the executor owns the generated function's executable memory,
+        // and this wrapper supplies a live native state for the duration of the call.
+        unsafe { (self.function)(state, budget) }
     }
 }
 
@@ -559,11 +556,11 @@ fn compile_native_trace(
     }
     let mut context = Context::new();
     context.func.signature = Signature::new(isa.default_call_conv());
-    context.func.signature.params.extend([
-        AbiParam::new(pointer_type),
-        AbiParam::new(pointer_type),
-        AbiParam::new(types::I32),
-    ]);
+    context
+        .func
+        .signature
+        .params
+        .extend([AbiParam::new(pointer_type), AbiParam::new(types::I32)]);
     context
         .func
         .signature
@@ -578,8 +575,7 @@ fn compile_native_trace(
     builder.switch_to_block(entry);
     let parameters = builder.block_params(entry);
     let state = parameters[0];
-    let _instructions = parameters[1];
-    let budget = parameters[2];
+    let budget = parameters[1];
 
     let done = builder.create_block();
     builder.append_block_param(done, types::I32);
@@ -2687,12 +2683,14 @@ mod tests {
     }
 
     fn state_for(memory: &mut [u8], stack: &mut Vec<u8>) -> NativeState {
+        let memory_len = memory.len();
+        let (rom, ram) = memory.split_at_mut(0x100);
         NativeState {
-            rom_ptr: memory.as_ptr(),
-            ram_ptr: unsafe { memory.as_mut_ptr().add(0x100) },
-            memory_len: memory.len() as u32,
+            rom_ptr: rom.as_ptr(),
+            ram_ptr: ram.as_mut_ptr(),
+            memory_len: memory_len as u32,
             ram_start: 0x100,
-            ram_len: (memory.len() - 0x100) as u32,
+            ram_len: ram.len() as u32,
             stack_ptr: stack.as_mut_ptr(),
             stack_len: 0,
             stack_capacity: stack.capacity() as u32,
@@ -2724,7 +2722,7 @@ mod tests {
             .executor(instruction.address, &[instruction])
             .expect("native block");
         let mut state = NativeState::default();
-        let result = unsafe { executor.run(&mut state, &instruction, 1) };
+        let result = executor.run(&mut state, 1);
         assert_eq!(result, 1);
     }
 
@@ -2769,7 +2767,7 @@ mod tests {
         let mut memory = vec![0; 0x200];
         let mut stack = Vec::with_capacity(64);
         let mut state = state_for(&mut memory, &mut stack);
-        let result = unsafe { executor.run(&mut state, instructions.as_ptr(), 2) };
+        let result = executor.run(&mut state, 2);
         assert_eq!(result, 2);
         assert_eq!(state.stack_len, 0);
         assert_eq!(&memory[0x120..0x124], &16u32.to_be_bytes());
@@ -2799,7 +2797,7 @@ mod tests {
         let mut memory = vec![0; 0x200];
         let mut stack = Vec::with_capacity(64);
         let mut state = state_for(&mut memory, &mut stack);
-        assert_eq!(unsafe { executor.run(&mut state, &instruction, 1) }, 1);
+        assert_eq!(executor.run(&mut state, 1), 1);
         assert_eq!(state.pc, 0x52);
 
         let false_instruction = DecodedInstruction {
@@ -2819,10 +2817,7 @@ mod tests {
             .executor(false_instruction.address, &[false_instruction])
             .expect("native false branch");
         state.pc = false_instruction.address;
-        assert_eq!(
-            unsafe { executor.run(&mut state, &false_instruction, 1) },
-            1
-        );
+        assert_eq!(executor.run(&mut state, 1), 1);
         assert_eq!(state.pc, false_instruction.next_pc);
 
         let special_instruction = DecodedInstruction {
@@ -2842,10 +2837,7 @@ mod tests {
             .executor(special_instruction.address, &[special_instruction])
             .expect("native special branch");
         state.pc = special_instruction.address;
-        assert_eq!(
-            unsafe { executor.run(&mut state, &special_instruction, 1) },
-            NATIVE_SLOW_FLAG
-        );
+        assert_eq!(executor.run(&mut state, 1), NATIVE_SLOW_FLAG);
         assert_eq!(state.pc, special_instruction.address);
     }
 
@@ -2921,7 +2913,7 @@ mod tests {
         let mut memory = vec![0; 0x200];
         let mut stack = Vec::with_capacity(64);
         let mut state = state_for(&mut memory, &mut stack);
-        let result = unsafe { executor.run(&mut state, &instruction, 1) };
+        let result = executor.run(&mut state, 1);
         assert_eq!(result, 1);
         let mut expected = 1u32.wrapping_add(0x9e37_79b9);
         expected = (expected ^ (expected >> 16)).wrapping_mul(0x21f0_aaad);
@@ -2973,7 +2965,7 @@ mod tests {
         let mut memory = vec![0; 0x200];
         let mut stack = Vec::with_capacity(64);
         let mut state = state_for(&mut memory, &mut stack);
-        assert_eq!(unsafe { executor.run(&mut state, &add, 1) }, 1);
+        assert_eq!(executor.run(&mut state, 1), 1);
         assert_eq!(
             u32::from_be_bytes(memory[0x120..0x124].try_into().unwrap()),
             3.75f32.to_bits()
@@ -2983,7 +2975,7 @@ mod tests {
             .executor(branch.address, &[branch])
             .expect("native float branch");
         state.pc = branch.address;
-        assert_eq!(unsafe { executor.run(&mut state, &branch, 1) }, 1);
+        assert_eq!(executor.run(&mut state, 1), 1);
         assert_eq!(state.pc, 0x5e);
     }
 
@@ -3013,7 +3005,7 @@ mod tests {
         let mut memory = vec![0; 0x200];
         let mut stack = Vec::with_capacity(64);
         let mut state = state_for(&mut memory, &mut stack);
-        assert_eq!(unsafe { executor.run(&mut state, &add, 1) }, 1);
+        assert_eq!(executor.run(&mut state, 1), 1);
         let expected = 9.5f64.to_bits();
         assert_eq!(
             u32::from_be_bytes(memory[0x120..0x124].try_into().unwrap()),
