@@ -254,11 +254,18 @@ impl JitState {
     }
 
     pub(super) fn block(&mut self, address: u32) -> Option<Arc<NativeBlock>> {
-        self.poll();
+        // Every result belongs to a pending request. Avoid touching the worker's
+        // channel on the steady-state native execution path.
+        if !self.pending.is_empty() {
+            self.poll();
+        }
+        if address >= self.ram_start {
+            return None;
+        }
         let block = self.blocks.get(address);
         if block.is_some() {
             self.block_hits = self.block_hits.wrapping_add(1);
-        } else {
+        } else if !self.unavailable.contains(&address) && !self.pending.contains(&address) {
             let count = self.hot_counts.entry(address).or_default();
             *count = count.saturating_add(1);
             if *count >= HOT_BLOCK_THRESHOLD {
@@ -314,6 +321,7 @@ impl JitState {
                 }
             };
             self.pending.remove(&result.address);
+            self.hot_counts.remove(&result.address);
             self.compile_results = self.compile_results.wrapping_add(1);
             if let Some(block) = result.block {
                 if self.blocks.len() >= MAX_BLOCKS && !self.blocks.contains(result.address) {
@@ -589,4 +597,84 @@ pub(super) fn is_block_terminator(opcode: u32) -> bool {
             | 0x230..=0x235
             | 0x238..=0x239
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Explicit channels let tests deliver compilation results without races or
+    // depending on the host's native compiler support.
+    fn worker_state() -> (JitState, Receiver<u32>, mpsc::Sender<CompileResult>) {
+        let (requests, request_receiver) = mpsc::sync_channel(COMPILE_QUEUE_CAPACITY);
+        let (result_sender, results) = mpsc::channel();
+        let mut state = JitState {
+            ram_start: 0x100,
+            worker: Some(CompilerWorker { requests, results }),
+            ..JitState::default()
+        };
+        state.blocks.reset(state.ram_start);
+        (state, request_receiver, result_sender)
+    }
+
+    #[test]
+    fn ram_execution_does_not_allocate_hot_counters_or_request_compilation() {
+        let (mut state, requests, _results) = worker_state();
+        for address in 0x100..0x1000 {
+            assert!(state.block(address).is_none());
+        }
+        assert!(state.hot_counts.is_empty());
+        assert!(state.pending.is_empty());
+        assert!(matches!(requests.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn failed_compilation_stops_tracking_until_cache_reset() {
+        let (mut state, requests, results) = worker_state();
+        for _ in 0..HOT_BLOCK_THRESHOLD {
+            assert!(state.block(0x40).is_none());
+        }
+        assert_eq!(requests.try_recv().unwrap(), 0x40);
+        results
+            .send(CompileResult {
+                address: 0x40,
+                block: None,
+            })
+            .unwrap();
+        for _ in 0..32 {
+            assert!(state.block(0x40).is_none());
+        }
+        assert!(state.hot_counts.is_empty());
+        assert!(state.pending.is_empty());
+        assert_eq!(state.compile_results(), 1);
+        assert!(matches!(requests.try_recv(), Err(TryRecvError::Empty)));
+        state.clear();
+        assert!(state.unavailable.is_empty());
+    }
+
+    #[test]
+    fn cached_hits_still_install_pending_results() {
+        let (mut state, requests, results) = worker_state();
+        let block = Arc::new(NativeBlock {
+            instructions: Box::new([]),
+            executor: None,
+        });
+        state.blocks.insert(0x40, Arc::clone(&block));
+        for _ in 0..HOT_BLOCK_THRESHOLD {
+            assert!(state.block(0x80).is_none());
+        }
+        assert_eq!(requests.try_recv().unwrap(), 0x80);
+        results
+            .send(CompileResult {
+                address: 0x80,
+                block: Some(block),
+            })
+            .unwrap();
+        assert!(state.block(0x40).is_some());
+        assert!(state.block(0x80).is_some());
+        assert!(state.pending.is_empty());
+        assert!(state.hot_counts.is_empty());
+        assert_eq!(state.block_count(), 2);
+        assert_eq!(state.compile_results(), 1);
+    }
 }
