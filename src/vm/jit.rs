@@ -43,6 +43,7 @@ const COMPILE_QUEUE_CAPACITY: usize = 128;
 const HOT_BLOCK_THRESHOLD: u8 = 8;
 pub(super) const MAX_TRACE_INSTRUCTIONS: usize = 256;
 const MAX_BLOCKS: usize = 4096;
+const MAX_TRACE_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const PC_PAGE_SIZE: usize = 256;
 type TracePage = Box<[Option<Arc<NativeBlock>>; PC_PAGE_SIZE]>;
 
@@ -51,16 +52,16 @@ struct TraceCache {
     pages: Vec<Option<TracePage>>,
     ram_start: u32,
     len: usize,
+    bytes: usize,
 }
 
 impl TraceCache {
     fn reset(&mut self, ram_start: u32) {
+        self.clear();
         let page_count = (ram_start as usize).div_ceil(PC_PAGE_SIZE);
         if self.pages.len() != page_count {
             self.pages.clear();
             self.pages.resize_with(page_count, || None);
-        } else {
-            self.clear();
         }
         self.ram_start = ram_start;
     }
@@ -70,6 +71,7 @@ impl TraceCache {
             *page = None;
         }
         self.len = 0;
+        self.bytes = 0;
     }
 
     fn get(&self, address: u32) -> Option<Arc<NativeBlock>> {
@@ -86,8 +88,26 @@ impl TraceCache {
     }
 
     fn insert(&mut self, address: u32, block: Arc<NativeBlock>) {
+        self.insert_with_limit(address, block, MAX_TRACE_CACHE_BYTES);
+    }
+
+    fn insert_with_limit(&mut self, address: u32, block: Arc<NativeBlock>, maximum: usize) {
         if address >= self.ram_start {
             return;
+        }
+        let bytes = block.byte_len();
+        if bytes > maximum {
+            return;
+        }
+        if let Some(old) = self.get(address) {
+            self.bytes -= old.byte_len();
+            self.pages[address as usize / PC_PAGE_SIZE]
+                .as_mut()
+                .unwrap()[address as usize % PC_PAGE_SIZE] = None;
+            self.len -= 1;
+        }
+        if self.len >= MAX_BLOCKS || self.bytes.saturating_add(bytes) > maximum {
+            self.clear();
         }
         let page_index = address as usize / PC_PAGE_SIZE;
         let offset = address as usize % PC_PAGE_SIZE;
@@ -97,6 +117,7 @@ impl TraceCache {
             self.len += 1;
         }
         page[offset] = Some(block);
+        self.bytes += bytes;
     }
 
     fn len(&self) -> usize {
@@ -146,6 +167,14 @@ pub(super) struct NativeBlock {
 }
 
 impl NativeBlock {
+    fn byte_len(&self) -> usize {
+        std::mem::size_of_val(self.instructions.as_ref())
+            + self
+                .executor
+                .as_ref()
+                .map_or(0, |executor| executor.byte_len())
+    }
+
     pub(super) fn executor(&self) -> Option<Arc<native::NativeExecutor>> {
         self.executor.clone()
     }
@@ -324,9 +353,6 @@ impl JitState {
             self.hot_counts.remove(&result.address);
             self.compile_results = self.compile_results.wrapping_add(1);
             if let Some(block) = result.block {
-                if self.blocks.len() >= MAX_BLOCKS && !self.blocks.contains(result.address) {
-                    self.blocks.clear();
-                }
                 self.compiled_blocks = self.compiled_blocks.wrapping_add(1);
                 self.compiled_instructions = self
                     .compiled_instructions
@@ -340,6 +366,10 @@ impl JitState {
 
     pub(super) fn block_count(&self) -> usize {
         self.blocks.len()
+    }
+
+    pub(super) fn cache_bytes(&self) -> usize {
+        self.blocks.bytes
     }
 
     pub(super) fn pending_count(&self) -> usize {
@@ -602,6 +632,38 @@ pub(super) fn is_block_terminator(opcode: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trace_cache_byte_budget_releases_old_blocks_and_tracks_replacements() {
+        let block = || {
+            Arc::new(NativeBlock {
+                instructions: vec![TraceInstruction::plain(DecodedInstruction {
+                    address: 0x40,
+                    next_pc: 0x41,
+                    opcode: 0,
+                    operands: [Operand::Zero; 8],
+                })]
+                .into_boxed_slice(),
+                executor: None,
+            })
+        };
+        let mut cache = TraceCache::default();
+        cache.reset(0x100);
+        let first = block();
+        let maximum = first.byte_len();
+        let weak = Arc::downgrade(&first);
+        cache.insert_with_limit(0x40, first, maximum);
+        cache.insert_with_limit(0x80, block(), maximum);
+        assert!(weak.upgrade().is_none());
+        assert!(cache.get(0x40).is_none());
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.bytes, maximum);
+        cache.insert_with_limit(0x80, block(), maximum);
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.bytes, maximum);
+        cache.reset(0x200);
+        assert_eq!((cache.len(), cache.bytes), (0, 0));
+    }
 
     // Explicit channels let tests deliver compilation results without races or
     // depending on the host's native compiler support.

@@ -94,6 +94,21 @@ impl Default for PlayerSettings {
     }
 }
 
+impl PlayerSettings {
+    pub fn load() -> std::io::Result<Self> {
+        crate::memory_budget::load_settings()
+    }
+
+    pub fn memory_policy(&self) -> MemoryPolicy {
+        MemoryPolicy {
+            max_memory_mib: self.max_memory_mib,
+            max_process_memory_mib: self.max_process_memory_mib,
+            resource_limits: self.resource_limits,
+            profiling: self.profiling.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 enum TurnTranslation {
     #[default]
@@ -375,7 +390,10 @@ impl PlayerApp {
         let byte_cut = self.transcript.len().saturating_sub(MAX_TRANSCRIPT_BYTES);
         let byte_cut = if byte_cut == 0 {
             0
-        } else if let Some(offset) = self.transcript[byte_cut..].find('\n') {
+        } else if let Some(offset) = self.transcript.as_bytes()[byte_cut..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+        {
             byte_cut + offset + 1
         } else {
             let mut offset = byte_cut;
@@ -388,9 +406,9 @@ impl PlayerApp {
             .transcript_lines
             .len()
             .saturating_sub(MAX_TRANSCRIPT_LINES);
-        let line_cut = self
-            .transcript_lines
-            .get(line_count.saturating_sub(1))
+        let line_cut = line_count
+            .checked_sub(1)
+            .and_then(|index| self.transcript_lines.get(index))
             .map_or(0, |line| {
                 line.end + usize::from(self.transcript.as_bytes().get(line.end) == Some(&b'\n'))
             });
@@ -657,12 +675,7 @@ impl PlayerApp {
     }
 
     fn memory_policy(&self) -> MemoryPolicy {
-        self.memory_overrides.apply(MemoryPolicy {
-            max_memory_mib: self.settings.max_memory_mib,
-            max_process_memory_mib: self.settings.max_process_memory_mib,
-            resource_limits: self.settings.resource_limits,
-            profiling: self.settings.profiling.clone(),
-        })
+        self.memory_overrides.apply(self.settings.memory_policy())
     }
 
     fn configured_aot_cache_dir(&self) -> Option<PathBuf> {
@@ -944,6 +957,9 @@ impl PlayerApp {
                         "translation queued turn={index} id={id}"
                     ));
                 }
+                Submission::Rejected(error) => {
+                    self.turns[index].translation = TurnTranslation::Complete(Err(error));
+                }
             }
         }
     }
@@ -1000,6 +1016,7 @@ impl PlayerApp {
     }
 
     fn reset_translation_history(&mut self) {
+        self.translator.reset();
         self.turn_buffer.clear();
         self.turn_windows.clear();
         self.turns.clear();
@@ -2456,6 +2473,29 @@ mod tests {
         assert!(app.transcript.len() <= MAX_TRANSCRIPT_BYTES);
         assert!(app.transcript.ends_with("tail"));
         assert_eq!(app.transcript_lines.len(), 1);
+    }
+
+    #[test]
+    fn transcript_trimming_preserves_utf8_and_line_indexes() {
+        for character in ["中", "😀"] {
+            for tail in ["", "x", "\nlatest\n", "x\nlatest\n"] {
+                let context = egui::Context::default();
+                let mut app = PlayerApp::new(&eframe::CreationContext::_new_kittest(context), None);
+                let text = character.repeat(MAX_TRANSCRIPT_BYTES / character.len() + 1) + tail;
+                app.append_transcript(&text);
+                assert!(app.transcript.len() <= MAX_TRANSCRIPT_BYTES);
+                assert!(text.ends_with(&app.transcript));
+                let expected_tail = if tail.contains('\n') {
+                    "latest\n"
+                } else {
+                    tail
+                };
+                assert!(app.transcript.ends_with(expected_tail));
+                for line in &app.transcript_lines {
+                    assert!(app.transcript.get(line.clone()).is_some());
+                }
+            }
+        }
     }
 
     #[test]

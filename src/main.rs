@@ -2,8 +2,8 @@
 
 use std::{ffi::OsString, path::PathBuf};
 
-use glulx_rs::app::PlayerApp;
-use glulx_rs::memory_budget::{Budget, MemoryPolicy, Overrides, startup_snapshot};
+use glulx_rs::app::{PlayerApp, PlayerSettings};
+use glulx_rs::memory_budget::{Budget, Overrides, startup_snapshot};
 use glulx_rs::{ResourceSelection, Story, Vm};
 
 const USAGE: &str = concat!(
@@ -45,6 +45,22 @@ struct Arguments {
     story: Option<PathBuf>,
     resources: ResourceSelection,
     diagnostics: Option<PathBuf>,
+}
+
+impl Arguments {
+    fn runtime_options(
+        &self,
+        settings: &PlayerSettings,
+    ) -> (glulx_rs::ExecutionBackend, Option<PathBuf>) {
+        let cache = self.aot_cache_dir.clone().or_else(|| {
+            let path = settings.aot_cache_dir.trim();
+            (!path.is_empty()).then(|| PathBuf::from(path))
+        });
+        (
+            self.execution_backend.unwrap_or(settings.execution_backend),
+            cache,
+        )
+    }
 }
 
 fn parse_arguments(
@@ -208,12 +224,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     // Snapshot before limiting our own address space or initializing the GUI.
     let snapshot = startup_snapshot();
+    let settings = PlayerSettings::load()?;
+    let (backend, aot_cache) = arguments.runtime_options(&settings);
     let overrides = Overrides {
         game: arguments.max_memory_mib,
         process: arguments.max_process_memory_mib,
         resources: arguments.resource_overrides,
     };
-    let policy = overrides.apply(MemoryPolicy::load()?);
+    let policy = overrides.apply(settings.memory_policy());
     let game_limit = policy.max_memory_mib.vm_bytes(snapshot)?;
     let resources = policy.resource_limits.resolve(snapshot)?;
     let process_limit = policy.max_process_memory_mib.resolve(snapshot)?;
@@ -228,8 +246,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let story = Story::open_with_resources(arguments.story.unwrap(), arguments.resources)?;
         let mut vm = Vm::new_with_memory_limit(story, game_limit)?;
         vm.set_strict_glk(arguments.strict_glk);
-        vm.set_aot_cache_dir(arguments.aot_cache_dir.clone());
-        vm.set_execution_backend(arguments.execution_backend.unwrap_or_default());
+        vm.set_aot_cache_dir(aot_cache);
+        vm.set_execution_backend(backend);
         vm.set_resource_limits(resources);
         return glulx_rs::terminal::run_with_event_trace(vm, arguments.trace_events);
     }
@@ -293,9 +311,53 @@ fn attach_console(allocate: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glulx_rs::memory_budget::MemoryPolicy;
 
     fn parse(arguments: &[&str]) -> Result<Option<Arguments>, String> {
         parse_arguments(arguments.iter().map(OsString::from))
+    }
+
+    #[test]
+    fn headless_runtime_options_use_json_and_cli_overrides() {
+        let settings: PlayerSettings = serde_json::from_str(
+            r#"{"execution_backend":"jit","aot_cache_dir":" settings-cache "}"#,
+        )
+        .unwrap();
+        let arguments = parse(&["--headless", "story.ulx"]).unwrap().unwrap();
+        assert_eq!(
+            arguments.runtime_options(&settings),
+            (
+                glulx_rs::ExecutionBackend::Jit,
+                Some(PathBuf::from("settings-cache"))
+            )
+        );
+        let arguments = parse(&[
+            "--headless",
+            "--execution-backend",
+            "interpreter",
+            "--aot-cache-dir",
+            "cli-cache",
+            "story.ulx",
+        ])
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            arguments.runtime_options(&settings),
+            (
+                glulx_rs::ExecutionBackend::Interpreter,
+                Some(PathBuf::from("cli-cache"))
+            )
+        );
+        assert_eq!(settings.aot_cache_dir, " settings-cache ");
+        let blank = PlayerSettings {
+            aot_cache_dir: "  ".into(),
+            ..PlayerSettings::default()
+        };
+        let arguments = parse(&["--headless", "story.ulx"]).unwrap().unwrap();
+        assert_eq!(
+            arguments.runtime_options(&blank),
+            (glulx_rs::ExecutionBackend::Interpreter, None)
+        );
     }
 
     #[test]

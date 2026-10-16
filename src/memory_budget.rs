@@ -188,16 +188,20 @@ impl Default for MemoryPolicy {
 }
 impl MemoryPolicy {
     pub fn load() -> io::Result<Self> {
-        let exe = std::env::current_exe()?;
-        let path = exe
-            .parent()
-            .ok_or_else(|| io::Error::other("executable has no parent"))?
-            .join("glulx-settings.json");
-        match std::fs::read(path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(error) => Err(error),
-        }
+        load_settings()
+    }
+}
+
+pub(crate) fn load_settings<T: serde::de::DeserializeOwned + Default>() -> io::Result<T> {
+    let exe = std::env::current_exe()?;
+    let path = exe
+        .parent()
+        .ok_or_else(|| io::Error::other("executable has no parent"))?
+        .join("glulx-settings.json");
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(T::default()),
+        Err(error) => Err(error),
     }
 }
 

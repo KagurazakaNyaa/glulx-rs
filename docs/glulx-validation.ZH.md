@@ -2,22 +2,25 @@
 
 [English](glulx-validation.md) | [中文](glulx-validation.ZH.md)
 
-更新：2026-09-10。当前实现基于 `f9c855d` 并包含当前工作树中的兼容性、内存和工具改动；本地验收环境为 Linux x86_64。本文件描述当前代码，不宣称穷尽 Glulx、Glk、媒体或跨平台符合性。
+更新：2026-10-16。本轮自动回归验证覆盖 `27738c8` 之后的修复工作树，环境为 Linux x86_64、Rust 1.99.0。下文参考解释器、GUI、TTY、媒体和性能证据保留自 2026-09-10，本轮未重新执行；不宣称穷尽 Glulx、Glk、媒体或跨平台符合性。
 
 ## 当前验证
 
 ```sh
 RUSTC_WRAPPER= cargo fmt --all -- --check
-RUSTC_WRAPPER= cargo test --all-targets
-RUSTC_WRAPPER= cargo clippy --all-targets -- -D warnings
-RUSTC_WRAPPER= cargo build --release
+RUSTC_WRAPPER= cargo test --locked --all-targets
+RUSTC_WRAPPER= cargo clippy --locked --all-targets -- -D warnings
+RUSTC_WRAPPER= cargo build --locked
 ```
 
 当前检查通过：
 
-- 281 个库测试通过；6 个手动性能测试保持 ignored。
-- 8 个 CLI 测试通过。
-- 格式检查、全目标 Clippy 和 release 构建通过。
+- 323 个库测试通过；17 个依赖手动基准、本地 socket 或外部故事的测试保持 ignored。
+- 10 个 CLI 测试通过。
+- 格式检查、全目标 Clippy 和 debug 构建通过。
+- headless 管道和 strict-Glk 冒烟检查通过。实际二进制验证了 JSON 中的 JIT/AOT 配置和 CLI 解释器覆盖，且不改写设置文件。
+- 回归覆盖 UTF-8 日志裁剪及长单行保留、可执行内存释放、trace/AOT 字节预算、翻译队列/缓存/响应上限和切换故事时的排队任务取消。
+- 分支提交和 PR 会运行 `.github/workflows/ci.yml`；发布检查保持独立。
 - undo 回归证明：2 MiB 故事在 1 MiB undo 预算下可以保留单页快照；共享故事映像不计入该快照预算。
 - 受限页回归证明：dirty pages 达到页预算上限时，会在构造完整候选页表前拒绝。
 - 分发表包含全部 150 条官方 Glulx opcode 和 124 个官方 Glk selector。表完整不等于语义覆盖完整。
@@ -37,11 +40,11 @@ python3 tools/benchmark-stories.py \
   --output "<output-dir>/glulx-real-story-baseline.json"
 ```
 
-真实故事测量是启动/驻留内存 workload，不是完整通关。当前剩余的主要内存成本是故事容器、执行映像、VM 页表和媒体/资源数据；仓库目前没有使用 mmap 或 block compiler。
+真实故事测量是启动/驻留内存 workload，不是完整通关。当前剩余的主要内存成本是故事容器、执行映像、VM 页表和媒体/资源数据。默认后端仍为解释器；可选 Cranelift ROM trace JIT 与 AOT 负载缓存均有上限，容器读取尚未使用 mmap。
 
 当前 release 测量对代表性的 650 MB 和 705 MB Blorb 文件记录峰值 HWM `661620 KiB` 和 `715360 KiB`。这些数字受机器和故事内容影响，仅作为对比证据，不是统一上限。
 
-headless profile 现在会把诊断 heartbeat 保留到 JSON 产物。在启动 workload 的首个两秒区间，代表性故事执行约 278 万条指令，VM-slice 用时约 92 ms，最终进入 `WaitingForChar`，decoded-cache 命中约 265 万次、未命中约 10.6 万次。这个 workload 没有显示 VM dispatch 是主要 CPU 成本；考虑 block compilation 前应先使用更长的脚本路线。
+headless profile 现在会把诊断 heartbeat 保留到 JSON 产物。在启动 workload 的首个两秒区间，代表性故事执行约 278 万条指令，VM-slice 用时约 92 ms，最终进入 `WaitingForChar`，decoded-cache 命中约 265 万次、未命中约 10.6 万次。这些解释器测量早于 native JIT；后续比较应记录后端，并使用更长的脚本路线。
 
 本次 Linux release 测量约为每条指令分发 `8.1 ns`、16,384 条记录线性查找每次约 `169 µs`；这些数字受机器和工具链影响，只用于当前工作树的归因，不是跨实现排名。
 

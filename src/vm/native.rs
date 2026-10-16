@@ -1,7 +1,8 @@
 use std::{
     cell::RefCell,
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     fs,
+    io::Read,
     mem::{align_of, offset_of, size_of},
     panic::{AssertUnwindSafe, catch_unwind},
     path::{Path, PathBuf},
@@ -31,6 +32,9 @@ const AOT_VERSION: u32 = 7;
 const NATIVE_CODEGEN_VERSION: &str = "cranelift-0.135.2-native-traces-v6";
 const MAX_EXECUTOR_BYTES: usize = 4 * 1024 * 1024;
 const AOT_FLUSH_BLOCKS: usize = 64;
+const MAX_AOT_BLOCKS: usize = 4096;
+const MAX_AOT_BYTES: usize = 64 * 1024 * 1024;
+const MAX_AOT_FILE_BYTES: usize = MAX_AOT_BYTES + MAX_AOT_BLOCKS * 16 + 64 * 1024;
 
 pub(super) const NATIVE_SLOW_FLAG: u32 = 0x8000_0000;
 pub(super) const NATIVE_COUNT_MASK: u32 = !NATIVE_SLOW_FLAG;
@@ -264,6 +268,10 @@ pub(super) struct NativeExecutor {
 }
 
 impl NativeExecutor {
+    pub(super) fn byte_len(&self) -> usize {
+        self._memory.len
+    }
+
     pub(super) fn from_bytes(bytes: Vec<u8>) -> Result<Arc<Self>, String> {
         if bytes.len() > MAX_EXECUTOR_BYTES {
             return Err("native code buffer exceeds the AOT limit".to_owned());
@@ -493,11 +501,11 @@ impl<'builder, 'function> IrInstBuilder<'builder, 'function> {
 pub(super) struct NativeCompiler {
     isa: OwnedTargetIsa,
     target_key: String,
-    executors: HashMap<BlockKey, Arc<NativeExecutor>>,
     aot_path: Option<PathBuf>,
     aot_story_fingerprint: u64,
     aot_entries: HashMap<BlockKey, Vec<u8>>,
-    aot_index: Vec<BlockKey>,
+    aot_order: VecDeque<BlockKey>,
+    aot_bytes: usize,
     aot_dirty_blocks: usize,
 }
 
@@ -534,11 +542,11 @@ impl NativeCompiler {
         Ok(Self {
             isa,
             target_key,
-            executors: HashMap::new(),
             aot_path: None,
             aot_story_fingerprint: 0,
             aot_entries: HashMap::new(),
-            aot_index: Vec::new(),
+            aot_order: VecDeque::new(),
+            aot_bytes: 0,
             aot_dirty_blocks: 0,
         })
     }
@@ -572,27 +580,15 @@ impl NativeCompiler {
             address,
             fingerprint: block_fingerprint(address, instructions),
         };
-        if let Some(executor) = self.executors.get(&key) {
-            return Ok(executor.clone());
-        }
-        let code = if let Ok(index) = self
-            .aot_index
-            .binary_search_by_key(&(key.address, key.fingerprint), |candidate| {
-                (candidate.address, candidate.fingerprint)
-            }) {
-            self.aot_entries
-                .get(&self.aot_index[index])
-                .cloned()
-                .expect("AOT index entry must have a payload")
-        } else if let Some(code) = self.aot_entries.get(&key) {
+        let code = if let Some(code) = self.aot_entries.get(&key) {
             code.clone()
         } else {
             let code = catch_unwind(AssertUnwindSafe(|| {
                 compile_native_trace(self.isa.as_ref(), address, instructions)
             }))
             .map_err(|_| "native block compiler panicked".to_owned())??;
-            self.aot_entries.insert(key, code.clone());
             if self.aot_path.is_some() {
+                self.retain_aot_block(key, code.clone());
                 self.aot_dirty_blocks += 1;
             }
             if self.aot_dirty_blocks >= AOT_FLUSH_BLOCKS {
@@ -601,9 +597,25 @@ impl NativeCompiler {
             }
             code
         };
-        let executor = NativeExecutor::from_bytes(code)?;
-        self.executors.insert(key, executor.clone());
-        Ok(executor)
+        // The foreground trace cache owns executable pages. Keeping a second
+        // strong reference here would defeat its eviction and byte budget.
+        NativeExecutor::from_bytes(code)
+    }
+
+    fn retain_aot_block(&mut self, key: BlockKey, code: Vec<u8>) {
+        while self.aot_entries.len() >= MAX_AOT_BLOCKS
+            || self.aot_bytes.saturating_add(code.len()) > MAX_AOT_BYTES
+        {
+            let Some(oldest) = self.aot_order.pop_front() else {
+                return;
+            };
+            if let Some(old) = self.aot_entries.remove(&oldest) {
+                self.aot_bytes -= old.len();
+            }
+        }
+        self.aot_bytes += code.len();
+        self.aot_entries.insert(key, code);
+        self.aot_order.push_back(key);
     }
 
     pub(super) fn prepare_aot(
@@ -613,13 +625,14 @@ impl NativeCompiler {
     ) -> Result<(), String> {
         self.aot_story_fingerprint = story_fingerprint;
         let path = aot_path(directory, story_fingerprint, &self.target_key);
-        self.aot_entries = fs::read(&path)
+        self.aot_entries = read_aot_file(&path)
             .ok()
             .and_then(|bytes| load_aot(&bytes, story_fingerprint, &self.target_key).ok())
             .unwrap_or_default();
-        self.aot_index = self.aot_entries.keys().copied().collect();
-        self.aot_index
-            .sort_unstable_by_key(|key| (key.address, key.fingerprint));
+        let mut keys = self.aot_entries.keys().copied().collect::<Vec<_>>();
+        keys.sort_unstable_by_key(|key| (key.address, key.fingerprint));
+        self.aot_order = keys.into();
+        self.aot_bytes = self.aot_entries.values().map(Vec::len).sum();
         self.aot_path = Some(path);
         self.aot_dirty_blocks = 0;
         self.persist_aot()
@@ -2625,6 +2638,20 @@ fn aot_path(directory: &Path, story_fingerprint: u64, target_key: &str) -> PathB
     ))
 }
 
+fn read_aot_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    let file = fs::File::open(path)?;
+    if file.metadata()?.len() > MAX_AOT_FILE_BYTES as u64 {
+        return Err(std::io::Error::other("AOT cache exceeds its byte budget"));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_AOT_FILE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_AOT_FILE_BYTES {
+        return Err(std::io::Error::other("AOT cache exceeds its byte budget"));
+    }
+    Ok(bytes)
+}
+
 fn load_aot(
     bytes: &[u8],
     story_fingerprint: u64,
@@ -2645,7 +2672,11 @@ fn load_aot(
         return Err("AOT target mismatch".to_owned());
     }
     let count = take_u32(bytes, &mut cursor)? as usize;
+    if count > MAX_AOT_BLOCKS {
+        return Err("AOT cache has too many blocks".to_owned());
+    }
     let mut entries = HashMap::with_capacity(count.min(4096));
+    let mut total_bytes = 0usize;
     for _ in 0..count {
         let key = BlockKey {
             address: take_u32(bytes, &mut cursor)?,
@@ -2654,6 +2685,10 @@ fn load_aot(
         let length = take_u32(bytes, &mut cursor)? as usize;
         if length == 0 || length > MAX_EXECUTOR_BYTES {
             return Err("AOT native function length is invalid".to_owned());
+        }
+        total_bytes = total_bytes.saturating_add(length);
+        if total_bytes > MAX_AOT_BYTES {
+            return Err("AOT cache exceeds its byte budget".to_owned());
         }
         if entries
             .insert(key, take(bytes, &mut cursor, length)?.to_vec())
@@ -2842,6 +2877,68 @@ mod tests {
             opcode: 0,
             operands: [const { Operand::Zero }; 8],
         }
+    }
+
+    #[test]
+    fn compiler_does_not_keep_evicted_executable_memory_alive() {
+        let instruction = nop();
+        let mut compiler = NativeCompiler::new().expect("native ISA");
+        let executor = compiler
+            .executor(instruction.address, &[instruction])
+            .unwrap();
+        let weak = Arc::downgrade(&executor);
+        drop(executor);
+        assert!(
+            weak.upgrade().is_none(),
+            "only the trace cache owns executable pages"
+        );
+    }
+
+    #[test]
+    fn disabled_aot_does_not_retain_machine_code_copies() {
+        let instruction = nop();
+        let mut compiler = NativeCompiler::new().expect("native ISA");
+        compiler
+            .executor(instruction.address, &[instruction])
+            .unwrap();
+        assert!(compiler.aot_entries.is_empty());
+    }
+
+    #[test]
+    fn aot_retention_evicts_oldest_payloads_at_the_byte_and_entry_limits() {
+        let mut compiler = NativeCompiler::new().unwrap();
+        for address in 0..=(MAX_AOT_BYTES / MAX_EXECUTOR_BYTES) as u32 {
+            compiler.retain_aot_block(
+                BlockKey {
+                    address,
+                    fingerprint: 0,
+                },
+                vec![0; MAX_EXECUTOR_BYTES],
+            );
+        }
+        assert_eq!(compiler.aot_bytes, MAX_AOT_BYTES);
+        assert!(!compiler.aot_entries.contains_key(&BlockKey {
+            address: 0,
+            fingerprint: 0
+        }));
+        compiler.aot_entries.clear();
+        compiler.aot_order.clear();
+        compiler.aot_bytes = 0;
+        for address in 0..=MAX_AOT_BLOCKS as u32 {
+            compiler.retain_aot_block(
+                BlockKey {
+                    address,
+                    fingerprint: 0,
+                },
+                vec![0],
+            );
+        }
+        assert_eq!(compiler.aot_entries.len(), MAX_AOT_BLOCKS);
+        assert_eq!(compiler.aot_bytes, MAX_AOT_BLOCKS);
+        assert!(!compiler.aot_entries.contains_key(&BlockKey {
+            address: 0,
+            fingerprint: 0
+        }));
     }
 
     fn state_for(memory: &mut [u8], stack: &mut Vec<u8>) -> NativeState {

@@ -2,22 +2,25 @@
 
 [English](glulx-validation.md) | [中文](glulx-validation.ZH.md)
 
-Updated: 2026-09-10. The current implementation is based on `f9c855d` and includes the compatibility, memory, and tooling changes in the current worktree; local validation was run on Linux x86_64. This record describes the current tree. It does not certify exhaustive Glulx, Glk, media, or platform conformance.
+Updated: 2026-10-16. Automated checks cover the fixes after `27738c8` on Linux x86_64 with Rust 1.99.0. Reference-interpreter, GUI, TTY, media and performance evidence below is retained from 2026-09-10 and was not rerun in this update. This record does not certify exhaustive Glulx, Glk, media or platform conformance.
 
 ## Current Verification
 
 ```sh
 RUSTC_WRAPPER= cargo fmt --all -- --check
-RUSTC_WRAPPER= cargo test --all-targets
-RUSTC_WRAPPER= cargo clippy --all-targets -- -D warnings
-RUSTC_WRAPPER= cargo build --release
+RUSTC_WRAPPER= cargo test --locked --all-targets
+RUSTC_WRAPPER= cargo clippy --locked --all-targets -- -D warnings
+RUSTC_WRAPPER= cargo build --locked
 ```
 
 The current checks pass:
 
-- 281 library tests pass; 6 manual performance tests remain ignored.
-- 8 CLI tests pass.
-- Formatting, all-target Clippy, and the release build pass.
+- 323 library tests pass; 17 tests requiring manual benchmarks, local sockets or external stories remain ignored.
+- 10 CLI tests pass.
+- Formatting, all-target Clippy and the debug build pass.
+- Headless pipe/strict-Glk smoke checks pass. A real binary run confirms JSON-selected JIT/AOT and a CLI interpreter override without rewriting settings.
+- Regressions cover UTF-8 log trimming and long-line retention, executable-memory release, trace/AOT byte budgets, bounded translation queues/cache/responses and story-reset cancellation.
+- Branch pushes and PRs now run `.github/workflows/ci.yml`; release checks remain separate.
 - The undo regression proves that a 2 MiB story can retain a one-page undo snapshot under a 1 MiB undo budget; the shared story image is not charged to that snapshot budget.
 - The bounded-page regression rejects dense dirty memory at the page limit before materializing the complete candidate page table.
 - Dispatch tables contain all 150 official Glulx opcodes and all 124 official Glk selectors. Table completeness is not a substitute for semantic coverage.
@@ -37,11 +40,11 @@ python3 tools/benchmark-stories.py \
   --output "<output-dir>/glulx-real-story-baseline.json"
 ```
 
-The real-story measurement is a startup/resident-memory workload, not a complete playthrough. The largest remaining memory costs are the story container, executable image, VM page tables, and media/resource payloads. The repository does not currently use mmap or a block compiler.
+The real-story measurement is a startup/resident-memory workload, not a complete playthrough. The largest remaining memory costs are the story container, executable image, VM page tables, and media/resource payloads. The interpreter remains the default backend; the optional Cranelift ROM-trace JIT and AOT payload caches are bounded. Container loading does not currently use mmap.
 
 The current release measurement recorded peak HWM of `661620 KiB` and `715360 KiB` for representative 650 MB and 705 MB Blorb files. These numbers are machine- and story-dependent and are retained as comparison evidence, not as a universal limit.
 
-The headless profile now retains diagnostic heartbeats in the JSON artifact. In the startup workload, a representative story executed about 2.78 million instructions in the first two-second interval, used about 92 ms of VM-slice time, reached `WaitingForChar`, and reported roughly 2.65 million decoded-cache hits versus 106 thousand misses. This workload does not show VM dispatch as the dominant CPU cost; use a longer scripted playthrough before considering block compilation.
+The headless profile now retains diagnostic heartbeats in the JSON artifact. In the startup workload, a representative story executed about 2.78 million instructions in the first two-second interval, used about 92 ms of VM-slice time, reached `WaitingForChar`, and reported roughly 2.65 million decoded-cache hits versus 106 thousand misses. These interpreter measurements predate the native JIT. Future comparisons should record the backend and use a longer scripted playthrough.
 
 The current Linux release run reports about 8.1 ns per instruction dispatch and 169 microseconds per 16,384-record linear-search iteration. These values depend on the machine and toolchain; they are workload attribution for the current tree, not a cross-engine ranking.
 

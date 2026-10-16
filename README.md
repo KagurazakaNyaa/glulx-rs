@@ -60,7 +60,8 @@ cargo run --release -- --headless --execution-backend jit path/to/story.ulx
 ~~~
 
 In the graphical player, the execution backend is persistent under Settings.
-An explicit command-line backend overrides the saved setting for that run.
+Both graphical and headless runs read the saved backend; an explicit command-line
+backend overrides it for that run.
 
 The AOT cache is opt-in. Set aot_cache_dir to an explicit writable directory
 in glulx-settings.json; AOT is active only when the JIT backend is selected
@@ -74,7 +75,13 @@ and the setting is non-empty. An empty setting never creates an AOT cache:
 ~~~
 
 For headless runs, `--aot-cache-dir <aot-cache-dir>` supplies the same
-run-scoped override. AOT is used only together with `--execution-backend jit`.
+run-scoped override. AOT requires the JIT backend, selected through JSON or the CLI.
+
+The JIT trace cache retains at most 4096 blocks and 64 MiB of decoded instructions
+and machine-code payloads. Eviction releases executable memory. Enabled AOT retains
+a separate maximum of 4096 blocks and 64 MiB of code payloads; disabled AOT retains
+no code copies. These budgets exclude cache metadata, OS page rounding and temporary
+compiler allocations. `/debug/metrics` reports `jit_cache_bytes` for trace payloads.
 
 Headless playback can optionally write the events actually delivered to the story:
 
@@ -302,6 +309,14 @@ shown directly; older views are under a collapsed History control. Output append
 to the current view until the game clears its text buffer. Identical redraws do
 not add duplicate history, and text cleared before submission is discarded.
 
+Translation accepts up to 32 queued requests and 128 pending turn subscribers,
+with an 8 MiB pending-payload budget. The LRU result cache retains up to 256 entries
+and 8 MiB of keys/results. Sources are limited to 1 MiB and HTTP responses to 4 MiB;
+exceeding a limit displays an error for that turn. Opening or restarting a story
+clears its translation queue and cache. An HTTP request already sent may occupy
+the worker until it returns or reaches its 30-second timeout; its old result is
+discarded. These limits cover translation work/cache, separately from displayed history.
+
 Configure the endpoint, model identifier, prompts, and sampling parameters for
 any model served through a compatible Chat Completions API, including HY-MT2,
 DeepSeek, and GPT models. Follow the selected model's supported roles and
@@ -321,7 +336,9 @@ settings and are never embedded in release artifacts.
 
 ## Build And Test
 
-Building from source requires Rust 1.95 or newer. CI uses the latest stable Rust;
+Building from source requires Rust 1.95 or newer. Branch pushes and pull requests
+run formatting, tests, Clippy, Python syntax and headless smoke checks on Linux.
+CI uses the latest stable Rust;
 Cargo.toml declares compatible major/minor ranges and Cargo.lock records the exact
 validated versions. Runner and GitHub Action choices are explained inline in
 [the release workflow](.github/workflows/release.yml).

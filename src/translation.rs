@@ -1,7 +1,13 @@
 use std::{
-    collections::HashMap,
-    sync::mpsc::{self, Receiver, Sender},
+    collections::{HashMap, VecDeque},
+    io::Read,
+    sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicU64, Ordering},
+        mpsc::{self, Receiver, SyncSender},
+    },
     thread,
+    time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
@@ -62,6 +68,7 @@ pub struct TranslationResult {
 pub enum Submission {
     Cached(String),
     Queued(u64),
+    Rejected(String),
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -83,53 +90,217 @@ impl TranslationKey {
     }
 }
 
+const REQUEST_QUEUE_CAPACITY: usize = 32;
+const MAX_PENDING_TURNS: usize = 128;
+const MAX_PENDING_BYTES: usize = 8 * 1024 * 1024;
+const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_CACHE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_CACHE_ENTRIES: usize = 256;
+
+impl TranslationKey {
+    fn byte_len(&self) -> usize {
+        self.text.len() + self.endpoint.len() + self.api_key.len() + self.body.len()
+    }
+
+    fn pending_bytes(&self) -> usize {
+        // Two retained keys plus the worker's source/configuration/request body.
+        self.byte_len().saturating_mul(3)
+    }
+}
+
+#[derive(Default)]
+struct TranslationCache {
+    entries: HashMap<TranslationKey, (String, u64)>,
+    bytes: usize,
+    clock: u64,
+}
+
+impl TranslationCache {
+    fn get(&mut self, key: &TranslationKey) -> Option<String> {
+        let (value, used) = self.entries.get_mut(key)?;
+        self.clock = self.clock.wrapping_add(1);
+        *used = self.clock;
+        Some(value.clone())
+    }
+
+    fn insert(&mut self, key: TranslationKey, value: String) {
+        let bytes = key.byte_len().saturating_add(value.len());
+        if bytes > MAX_CACHE_BYTES {
+            return;
+        }
+        if let Some((old, _)) = self.entries.remove(&key) {
+            self.bytes -= key.byte_len() + old.len();
+        }
+        while self.entries.len() >= MAX_CACHE_ENTRIES || self.bytes + bytes > MAX_CACHE_BYTES {
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, (_, used))| *used)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            if let Some((old, _)) = self.entries.remove(&oldest) {
+                self.bytes -= oldest.byte_len() + old.len();
+            }
+        }
+        self.clock = self.clock.wrapping_add(1);
+        self.entries.insert(key, (value, self.clock));
+        self.bytes += bytes;
+    }
+}
+
+struct QueuedRequest {
+    request: Request,
+    generation: u64,
+}
+
+#[derive(Default)]
+struct QueueState {
+    requests: VecDeque<QueuedRequest>,
+    closed: bool,
+}
+
+#[derive(Default)]
+struct RequestQueue {
+    state: Mutex<QueueState>,
+    changed: Condvar,
+    generation: AtomicU64,
+}
+
+impl RequestQueue {
+    fn push(&self, request: Request) -> Result<(), String> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.closed {
+            return Err("translation worker is unavailable".into());
+        }
+        if state.requests.len() >= REQUEST_QUEUE_CAPACITY {
+            return Err("translation queue is full; wait for pending translations".into());
+        }
+        state.requests.push_back(QueuedRequest {
+            request,
+            generation: self.generation.load(Ordering::Acquire),
+        });
+        self.changed.notify_one();
+        Ok(())
+    }
+
+    fn receive(&self) -> Option<QueuedRequest> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        loop {
+            if state.closed {
+                return None;
+            }
+            if let Some(request) = state.requests.pop_front() {
+                return Some(request);
+            }
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+    }
+
+    fn reset(&self, close: bool) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        state.requests.clear();
+        state.closed |= close;
+        self.changed.notify_all();
+    }
+
+    fn is_current(&self, generation: u64) -> bool {
+        self.generation.load(Ordering::Acquire) == generation
+    }
+}
+
 pub struct Translator {
-    requests: Sender<Request>,
+    requests: Arc<RequestQueue>,
     results: Receiver<TranslationResult>,
-    cache: HashMap<TranslationKey, String>,
+    cache: TranslationCache,
     in_flight: HashMap<TranslationKey, Vec<u64>>,
     pending: HashMap<u64, TranslationKey>,
+    pending_turns: usize,
+    pending_bytes: usize,
     next_id: u64,
 }
 
 impl Translator {
     pub fn new() -> Self {
-        let (request_tx, request_rx) = mpsc::channel::<Request>();
-        let (result_tx, result_rx) = mpsc::channel();
-        thread::Builder::new()
+        let requests = Arc::new(RequestQueue::default());
+        let (result_tx, result_rx) = mpsc::sync_channel(4);
+        let queue = Arc::clone(&requests);
+        if thread::Builder::new()
             .name("glulx-translation".to_owned())
-            .spawn(move || translation_worker(request_rx, result_tx))
-            .expect("translation worker thread");
+            .spawn(move || translation_worker(queue, result_tx))
+            .is_err()
+        {
+            requests.reset(true);
+        }
+        Self::with_queue(requests, result_rx)
+    }
+
+    fn with_queue(requests: Arc<RequestQueue>, results: Receiver<TranslationResult>) -> Self {
         Self {
-            requests: request_tx,
-            results: result_rx,
-            cache: HashMap::new(),
+            requests,
+            results,
+            cache: TranslationCache::default(),
             in_flight: HashMap::new(),
             pending: HashMap::new(),
+            pending_turns: 0,
+            pending_bytes: 0,
             next_id: 1,
         }
     }
 
+    /// Discard a previous story's queued work and cache. An HTTP call already
+    /// sent may finish within its timeout; its result is ignored.
+    pub fn reset(&mut self) {
+        self.requests.reset(false);
+        self.cache = TranslationCache::default();
+        self.in_flight.clear();
+        self.pending.clear();
+        self.pending_turns = 0;
+        self.pending_bytes = 0;
+        while self.results.try_recv().is_ok() {}
+    }
+
     pub fn submit(&mut self, text: String, settings: &TranslationSettings) -> Submission {
+        if text.len() > MAX_REQUEST_BYTES {
+            return Submission::Rejected("translation source exceeds the 1 MiB limit".into());
+        }
         let key = TranslationKey::new(text, settings);
         if let Some(translation) = self.cache.get(&key) {
-            return Submission::Cached(translation.clone());
+            return Submission::Cached(translation);
+        }
+        if self.pending_turns >= MAX_PENDING_TURNS {
+            return Submission::Rejected("too many pending translation turns".into());
         }
         let id = self.next_id;
-        self.next_id += 1;
+        self.next_id = self.next_id.wrapping_add(1);
         // Each turn keeps its own ID even when it shares another turn's request.
         if let Some(subscribers) = self.in_flight.get_mut(&key) {
             subscribers.push(id);
+            self.pending_turns += 1;
             return Submission::Queued(id);
+        }
+        let bytes = key.pending_bytes();
+        if self.pending_bytes.saturating_add(bytes) > MAX_PENDING_BYTES {
+            return Submission::Rejected("pending translations exceed the 8 MiB budget".into());
         }
         let request = Request {
             id,
             text: key.text.clone(),
             settings: settings.clone(),
         };
+        if let Err(error) = self.requests.push(request) {
+            return Submission::Rejected(error);
+        }
+        self.pending_turns += 1;
+        self.pending_bytes += bytes;
         self.in_flight.insert(key.clone(), vec![id]);
         self.pending.insert(id, key);
-        let _ = self.requests.send(request);
         Submission::Queued(id)
     }
 
@@ -140,6 +311,8 @@ impl Translator {
                 continue;
             };
             let subscribers = self.in_flight.remove(&key).unwrap_or_default();
+            self.pending_turns -= subscribers.len();
+            self.pending_bytes -= key.pending_bytes();
             if let Ok(translation) = &result.result {
                 self.cache.insert(key, translation.clone());
             }
@@ -155,24 +328,43 @@ impl Translator {
     }
 }
 
+impl Drop for Translator {
+    fn drop(&mut self) {
+        self.requests.reset(true);
+    }
+}
+
 impl Default for Translator {
     fn default() -> Self {
         Self::new()
     }
 }
 
-fn translation_worker(requests: Receiver<Request>, results: Sender<TranslationResult>) {
-    let client = reqwest::blocking::Client::builder().build();
-    while let Ok(request) = requests.recv() {
+fn translation_worker(requests: Arc<RequestQueue>, results: SyncSender<TranslationResult>) {
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
+        .build();
+    while let Some(queued) = requests.receive() {
+        if !requests.is_current(queued.generation) {
+            continue;
+        }
+        let request = queued.request;
         let result = match &client {
             Ok(client) => translate(client, &request),
             Err(error) => Err(format!("cannot create HTTP client: {error}")),
         };
-        let _ = results.send(TranslationResult {
-            id: request.id,
-            source: request.text,
-            result,
-        });
+        if requests.is_current(queued.generation)
+            && results
+                .send(TranslationResult {
+                    id: request.id,
+                    source: request.text,
+                    result,
+                })
+                .is_err()
+        {
+            break;
+        }
     }
 }
 
@@ -187,8 +379,19 @@ fn translate(client: &reqwest::blocking::Client, request: &Request) -> Result<St
         .map_err(|error| format!("translation request failed: {error}"))?
         .error_for_status()
         .map_err(|error| format!("translation server rejected the request: {error}"))?;
-    let value: serde_json::Value = response
-        .json()
+    parse_http_response(response)
+}
+
+fn parse_http_response(response: impl Read) -> Result<String, String> {
+    let mut bytes = Vec::new();
+    response
+        .take(MAX_RESPONSE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("invalid translation response: {error}"))?;
+    if bytes.len() > MAX_RESPONSE_BYTES {
+        return Err("translation response exceeds the 4 MiB limit".into());
+    }
+    let value = serde_json::from_slice(&bytes)
         .map_err(|error| format!("invalid translation response: {error}"))?;
     parse_response(&value)
 }
@@ -252,25 +455,150 @@ fn parse_response(value: &serde_json::Value) -> Result<String, String> {
 mod tests {
     use super::*;
 
-    fn translator_channels() -> (Translator, Receiver<Request>, Sender<TranslationResult>) {
-        let (request_tx, request_rx) = mpsc::channel();
+    struct TestRequests(Arc<RequestQueue>);
+
+    impl TestRequests {
+        fn try_recv(&self) -> Result<Request, mpsc::TryRecvError> {
+            self.0
+                .state
+                .lock()
+                .unwrap()
+                .requests
+                .pop_front()
+                .map(|queued| queued.request)
+                .ok_or(mpsc::TryRecvError::Empty)
+        }
+    }
+
+    fn translator_channels() -> (Translator, TestRequests, mpsc::Sender<TranslationResult>) {
+        let requests = Arc::new(RequestQueue::default());
         let (result_tx, result_rx) = mpsc::channel();
-        let translator = Translator {
-            requests: request_tx,
-            results: result_rx,
-            cache: HashMap::new(),
-            in_flight: HashMap::new(),
-            pending: HashMap::new(),
-            next_id: 1,
-        };
-        (translator, request_rx, result_tx)
+        let translator = Translator::with_queue(Arc::clone(&requests), result_rx);
+        (translator, TestRequests(requests), result_tx)
     }
 
     fn queued_id(submission: Submission) -> u64 {
         match submission {
             Submission::Queued(id) => id,
-            Submission::Cached(_) => panic!("expected a queued translation"),
+            Submission::Cached(_) | Submission::Rejected(_) => {
+                panic!("expected a queued translation")
+            }
         }
+    }
+
+    #[test]
+    fn translation_queue_rejects_excess_work() {
+        let (mut translator, _requests, _) = translator_channels();
+        let settings = TranslationSettings::default();
+        for index in 0..32 {
+            queued_id(translator.submit(format!("Turn {index}"), &settings));
+        }
+        assert!(!matches!(
+            translator.submit("overflow".into(), &settings),
+            Submission::Queued(_)
+        ));
+        assert_eq!(translator.pending.len(), REQUEST_QUEUE_CAPACITY);
+        assert_eq!(translator.pending_turns, REQUEST_QUEUE_CAPACITY);
+    }
+
+    #[test]
+    fn reset_removes_old_queued_work_and_ignores_in_flight_results() {
+        let (mut translator, requests, results) = translator_channels();
+        let settings = TranslationSettings::default();
+        let old_id = queued_id(translator.submit("old in flight".into(), &settings));
+        let old = requests.0.receive().unwrap();
+        queued_id(translator.submit("old queued".into(), &settings));
+        translator.reset();
+        assert!(!requests.0.is_current(old.generation));
+        assert!(requests.try_recv().is_err());
+        assert_eq!((translator.pending_turns, translator.pending_bytes), (0, 0));
+        let new_id = queued_id(translator.submit("new story".into(), &settings));
+        assert_ne!(old_id, new_id);
+        let new = requests.0.receive().unwrap();
+        assert!(requests.0.is_current(new.generation));
+        assert_eq!(new.request.text, "new story");
+        for (id, source) in [(old_id, "old in flight"), (new_id, "new story")] {
+            results
+                .send(TranslationResult {
+                    id,
+                    source: source.into(),
+                    result: Ok(source.into()),
+                })
+                .unwrap();
+        }
+        let ready = translator.poll();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].id, new_id);
+        assert_eq!(translator.cache.entries.len(), 1);
+        translator.reset();
+        assert!(translator.cache.entries.is_empty());
+    }
+
+    #[test]
+    fn translation_budgets_cover_payloads_and_duplicate_subscribers() {
+        let (mut translator, requests, _) = translator_channels();
+        let settings = TranslationSettings::default();
+        assert!(matches!(
+            translator.submit("x".repeat(MAX_REQUEST_BYTES + 1), &settings),
+            Submission::Rejected(_)
+        ));
+        assert!(requests.try_recv().is_err());
+        for index in 0..REQUEST_QUEUE_CAPACITY {
+            let text = format!("{index}{}", "x".repeat(128 * 1024));
+            if matches!(translator.submit(text, &settings), Submission::Rejected(_)) {
+                break;
+            }
+        }
+        assert!(translator.pending.len() < REQUEST_QUEUE_CAPACITY);
+        assert!(translator.pending_bytes <= MAX_PENDING_BYTES);
+        translator.reset();
+        for _ in 0..MAX_PENDING_TURNS {
+            queued_id(translator.submit("same".into(), &settings));
+        }
+        assert!(matches!(
+            translator.submit("same".into(), &settings),
+            Submission::Rejected(_)
+        ));
+        assert_eq!(requests.0.state.lock().unwrap().requests.len(), 1);
+        requests.0.reset(true);
+        translator.reset();
+        assert!(matches!(
+            translator.submit("worker unavailable".into(), &settings),
+            Submission::Rejected(_)
+        ));
+        assert!(translator.pending.is_empty());
+    }
+
+    #[test]
+    fn translation_cache_evicts_by_usage_and_payload_bytes() {
+        let settings = TranslationSettings::default();
+        let key = |index| TranslationKey::new(format!("Turn {index}"), &settings);
+        let mut cache = TranslationCache::default();
+        for index in 0..MAX_CACHE_ENTRIES {
+            cache.insert(key(index), "translated".into());
+        }
+        assert!(cache.get(&key(0)).is_some());
+        cache.insert(key(MAX_CACHE_ENTRIES), "next".into());
+        assert!(cache.get(&key(0)).is_some());
+        assert!(cache.get(&key(1)).is_none());
+        for index in 0..3 {
+            cache.insert(key(index), "x".repeat(MAX_CACHE_BYTES / 2));
+            assert!(cache.bytes <= MAX_CACHE_BYTES);
+        }
+        assert_eq!(cache.entries.len(), 1);
+        assert!(cache.get(&key(2)).is_some());
+    }
+
+    #[test]
+    fn oversized_http_responses_fail_before_json_parsing() {
+        let response = std::io::repeat(b' ').take(MAX_RESPONSE_BYTES as u64 + 1);
+        assert_eq!(
+            parse_http_response(response).unwrap_err(),
+            "translation response exceeds the 4 MiB limit"
+        );
+        let response =
+            std::io::Cursor::new(br#"{"choices":[{"message":{"content":"translated"}}]}"#);
+        assert_eq!(parse_http_response(response).unwrap(), "translated");
     }
 
     #[test]
